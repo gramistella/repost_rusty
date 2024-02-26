@@ -1,0 +1,5 @@
+/target
+.idea
+/db/prod.db
+/db/dev.db
+credentials.yaml

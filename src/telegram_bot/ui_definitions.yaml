@@ -1,0 +1,23 @@
+buttons:
+  turn_on: "🟢  Turn on"
+  turn_off: "🔴  Turn off"
+  adjust_posting_interval: "📆️  Adjust posting interval"
+  adjust_random_interval: "🎲  Adjust random interval"
+  adjust_rejected_content_lifespan: "🗑️⏳  Adjust rejected content lifespan"
+  adjust_posted_content_lifespan: "📜⏳️  Adjust posted content lifespan"
+  accept: "👍  Accept"
+  reject: "👎  Reject"
+  go_back: "⬅️  Go back"
+  undo: "↩️  Undo"
+  edit: "✏️ Edit"
+  edit_caption: "✏️ Edit caption"
+  edit_hashtags: "✏️ Edit hashtags"
+  remove_from_view: "❌  Remove"
+  remove_from_queue: "❌  Remove from queue"
+
+labels:
+  settings_title: "⚙️  Settings  🔧\n\n🕒"
+  accepted_caption: "✅  Accepted"
+  rejected_caption: "👎  Rejected"
+  posted_video_caption: "📬  Posted"
+  queued_video_caption: "⏳  Queued"
