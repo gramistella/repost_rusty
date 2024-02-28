@@ -77,7 +77,8 @@ pub(crate) async fn run_bot(mut rx: Receiver<(String, String, String, String)>, 
                     if tx.does_content_exist_with_shortcode(original_shortcode.clone()) == false {
 
                         let re = regex::Regex::new(r"#\w+").unwrap();
-                        let hashtags: Vec<&str> = re.find_iter(&received_caption.clone()).map(|mat| mat.as_str()).collect();
+                        let cloned_caption = received_caption.clone();
+                        let hashtags: Vec<&str> = re.find_iter(&cloned_caption).map(|mat| mat.as_str()).collect();
                         let hashtags = hashtags.join(" ");
 
                         let caption = re.replace_all(&received_caption.clone(), "").to_string();
