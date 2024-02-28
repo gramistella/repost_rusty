@@ -1,4 +1,4 @@
-use crate::telegram_bot::commands::display_settings_message;
+use crate::telegram_bot::commands::{display_settings_message, restore_sent_messages};
 use crate::telegram_bot::helpers::{clear_sent_messages, expire_rejected_content};
 use crate::telegram_bot::{send_videos, BotDialogue, HandlerResult, State, UIDefinitions};
 use crate::database::{Database, RejectedContent, UserSettings, VideoInfo};
@@ -341,14 +341,8 @@ pub async fn handle_edit_view(
 
         // Clear the sent messages, from message_id to the latest message
         bot.delete_message(chat_id, q.message.unwrap().id).await?;
-        send_videos(
-            bot.clone(),
-            dialogue.clone(),
-            execution_mutex,
-            database,
-            ui_definitions,
-        )
-        .await?;
+        restore_sent_messages(bot.clone(), dialogue.clone(), database.clone(), execution_mutex.clone(), ui_definitions.clone())
+            .await?;
 
         dialogue.update(State::ScrapeView).await.unwrap();
         return Ok(());

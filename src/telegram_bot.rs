@@ -104,6 +104,7 @@ async fn receive_videos(
         if let Some((received_url, received_caption, original_author, original_shortcode)) =
             rx.recv().await
         {
+            // This if statement is not actually needed in production since the scraper will not send the same video twice
             if tx.does_content_exist_with_shortcode(original_shortcode.clone()) == false {
                 let re = regex::Regex::new(r"#\w+").unwrap();
                 let cloned_caption = received_caption.clone();
@@ -146,7 +147,7 @@ async fn receive_videos(
                 database.clone(),
                 config.clone(),
             )
-            .await
+                .await
             {
                 Ok(..) => {
                     //println!("Video sent successfully")
@@ -312,7 +313,7 @@ async fn send_videos(
                     let posted_video_caption =
                         ui_definitions.labels.get("posted_video_caption").unwrap();
                     full_video_caption = format!(
-                        "{}\n\n{} at {}\nWill expire at {}",
+                        "{}\n\n{} at {}\n  Will expire at {}",
                         full_video_caption,
                         posted_video_caption,
                         formatted_datetime,
@@ -351,7 +352,7 @@ async fn send_videos(
                     let posted_video_caption =
                         ui_definitions.labels.get("posted_video_caption").unwrap();
                     full_video_caption = format!(
-                        "{}\n\n{} at {}\nWill expire at {}",
+                        "{}\n\n{} at {}\n  Will expire at {}",
                         full_video_caption,
                         posted_video_caption,
                         formatted_datetime,
