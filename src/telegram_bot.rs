@@ -23,10 +23,11 @@ use tokio::time::sleep;
 
 use crate::telegram_bot::helpers::{expire_posted_content, expire_rejected_content};
 use crate::telegram_bot::state::{schema, State};
-use crate::utils::{Database, PostedContent, VideoInfo};
+use crate::database::{Database, PostedContent, VideoInfo};
 use indexmap::IndexMap;
 
 use tokio::sync::Mutex;
+use crate::utils::now_in_my_timezone;
 
 type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
 
@@ -129,7 +130,8 @@ async fn receive_videos(
                 };
 
                 let mut tx = database.begin_transaction().unwrap();
-                let message_id = tx.get_temp_message_id();
+                let user_settings = tx.load_user_settings().unwrap();
+                let message_id = tx.get_temp_message_id(user_settings);
                 let video_mapping: IndexMap<MessageId, VideoInfo> =
                     IndexMap::from([(MessageId(message_id), video.clone())]);
 
@@ -200,7 +202,6 @@ async fn send_videos(
             }
 
             if video.status == "posted_shown" {
-                let mut tx = database.begin_transaction().unwrap();
                 let posted_content_list = tx.load_posted_content().unwrap();
                 for posted_content in posted_content_list {
                     if posted_content.url == video.url {
@@ -214,7 +215,8 @@ async fn send_videos(
                             ))
                             .unwrap();
 
-                        if will_expire_at < chrono::Utc::now() {
+                        let user_settings = tx.load_user_settings().unwrap();
+                        if will_expire_at < now_in_my_timezone(user_settings.clone()) {
                             expire_posted_content(
                                 &bot,
                                 ui_definitions.clone(),
@@ -230,7 +232,6 @@ async fn send_videos(
             }
 
             if video.status == "rejected_shown" {
-                let mut tx = database.begin_transaction().unwrap();
                 let posted_content_list = tx.load_rejected_content().unwrap();
                 for posted_content in posted_content_list {
                     if posted_content.url == video.url {
@@ -244,7 +245,8 @@ async fn send_videos(
                             ))
                             .unwrap();
 
-                        if will_expire_at < chrono::Utc::now() {
+                        let user_settings = tx.load_user_settings().unwrap();
+                        if will_expire_at < now_in_my_timezone(user_settings.clone()) {
                             expire_rejected_content(
                                 &bot,
                                 ui_definitions.clone(),
@@ -276,7 +278,6 @@ async fn send_videos(
 
             if video.status == "posted_hidden" {
                 video.status = "posted_shown".to_string();
-                let mut tx = database.begin_transaction().unwrap();
                 let queue = tx.load_post_queue().unwrap();
 
                 let mut queue_element = None;
@@ -318,6 +319,7 @@ async fn send_videos(
                         will_expire_at
                     );
                 } else {
+                    let user_settings = tx.load_user_settings().unwrap();
                     let posted_content = PostedContent {
                         url: queue_element.clone().unwrap().url.clone(),
                         caption: queue_element.clone().unwrap().caption.clone(),
@@ -328,12 +330,11 @@ async fn send_videos(
                             .unwrap()
                             .original_shortcode
                             .clone(),
-                        posted_at: chrono::Utc::now().to_rfc3339(),
+                        posted_at: now_in_my_timezone(user_settings).to_rfc3339(),
                         expired: false,
                     };
 
                     // The matching QueuedPost will be cleared by save_posted_content
-                    let mut tx = database.begin_transaction().unwrap();
                     tx.save_posted_content(posted_content.clone()).unwrap();
 
                     let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
@@ -377,7 +378,6 @@ async fn send_videos(
 
                         let video_mapping: IndexMap<MessageId, VideoInfo> =
                             IndexMap::from([(message_id, video.clone())]);
-                        let mut tx = database.begin_transaction().unwrap();
                         tx.save_video_info(video_mapping).unwrap();
                     }
                     Err(_) => {
@@ -401,7 +401,6 @@ async fn send_videos(
                         let video_mapping: IndexMap<MessageId, VideoInfo> =
                             IndexMap::from([(video_message.id, video.clone())]);
 
-                        let mut tx = database.begin_transaction().unwrap();
                         tx.save_video_info(video_mapping).unwrap();
                     }
                 }
@@ -411,7 +410,6 @@ async fn send_videos(
             if video.status == "queued_hidden" {
                 video.status = "queued_shown".to_string();
 
-                let mut tx = database.begin_transaction().unwrap();
                 let queue = tx.load_post_queue().unwrap();
 
                 let mut queued_post = None;
@@ -450,7 +448,6 @@ async fn send_videos(
 
                         let video_mapping: IndexMap<MessageId, VideoInfo> =
                             IndexMap::from([(message_id, video.clone())]);
-                        let mut tx = database.begin_transaction().unwrap();
                         tx.save_video_info(video_mapping).unwrap();
                     }
                     Err(_) => {
@@ -474,7 +471,6 @@ async fn send_videos(
                         let video_mapping: IndexMap<MessageId, VideoInfo> =
                             IndexMap::from([(video_message.id, video.clone())]);
 
-                        let mut tx = database.begin_transaction().unwrap();
                         tx.save_video_info(video_mapping).unwrap();
                     }
                 }
@@ -484,6 +480,7 @@ async fn send_videos(
 
             if video.status == "rejected_hidden" {
                 video.status = "rejected_shown".to_string();
+
                 let _did_expire = expire_rejected_content(
                     &bot,
                     ui_definitions.clone(),
@@ -498,6 +495,7 @@ async fn send_videos(
 
             if video.status == "posted_hidden" {
                 video.status = "posted_shown".to_string();
+
                 let _did_expire = expire_posted_content(
                     &bot,
                     ui_definitions.clone(),
@@ -648,7 +646,6 @@ async fn send_videos(
             //println!("Sent message to telegram with ID: {}", sent_message_id);
             let video_mapping: IndexMap<MessageId, VideoInfo> =
                 IndexMap::from([(sent_message_id, video.clone())]);
-            let mut tx = database.begin_transaction().unwrap();
             tx.save_video_info(video_mapping).unwrap();
             // NOTE
             //sleep(Duration::from_millis(250)).await;

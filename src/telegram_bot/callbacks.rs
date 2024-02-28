@@ -1,13 +1,14 @@
 use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::helpers::{clear_sent_messages, expire_rejected_content};
 use crate::telegram_bot::{send_videos, BotDialogue, HandlerResult, State, UIDefinitions};
-use crate::utils::{Database, RejectedContent, VideoInfo};
+use crate::database::{Database, RejectedContent, UserSettings, VideoInfo};
 use indexmap::IndexMap;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
 use tokio::sync::Mutex;
+use crate::utils::now_in_my_timezone;
 
 pub async fn handle_accepted_view(
     bot: Bot,
@@ -60,6 +61,7 @@ pub async fn handle_rejected_view(
     q: CallbackQuery,
     database: Database,
     ui_definitions: UIDefinitions,
+    user_settings: UserSettings
 ) -> HandlerResult {
     let _chat_id = q.message.clone().unwrap().chat.id;
 
@@ -80,7 +82,7 @@ pub async fn handle_rejected_view(
         hashtags: video_info.hashtags.clone(),
         original_author: video_info.original_author.clone(),
         original_shortcode: video_info.original_shortcode.clone(),
-        rejected_at: chrono::Utc::now().to_rfc3339(),
+        rejected_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
         expired: false,
     };
 
@@ -189,7 +191,9 @@ pub async fn handle_video_action(
             handle_accepted_view(bot, dialogue, q, database, ui_definitions).await?;
         } else if action == "reject" {
             dialogue.update(State::RejectedView).await.unwrap();
-            handle_rejected_view(bot, dialogue, q, database, ui_definitions).await?;
+            let mut tx = database.begin_transaction().unwrap();
+            let user_settings = tx.load_user_settings().unwrap();
+            handle_rejected_view(bot, dialogue, q, database, ui_definitions, user_settings).await?;
         } else if action == "edit" {
             dialogue
                 .update(State::EditView {

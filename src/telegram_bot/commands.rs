@@ -1,6 +1,6 @@
 use crate::telegram_bot::helpers::clear_sent_messages;
 use crate::telegram_bot::{send_videos, BotDialogue, HandlerResult, State, UIDefinitions, CHAT_ID};
-use crate::utils::Database;
+use crate::database::Database;
 use std::error::Error;
 use std::sync::Arc;
 use teloxide::payloads::EditMessageReplyMarkupSetters;
@@ -9,6 +9,7 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::command::BotCommands;
 use teloxide::Bot;
 use tokio::sync::Mutex;
+use crate::utils::now_in_my_timezone;
 
 /// These commands are supported:
 #[derive(BotCommands, Clone)]
@@ -106,8 +107,16 @@ pub async fn display_settings_message(
     }
 
     let settings_title_text = ui_definitions.labels.get("settings_title").unwrap();
-    let current_time = chrono::Utc::now().format("%H:%M %m-%d").to_string();
-    let settings_message_string = format!("{}  {}\n\nPosting is currently {}.\nInterval between posts is {} minutes.\nRandom interval is ±{} minutes\nRejected content expires after {} minutes\nPosted content expires after {} minutes\n\nWhat would you like to change?", settings_title_text, current_time, posting_status, user_settings.posting_interval, user_settings.random_interval_variance, user_settings.rejected_content_lifespan, user_settings.posted_content_lifespan);
+    let current_time = now_in_my_timezone(user_settings.clone()).format("%H:%M %m-%d").to_string();
+    let timezone_offset = user_settings.timezone_offset.clone();
+    let utc_string = if timezone_offset > 0 {
+        format!("UTC+{}", timezone_offset)
+    } else if timezone_offset < 0 {
+        format!("UTC{}", timezone_offset)
+    } else {
+        "UTC".to_string()
+    };
+    let settings_message_string = format!("{}  {} {}\n\nPosting is currently {}.\nInterval between posts is {} minutes.\nRandom interval is ±{} minutes\nRejected content expires after {} minutes\nPosted content expires after {} minutes\n\nWhat would you like to change?", settings_title_text, current_time, utc_string, posting_status, user_settings.posting_interval, user_settings.random_interval_variance, user_settings.rejected_content_lifespan, user_settings.posted_content_lifespan);
 
     let settings_message = bot.send_message(CHAT_ID, settings_message_string).await?;
 

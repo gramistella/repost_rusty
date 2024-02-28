@@ -1,5 +1,5 @@
 use crate::telegram_bot::{UIDefinitions, CHAT_ID};
-use crate::utils::{Database, DatabaseTransaction, VideoInfo};
+use crate::database::{Database, DatabaseTransaction, VideoInfo};
 use chrono::DateTime;
 use indexmap::IndexMap;
 use std::error::Error;
@@ -10,6 +10,7 @@ use teloxide::payloads::{
 use teloxide::prelude::Requester;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId};
 use teloxide::Bot;
+use crate::utils::now_in_my_timezone;
 
 pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Result<()> {
     // Load the video mappings
@@ -104,7 +105,7 @@ pub async fn expire_rejected_content(
     let user_settings = tx.load_user_settings()?;
     let expiry_duration =
         Duration::from_secs((user_settings.rejected_content_lifespan * 60) as u64);
-    let now = chrono::Utc::now();
+    let now = now_in_my_timezone(user_settings);
 
     for mut content in rejected_content {
         let datetime = DateTime::parse_from_rfc3339(&content.rejected_at)?;
@@ -203,7 +204,7 @@ pub async fn expire_posted_content(
 
     let user_settings = tx.load_user_settings()?;
     let expiry_duration = Duration::from_secs((user_settings.posted_content_lifespan * 60) as u64);
-    let now = chrono::Utc::now();
+    let now = now_in_my_timezone(user_settings);
 
     for mut content in posted_content {
         let datetime = DateTime::parse_from_rfc3339(&content.posted_at)?;

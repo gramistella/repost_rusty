@@ -1,6 +1,6 @@
 use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions};
-use crate::utils::Database;
+use crate::database::Database;
 use indexmap::IndexMap;
 use regex::Regex;
 use teloxide::payloads::SendMessageSetters;

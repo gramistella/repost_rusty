@@ -1,4 +1,4 @@
-use crate::utils::{Database, PostedContent, QueuedPost};
+use crate::database::{Database, PostedContent, QueuedPost};
 use chrono::DateTime;
 use indexmap::IndexMap;
 use instagram_scraper_rs::{InstagramScraper, Post, User};
@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+use crate::utils::now_in_my_timezone;
 
 pub async fn run_scraper(
     tx: Sender<(String, String, String, String)>,
@@ -242,14 +243,11 @@ pub async fn run_scraper(
             //let queued_posts = Vec::new();
             for (message_id, mut video_info) in video_mapping {
                 if video_info.status.contains("accepted_") {
-                    let random_variance_seconds =
-                        chrono::Duration::seconds(user_settings.random_interval_variance * 60);
-                    let posting_interval_seconds =
-                        chrono::Duration::seconds(user_settings.posting_interval * 60);
+
 
                     let mut tx = database.begin_transaction().unwrap();
                     let will_post_at = tx
-                        .get_new_post_time(posting_interval_seconds, random_variance_seconds)
+                        .get_new_post_time(user_settings.clone())
                         .unwrap();
                     let new_queued_post = QueuedPost {
                         url: video_info.url.clone(),
@@ -271,7 +269,7 @@ pub async fn run_scraper(
                     let queued_posts = tx.load_post_queue().unwrap();
                     for mut queued_post in queued_posts {
                         if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap()
-                            < chrono::Utc::now()
+                            < now_in_my_timezone(user_settings.clone())
                         {
                             if user_settings.can_post {
                                 if !is_offline {
@@ -312,19 +310,15 @@ pub async fn run_scraper(
                                     hashtags: queued_post.hashtags.clone(),
                                     original_author: queued_post.original_author.clone(),
                                     original_shortcode: queued_post.original_shortcode.clone(),
-                                    posted_at: chrono::Utc::now().to_rfc3339(),
+                                    posted_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
                                     expired: false,
                                 };
 
                                 tx.save_posted_content(posted_content).unwrap();
                             } else {
-                                let posting_interval =
-                                    chrono::Duration::seconds(user_settings.posting_interval * 60);
-                                let random_interval = chrono::Duration::seconds(
-                                    user_settings.random_interval_variance * 60,
-                                );
+
                                 let new_will_post_at = tx
-                                    .get_new_post_time(posting_interval, random_interval)
+                                    .get_new_post_time(user_settings.clone())
                                     .unwrap();
                                 queued_post.will_post_at = new_will_post_at;
                                 tx.save_post_queue(queued_post.clone()).unwrap();
