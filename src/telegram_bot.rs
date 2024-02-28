@@ -4,13 +4,11 @@ mod messages;
 mod helpers;
 mod state;
 
-use chrono::{DateTime, Timelike};
+use chrono::{DateTime};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs::File;
-use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::types::{InputFile, MessageId};
@@ -18,7 +16,6 @@ use teloxide::{
     dispatching::dialogue::InMemStorage,
     prelude::*,
     types::{InlineKeyboardButton, InlineKeyboardMarkup},
-    utils::command::BotCommands,
 };
 
 use tokio::sync::mpsc::Receiver;
@@ -50,12 +47,8 @@ pub(crate) async fn run_bot(mut rx: Receiver<(String, String, String, String)>, 
     let storage = InMemStorage::new();
     let dialogue = BotDialogue::new(storage.clone(), CHAT_ID);
 
-    let mut file =
-        File::open("config/ui_definitions.yaml").expect("Unable to open config file");
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)
-        .expect("Unable to read the file");
-    let config: UIDefinitions = serde_yaml::from_str(&contents).expect("Error parsing config file");
+    let ui_definitions_yaml_data = include_str!("../config/ui_definitions.yaml");
+    let config: UIDefinitions = serde_yaml::from_str(&ui_definitions_yaml_data).expect("Error parsing config file");
 
     let execution_mutex = Arc::new(Mutex::new(()));
 
@@ -82,11 +75,18 @@ pub(crate) async fn run_bot(mut rx: Receiver<(String, String, String, String)>, 
                 if let Some((received_url, received_caption, original_author, original_shortcode)) = rx.recv().await {
 
                     if tx.does_content_exist_with_shortcode(original_shortcode.clone()) == false {
+
+                        let re = regex::Regex::new(r"#\w+").unwrap();
+                        let hashtags: Vec<&str> = re.find_iter(&received_caption.clone()).map(|mat| mat.as_str()).collect();
+                        let hashtags = hashtags.join(" ");
+
+                        let caption = re.replace_all(&received_caption.clone(), "").to_string();
+
                         let video = VideoInfo {
                             url: received_url.clone(),
                             status: "waiting".to_string(),
-                            caption: received_caption.clone(),
-                            hashtags: "#meme #cringe".to_string(),
+                            caption,
+                            hashtags,
                             original_author: original_author.clone(),
                             original_shortcode: original_shortcode.clone(),
                             encountered_errors: 0,
