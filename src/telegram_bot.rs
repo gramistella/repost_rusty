@@ -110,7 +110,11 @@ async fn receive_videos(
                     .find_iter(&cloned_caption)
                     .map(|mat| mat.as_str())
                     .collect();
-                let hashtags = hashtags.join(" ");
+                let mut hashtags = hashtags.join(" ");
+
+                if hashtags.is_empty(){
+                    hashtags = "#meme #cringe".to_string();
+                }
 
                 let caption = re.replace_all(&received_caption.clone(), "").to_string();
 

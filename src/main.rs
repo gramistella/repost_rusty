@@ -17,7 +17,7 @@ extern crate r2d2_sqlite;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let is_offline = true;
+    let is_offline = false;
 
     // Initialize the database
     let db = Database::new(is_offline)?;
