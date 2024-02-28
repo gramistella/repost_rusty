@@ -28,6 +28,8 @@ pub async fn run_scraper(
         "rightaccountrandy",
         "hard.mp4s",
         "eclipsegotban",
+        "zenxogg",
+        "autistic.browniez"
     ];
 
     let testing_urls = vec!

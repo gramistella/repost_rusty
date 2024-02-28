@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     // Create a new channel
     let (tx, rx) = mpsc::channel(100);
 
-    let credentials  = read_credentials("credentials.yaml");
+    let credentials  = read_credentials("config/credentials.yaml");
 
     // Run the scraper and the bot concurrently
     let scraper = tokio::spawn(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone()));

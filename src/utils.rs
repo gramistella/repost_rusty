@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, FixedOffset, ParseError, Utc};
+use chrono::{DateTime, Duration, FixedOffset, ParseError, Timelike, Utc};
 use indexmap::IndexMap;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -241,6 +241,29 @@ impl DatabaseTransaction {
         Ok(video_mapping)
     }
 
+    pub fn get_temp_message_id(&mut self) -> i32 {
+        let tx = self.conn.transaction().unwrap();
+        let mut stmt = tx.prepare("SELECT message_id FROM video_info").unwrap();
+        let message_id_iter = stmt.query_map([], |row| {
+            let message_id: i32 = row.get(0).unwrap();
+            Ok(message_id)
+        }).unwrap();
+
+        let mut max_message_id = None;
+        for message_id in message_id_iter {
+            let message_id = message_id.unwrap();
+            max_message_id = max_message_id.map_or(Some(message_id), |max: i32| Some(max.max(message_id)));
+        }
+
+        let max_message_id = match max_message_id {
+            Some(max) => max + 1000,
+            None =>  chrono::Utc::now().num_seconds_from_midnight() as i32,
+        };
+
+
+        max_message_id
+    }
+
     pub fn load_user_settings(&mut self) -> Result<UserSettings> {
         let mut can_post: Option<bool> = None;
         let mut posting_interval: Option<i64> = None;
@@ -415,6 +438,7 @@ impl DatabaseTransaction {
 
         Ok(posted_content_list)
     }
+
     /// Save a posted content to the database
     ///
     /// Will automatically remove the content from the post_queue
