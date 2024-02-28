@@ -244,22 +244,24 @@ impl DatabaseTransaction {
     pub fn get_temp_message_id(&mut self) -> i32 {
         let tx = self.conn.transaction().unwrap();
         let mut stmt = tx.prepare("SELECT message_id FROM video_info").unwrap();
-        let message_id_iter = stmt.query_map([], |row| {
-            let message_id: i32 = row.get(0).unwrap();
-            Ok(message_id)
-        }).unwrap();
+        let message_id_iter = stmt
+            .query_map([], |row| {
+                let message_id: i32 = row.get(0).unwrap();
+                Ok(message_id)
+            })
+            .unwrap();
 
         let mut max_message_id = None;
         for message_id in message_id_iter {
             let message_id = message_id.unwrap();
-            max_message_id = max_message_id.map_or(Some(message_id), |max: i32| Some(max.max(message_id)));
+            max_message_id =
+                max_message_id.map_or(Some(message_id), |max: i32| Some(max.max(message_id)));
         }
 
         let max_message_id = match max_message_id {
             Some(max) => max + 1000,
-            None =>  chrono::Utc::now().num_seconds_from_midnight() as i32,
+            None => chrono::Utc::now().num_seconds_from_midnight() as i32,
         };
-
 
         max_message_id
     }
@@ -397,7 +399,10 @@ impl DatabaseTransaction {
         let tx = self.conn.transaction()?;
 
         // Firstly we remove the posted_content from the post_queue
-        tx.execute("DELETE FROM video_info WHERE original_shortcode = ?1", params![shortcode])?;
+        tx.execute(
+            "DELETE FROM video_info WHERE original_shortcode = ?1",
+            params![shortcode],
+        )?;
 
         tx.commit()?;
 
@@ -610,7 +615,10 @@ impl DatabaseTransaction {
 
         tx.commit()?;
 
-        if let Some(removed_post_index) = queued_posts.iter().position(|post| post.original_shortcode == shortcode) {
+        if let Some(removed_post_index) = queued_posts
+            .iter()
+            .position(|post| post.original_shortcode == shortcode)
+        {
             // Remove the post from the queued_posts vector
             queued_posts.remove(removed_post_index);
 
@@ -635,8 +643,9 @@ impl DatabaseTransaction {
 
                     self.save_post_queue(new_post)?;
 
-                    let (message_id, mut video_info) =
-                        self.get_video_info_by_shortcode(post.original_shortcode.clone()).unwrap();
+                    let (message_id, mut video_info) = self
+                        .get_video_info_by_shortcode(post.original_shortcode.clone())
+                        .unwrap();
                     video_info.status = "queued_hidden".to_string();
                     self.save_video_info(IndexMap::from([(message_id, video_info)]))?;
                 }
@@ -650,19 +659,52 @@ impl DatabaseTransaction {
         let tx = self.conn.transaction().unwrap();
 
         // Prepare statements for each table
-        let mut stmt_video_info = tx.prepare("SELECT url FROM video_info WHERE original_shortcode = ?1").unwrap();
-        let mut stmt_posted_content = tx.prepare("SELECT url FROM posted_content WHERE original_shortcode = ?1").unwrap();
-        let mut stmt_post_queue = tx.prepare("SELECT url FROM post_queue WHERE original_shortcode = ?1").unwrap();
-        let mut stmt_rejected_content = tx.prepare("SELECT url FROM rejected_content WHERE original_shortcode = ?1").unwrap();
+        let mut stmt_video_info = tx
+            .prepare("SELECT url FROM video_info WHERE original_shortcode = ?1")
+            .unwrap();
+        let mut stmt_posted_content = tx
+            .prepare("SELECT url FROM posted_content WHERE original_shortcode = ?1")
+            .unwrap();
+        let mut stmt_post_queue = tx
+            .prepare("SELECT url FROM post_queue WHERE original_shortcode = ?1")
+            .unwrap();
+        let mut stmt_rejected_content = tx
+            .prepare("SELECT url FROM rejected_content WHERE original_shortcode = ?1")
+            .unwrap();
 
         // Execute each statement and check if the URL exists
-        let exists_in_video_info = stmt_video_info.query_map(params![shortcode.clone()], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
-        let exists_in_posted_content = stmt_posted_content.query_map(params![shortcode.clone()], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
-        let exists_in_post_queue = stmt_post_queue.query_map(params![shortcode.clone()], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
-        let exists_in_rejected_content = stmt_rejected_content.query_map(params![shortcode], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
+        let exists_in_video_info = stmt_video_info
+            .query_map(params![shortcode.clone()], |row| {
+                Ok(row.get::<_, String>(0)?)
+            })
+            .unwrap()
+            .next()
+            .is_some();
+        let exists_in_posted_content = stmt_posted_content
+            .query_map(params![shortcode.clone()], |row| {
+                Ok(row.get::<_, String>(0)?)
+            })
+            .unwrap()
+            .next()
+            .is_some();
+        let exists_in_post_queue = stmt_post_queue
+            .query_map(params![shortcode.clone()], |row| {
+                Ok(row.get::<_, String>(0)?)
+            })
+            .unwrap()
+            .next()
+            .is_some();
+        let exists_in_rejected_content = stmt_rejected_content
+            .query_map(params![shortcode], |row| Ok(row.get::<_, String>(0)?))
+            .unwrap()
+            .next()
+            .is_some();
 
         // Return true if the URL is found in any table
-        exists_in_video_info || exists_in_posted_content || exists_in_post_queue || exists_in_rejected_content
+        exists_in_video_info
+            || exists_in_posted_content
+            || exists_in_post_queue
+            || exists_in_rejected_content
     }
 
     pub fn get_video_info_by_message_id(&mut self, message_id: MessageId) -> Option<VideoInfo> {
@@ -674,7 +716,10 @@ impl DatabaseTransaction {
         }
     }
 
-    pub fn get_video_info_by_shortcode(&mut self, shortcode: String) -> Option<(MessageId, VideoInfo)> {
+    pub fn get_video_info_by_shortcode(
+        &mut self,
+        shortcode: String,
+    ) -> Option<(MessageId, VideoInfo)> {
         let video_mapping = self.load_video_mapping().unwrap();
 
         for (message_id, video_info) in video_mapping {

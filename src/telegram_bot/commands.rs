@@ -1,14 +1,14 @@
+use crate::telegram_bot::helpers::clear_sent_messages;
+use crate::telegram_bot::{send_videos, BotDialogue, HandlerResult, State, UIDefinitions, CHAT_ID};
+use crate::utils::Database;
 use std::error::Error;
 use std::sync::Arc;
-use teloxide::Bot;
 use teloxide::payloads::EditMessageReplyMarkupSetters;
 use teloxide::prelude::{ChatId, Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::command::BotCommands;
+use teloxide::Bot;
 use tokio::sync::Mutex;
-use crate::telegram_bot::{BotDialogue, CHAT_ID, HandlerResult, send_videos, State, UIDefinitions};
-use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::utils::Database;
 
 /// These commands are supported:
 #[derive(BotCommands, Clone)]
@@ -27,13 +27,20 @@ pub async fn help(bot: Bot, msg: Message) -> HandlerResult {
     Ok(())
 }
 
-pub async fn start(bot: Bot, dialogue: BotDialogue, database: Database, execution_mutex: Arc<Mutex<()>>, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
+pub async fn start(
+    bot: Bot,
+    dialogue: BotDialogue,
+    database: Database,
+    execution_mutex: Arc<Mutex<()>>,
+    ui_definitions: UIDefinitions,
+    msg: Message,
+) -> HandlerResult {
     if msg.chat.id == ChatId(34957918) {
         bot.send_message(
             msg.chat.id,
             format!("Welcome back, {}! 🦀", msg.chat.first_name().unwrap()).to_string(),
         )
-            .await?;
+        .await?;
 
         restore_sent_messages(bot, dialogue, database, execution_mutex, ui_definitions).await?;
     } else {

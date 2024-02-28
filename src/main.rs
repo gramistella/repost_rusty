@@ -1,13 +1,12 @@
-mod telegram_bot;
 mod scraper;
+mod telegram_bot;
 mod utils;
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 
-use tokio::sync::{mpsc};
-
+use tokio::sync::mpsc;
 
 use crate::utils::Database;
 
@@ -16,10 +15,9 @@ extern crate r2d2_sqlite;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-
     tracing_subscriber::fmt::init();
 
-    let is_offline = false;
+    let is_offline = true;
 
     // Initialize the database
     let db = Database::new(is_offline)?;
@@ -27,10 +25,15 @@ async fn main() -> anyhow::Result<()> {
     // Create a new channel
     let (tx, rx) = mpsc::channel(100);
 
-    let credentials  = read_credentials("config/credentials.yaml");
+    let credentials = read_credentials("config/credentials.yaml");
 
     // Run the scraper and the bot concurrently
-    let scraper = tokio::spawn(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone()));
+    let scraper = tokio::spawn(scraper::run_scraper(
+        tx,
+        db.clone(),
+        is_offline,
+        credentials.clone(),
+    ));
     let telegram_bot = tokio::spawn(telegram_bot::run_bot(rx, db, credentials));
 
     // Wait for both tasks to complete
@@ -42,8 +45,9 @@ async fn main() -> anyhow::Result<()> {
 fn read_credentials(path: &str) -> HashMap<String, String> {
     let mut file = File::open(path).expect("Unable to open credentials file");
     let mut contents = String::new();
-    file.read_to_string(&mut contents).expect("Unable to read the credentials file");
-    let credentials: HashMap<String, String> = serde_yaml::from_str(&contents).expect("Error parsing credentials file");
+    file.read_to_string(&mut contents)
+        .expect("Unable to read the credentials file");
+    let credentials: HashMap<String, String> =
+        serde_yaml::from_str(&contents).expect("Error parsing credentials file");
     credentials
 }
-

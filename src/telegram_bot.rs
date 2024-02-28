@@ -1,10 +1,10 @@
 mod callbacks;
 mod commands;
-mod messages;
 mod helpers;
+mod messages;
 mod state;
 
-use chrono::{DateTime};
+use chrono::DateTime;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -21,9 +21,9 @@ use teloxide::{
 use tokio::sync::mpsc::Receiver;
 use tokio::time::sleep;
 
-use crate::utils::{Database, PostedContent, VideoInfo};
 use crate::telegram_bot::helpers::{expire_posted_content, expire_rejected_content};
 use crate::telegram_bot::state::{schema, State};
+use crate::utils::{Database, PostedContent, VideoInfo};
 use indexmap::IndexMap;
 
 use tokio::sync::Mutex;
@@ -40,7 +40,11 @@ type BotDialogue = Dialogue<State, InMemStorage<State>>;
 
 const CHAT_ID: ChatId = ChatId(34957918);
 
-pub(crate) async fn run_bot(mut rx: Receiver<(String, String, String, String)>, database: Database, credentials: HashMap<String, String>) {
+pub(crate) async fn run_bot(
+    rx: Receiver<(String, String, String, String)>,
+    database: Database,
+    credentials: HashMap<String, String>,
+) {
     let api_token = credentials.get("telegram_api_token").unwrap();
     let bot = Bot::new(api_token);
 
@@ -48,70 +52,104 @@ pub(crate) async fn run_bot(mut rx: Receiver<(String, String, String, String)>, 
     let dialogue = BotDialogue::new(storage.clone(), CHAT_ID);
 
     let ui_definitions_yaml_data = include_str!("../config/ui_definitions.yaml");
-    let config: UIDefinitions = serde_yaml::from_str(&ui_definitions_yaml_data).expect("Error parsing config file");
+    let config: UIDefinitions =
+        serde_yaml::from_str(&ui_definitions_yaml_data).expect("Error parsing config file");
 
     let execution_mutex = Arc::new(Mutex::new(()));
 
     tokio::select! {
-        _ = async {
+        _ = start_dispatcher(bot.clone(), dialogue.clone(), execution_mutex.clone(), database.clone(), config.clone(), storage.clone()) => {},
+        _ = receive_videos(rx, bot, dialogue, execution_mutex, database, config) => {},
+    }
+}
 
-            let  _ = execution_mutex.lock().await;
-            let mut dispatcher_builder = Dispatcher::builder(bot.clone(), schema())
-                .dependencies(dptree::deps![dialogue.clone(), storage.clone(), execution_mutex.clone(), database.clone(), config.clone()])
-                .enable_ctrlc_handler()
-                .build();
-            let dispatcher_future = dispatcher_builder.dispatch();
-            dispatcher_future.await;
+async fn start_dispatcher(
+    bot: Bot,
+    dialogue: BotDialogue,
+    execution_mutex: Arc<Mutex<()>>,
+    database: Database,
+    config: UIDefinitions,
+    storage: Arc<InMemStorage<State>>,
+) {
+    let _ = execution_mutex.lock().await;
+    let mut dispatcher_builder = Dispatcher::builder(bot.clone(), schema())
+        .dependencies(dptree::deps![
+            dialogue.clone(),
+            storage.clone(),
+            execution_mutex.clone(),
+            database.clone(),
+            config.clone()
+        ])
+        .enable_ctrlc_handler()
+        .build();
+    let dispatcher_future = dispatcher_builder.dispatch();
+    dispatcher_future.await;
+}
+async fn receive_videos(
+    mut rx: Receiver<(String, String, String, String)>,
+    bot: Bot,
+    dialogue: BotDialogue,
+    execution_mutex: Arc<Mutex<()>>,
+    database: Database,
+    config: UIDefinitions,
+) {
+    // Give a head start to the dispatcher
+    sleep(Duration::from_secs(1)).await;
 
-        } => {},
-        _ = async {
-            sleep(Duration::from_secs(1)).await;
-            loop {
+    loop {
+        let mut tx = database.begin_transaction().unwrap();
+        let _ = execution_mutex.lock().await;
 
+        if let Some((received_url, received_caption, original_author, original_shortcode)) =
+            rx.recv().await
+        {
+            if tx.does_content_exist_with_shortcode(original_shortcode.clone()) == false {
+                let re = regex::Regex::new(r"#\w+").unwrap();
+                let cloned_caption = received_caption.clone();
+                let hashtags: Vec<&str> = re
+                    .find_iter(&cloned_caption)
+                    .map(|mat| mat.as_str())
+                    .collect();
+                let hashtags = hashtags.join(" ");
+
+                let caption = re.replace_all(&received_caption.clone(), "").to_string();
+
+                let video = VideoInfo {
+                    url: received_url.clone(),
+                    status: "waiting".to_string(),
+                    caption,
+                    hashtags,
+                    original_author: original_author.clone(),
+                    original_shortcode: original_shortcode.clone(),
+                    encountered_errors: 0,
+                };
 
                 let mut tx = database.begin_transaction().unwrap();
-                let _ = execution_mutex.lock().await;
+                let message_id = tx.get_temp_message_id();
+                let video_mapping: IndexMap<MessageId, VideoInfo> =
+                    IndexMap::from([(MessageId(message_id), video.clone())]);
 
-                if let Some((received_url, received_caption, original_author, original_shortcode)) = rx.recv().await {
+                tx.save_video_info(video_mapping).unwrap();
+            };
 
-                    if tx.does_content_exist_with_shortcode(original_shortcode.clone()) == false {
-
-                        let re = regex::Regex::new(r"#\w+").unwrap();
-                        let cloned_caption = received_caption.clone();
-                        let hashtags: Vec<&str> = re.find_iter(&cloned_caption).map(|mat| mat.as_str()).collect();
-                        let hashtags = hashtags.join(" ");
-
-                        let caption = re.replace_all(&received_caption.clone(), "").to_string();
-
-                        let video = VideoInfo {
-                            url: received_url.clone(),
-                            status: "waiting".to_string(),
-                            caption,
-                            hashtags,
-                            original_author: original_author.clone(),
-                            original_shortcode: original_shortcode.clone(),
-                            encountered_errors: 0,
-                        };
-
-                        let mut tx = database.begin_transaction().unwrap();
-                        let message_id = tx.get_temp_message_id();
-                        let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(MessageId(message_id), video.clone())]);
-
-                        tx.save_video_info(video_mapping).unwrap();
-                    };
-
-                    //println!("Received URL: \n\"{}\"\ncaption: \n\"{}\"\n", received_url, received_caption);
-                    let _success = match send_videos(bot.clone(), dialogue.clone(), execution_mutex.clone(), database.clone(), config.clone()).await {
-                        Ok(..) => {
-                            //println!("Video sent successfully")
-                        },
-                        Err(e) => {
-                            println!("Error sending video in loop: {}", e)
-                        }
-                    };
+            //println!("Received URL: \n\"{}\"\ncaption: \n\"{}\"\n", received_url, received_caption);
+            let _success = match send_videos(
+                bot.clone(),
+                dialogue.clone(),
+                execution_mutex.clone(),
+                database.clone(),
+                config.clone(),
+            )
+            .await
+            {
+                Ok(..) => {
+                    //println!("Video sent successfully")
                 }
-            }
-        } => {},
+                Err(e) => {
+                    println!("Error sending video in loop: {}", e)
+                }
+            };
+        }
     }
 }
 
@@ -281,7 +319,11 @@ async fn send_videos(
                         caption: queue_element.clone().unwrap().caption.clone(),
                         hashtags: queue_element.clone().unwrap().caption.clone(),
                         original_author: queue_element.clone().unwrap().original_author.clone(),
-                        original_shortcode: queue_element.clone().unwrap().original_shortcode.clone(),
+                        original_shortcode: queue_element
+                            .clone()
+                            .unwrap()
+                            .original_shortcode
+                            .clone(),
                         posted_at: chrono::Utc::now().to_rfc3339(),
                         expired: false,
                     };
@@ -546,7 +588,8 @@ async fn send_videos(
                     .reply_markup(InlineKeyboardMarkup::new([undo_action]))
                     .await?;
 
-                let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(sent_message_id, video.clone())]);
+                let video_mapping: IndexMap<MessageId, VideoInfo> =
+                    IndexMap::from([(sent_message_id, video.clone())]);
                 tx.save_video_info(video_mapping).unwrap();
                 continue;
             }
@@ -554,8 +597,7 @@ async fn send_videos(
             if video.status == "rejected_shown" {
                 let mut video_caption = String::new();
                 if video.status == "accepted_shown" {
-                    let accepted_caption_text =
-                        ui_definitions.buttons.get("accepted").unwrap();
+                    let accepted_caption_text = ui_definitions.buttons.get("accepted").unwrap();
                     video_caption = format!("{}: {}", accepted_caption_text, full_video_caption);
                 }
 

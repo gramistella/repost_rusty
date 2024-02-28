@@ -1,13 +1,13 @@
-use std::sync::Arc;
+use crate::telegram_bot::commands::display_settings_message;
+use crate::telegram_bot::helpers::{clear_sent_messages, expire_rejected_content};
+use crate::telegram_bot::{send_videos, BotDialogue, HandlerResult, State, UIDefinitions};
+use crate::utils::{Database, RejectedContent, VideoInfo};
 use indexmap::IndexMap;
-use teloxide::Bot;
+use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
+use teloxide::Bot;
 use tokio::sync::Mutex;
-use crate::telegram_bot::{BotDialogue, HandlerResult, send_videos, State, UIDefinitions};
-use crate::utils::{Database, RejectedContent, VideoInfo};
-use crate::telegram_bot::helpers::{clear_sent_messages, expire_rejected_content};
-use crate::telegram_bot::commands::display_settings_message;
 
 pub async fn handle_accepted_view(
     bot: Bot,
@@ -143,7 +143,8 @@ pub async fn handle_undo(
     for content in rejected_content {
         if content.url == video_info.url {
             let mut tx = database.begin_transaction().unwrap();
-            tx.remove_rejected_content_with_shortcode(video_info.original_shortcode.clone()).unwrap();
+            tx.remove_rejected_content_with_shortcode(video_info.original_shortcode.clone())
+                .unwrap();
         }
     }
     //println!("undo pressed, original message id {}, action {}", message_id, action);
@@ -162,7 +163,8 @@ pub async fn handle_remove_from_view(
     let mut tx = database.begin_transaction().unwrap();
     let video_info = tx.get_video_info_by_message_id(message_id).unwrap();
 
-    tx.remove_video_info_with_shortcode(video_info.original_shortcode).unwrap();
+    tx.remove_video_info_with_shortcode(video_info.original_shortcode)
+        .unwrap();
 
     bot.delete_message(chat_id, message_id).await?;
 
@@ -320,7 +322,6 @@ pub async fn handle_edit_view(
     database: Database,
     ui_definitions: UIDefinitions,
 ) -> HandlerResult {
-
     {
         let _execution_lock_copy = Arc::clone(&execution_mutex);
         let _execution_lock_copy = _execution_lock_copy.lock().await;
@@ -343,12 +344,11 @@ pub async fn handle_edit_view(
             database,
             ui_definitions,
         )
-            .await?;
+        .await?;
 
         dialogue.update(State::ScrapeView).await.unwrap();
         return Ok(());
     } else if action == "accept" {
-
         //println!("accept - message id: {}", message_id);
         // Clear the sent messages, from message_id to the latest message
         let mut tx = database.begin_transaction().unwrap();
@@ -366,7 +366,7 @@ pub async fn handle_edit_view(
             database,
             ui_definitions,
         )
-            .await?;
+        .await?;
 
         dialogue.update(State::ScrapeView).await.unwrap();
         return Ok(());
@@ -399,7 +399,12 @@ pub async fn handle_edit_view(
             format!("accept_{}", message_id),
         )];
 
-        let edit_actions = [edit_action_row_1, edit_action_row_2, edit_action_row_3, edit_action_row_4];
+        let edit_actions = [
+            edit_action_row_1,
+            edit_action_row_2,
+            edit_action_row_3,
+            edit_action_row_4,
+        ];
 
         let msg2 = bot
             .send_message(
@@ -520,7 +525,8 @@ pub async fn handle_remove_from_queue(
     let mut video_info = tx.get_video_info_by_message_id(message_id).unwrap();
 
     let mut tx = database.begin_transaction().unwrap();
-    tx.remove_post_from_queue_with_shortcode(video_info.original_shortcode.clone()).unwrap();
+    tx.remove_post_from_queue_with_shortcode(video_info.original_shortcode.clone())
+        .unwrap();
 
     video_info.status = "pending_shown".to_string();
     let video_mapping: IndexMap<MessageId, VideoInfo> =

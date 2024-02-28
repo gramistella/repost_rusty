@@ -1,11 +1,17 @@
+use crate::telegram_bot::callbacks::{
+    handle_accepted_view, handle_edit_view, handle_rejected_view, handle_remove_from_view,
+    handle_settings, handle_undo, handle_video_action,
+};
+use crate::telegram_bot::commands::{help, settings, start, Command};
+use crate::telegram_bot::messages::{
+    receive_caption, receive_hashtags, receive_posted_content_lifespan, receive_posting_interval,
+    receive_random_interval, receive_rejected_content_lifespan,
+};
 use std::error::Error;
-use teloxide::dispatching::{dialogue, UpdateFilterExt, UpdateHandler};
 use teloxide::dispatching::dialogue::InMemStorage;
+use teloxide::dispatching::{dialogue, UpdateFilterExt, UpdateHandler};
 use teloxide::prelude::*;
 use teloxide::types::MessageId;
-use crate::telegram_bot::callbacks::{handle_accepted_view, handle_edit_view, handle_rejected_view, handle_remove_from_view, handle_settings, handle_undo, handle_video_action};
-use crate::telegram_bot::commands::{Command, help, settings, start};
-use crate::telegram_bot::messages::{receive_caption, receive_hashtags, receive_posted_content_lifespan, receive_posting_interval, receive_random_interval, receive_rejected_content_lifespan};
 
 #[derive(Clone, Default, PartialEq)]
 pub enum State {
@@ -61,42 +67,42 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
                 stored_messages_to_delete,
                 original_message_id,
             }]
-                .endpoint(receive_posting_interval),
+            .endpoint(receive_posting_interval),
         )
         .branch(
             case![State::ReceiveRandomInterval {
                 stored_messages_to_delete,
                 original_message_id,
             }]
-                .endpoint(receive_random_interval),
+            .endpoint(receive_random_interval),
         )
         .branch(
             case![State::ReceiveRejectedContentLifespan {
                 stored_messages_to_delete,
                 original_message_id,
             }]
-                .endpoint(receive_rejected_content_lifespan),
+            .endpoint(receive_rejected_content_lifespan),
         )
         .branch(
             case![State::ReceivePostedContentLifespan {
                 stored_messages_to_delete,
                 original_message_id,
             }]
-                .endpoint(receive_posted_content_lifespan),
+            .endpoint(receive_posted_content_lifespan),
         )
         .branch(
             case![State::ReceiveCaption {
                 stored_messages_to_delete,
                 original_message_id,
             }]
-                .endpoint(receive_caption),
+            .endpoint(receive_caption),
         )
         .branch(
             case![State::ReceiveHashtags {
                 stored_messages_to_delete,
                 original_message_id,
             }]
-                .endpoint(receive_hashtags),
+            .endpoint(receive_hashtags),
         );
 
     let callback_handler = Update::filter_callback_query()
@@ -106,7 +112,7 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
             case![State::EditView {
                 stored_messages_to_delete
             }]
-                .endpoint(handle_edit_view),
+            .endpoint(handle_edit_view),
         )
         .branch(case![State::ScrapeView].endpoint(handle_video_action))
         .branch(case![State::ScrapeView].endpoint(handle_undo))
@@ -116,7 +122,7 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
                 stored_messages_to_delete,
                 original_message_id
             }]
-                .endpoint(handle_settings),
+            .endpoint(handle_settings),
         );
 
     dialogue::enter::<Update, InMemStorage<State>, State, _>()

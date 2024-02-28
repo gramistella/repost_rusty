@@ -1,12 +1,12 @@
+use crate::telegram_bot::commands::display_settings_message;
+use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions};
+use crate::utils::Database;
 use indexmap::IndexMap;
 use regex::Regex;
-use teloxide::Bot;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::{Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
-use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions};
-use crate::telegram_bot::commands::display_settings_message;
-use crate::utils::Database;
+use teloxide::Bot;
 
 pub async fn receive_posting_interval(
     bot: Bot,
@@ -293,7 +293,6 @@ pub async fn receive_caption(
                     format!("edit_caption_{}", original_message_id),
                 )];
 
-
                 let edit_action_row_3 = [InlineKeyboardButton::callback(
                     edit_hashtags_action_text,
                     format!("edit_hashtags_{}", original_message_id),
@@ -304,7 +303,12 @@ pub async fn receive_caption(
                     format!("accept_{}", original_message_id),
                 )];
 
-                let edit_actions = [edit_action_row_1, edit_action_row_2, edit_action_row_3, edit_action_row_4];
+                let edit_actions = [
+                    edit_action_row_1,
+                    edit_action_row_2,
+                    edit_action_row_3,
+                    edit_action_row_4,
+                ];
 
                 let msg2 = bot
                     .send_message(
@@ -380,7 +384,6 @@ pub async fn receive_hashtags(
                     format!("edit_caption_{}", original_message_id),
                 )];
 
-
                 let edit_action_row_3 = [InlineKeyboardButton::callback(
                     edit_hashtags_action_text,
                     format!("edit_hashtags_{}", original_message_id),
@@ -391,7 +394,12 @@ pub async fn receive_hashtags(
                     format!("accept_{}", original_message_id),
                 )];
 
-                let edit_actions = [edit_action_row_1, edit_action_row_2, edit_action_row_3, edit_action_row_4];
+                let edit_actions = [
+                    edit_action_row_1,
+                    edit_action_row_2,
+                    edit_action_row_3,
+                    edit_action_row_4,
+                ];
 
                 let msg2 = bot
                     .send_message(
@@ -421,4 +429,3 @@ pub async fn receive_hashtags(
     }
     Ok(())
 }
-

@@ -1,13 +1,15 @@
-use std::error::Error;
-use std::time::Duration;
+use crate::telegram_bot::{UIDefinitions, CHAT_ID};
+use crate::utils::{Database, DatabaseTransaction, VideoInfo};
 use chrono::DateTime;
 use indexmap::IndexMap;
-use teloxide::Bot;
-use teloxide::payloads::{EditMessageCaptionSetters, EditMessageReplyMarkupSetters, SendVideoSetters};
-use teloxide::prelude::{Requester};
+use std::error::Error;
+use std::time::Duration;
+use teloxide::payloads::{
+    EditMessageCaptionSetters, EditMessageReplyMarkupSetters, SendVideoSetters,
+};
+use teloxide::prelude::Requester;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId};
-use crate::telegram_bot::{CHAT_ID, UIDefinitions};
-use crate::utils::{Database, DatabaseTransaction, VideoInfo};
+use teloxide::Bot;
 
 pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Result<()> {
     // Load the video mappings
@@ -88,7 +90,6 @@ pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Resul
 
     Ok(())
 }
-
 
 pub async fn expire_rejected_content(
     bot: &Bot,
