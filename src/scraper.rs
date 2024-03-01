@@ -1,7 +1,7 @@
 use crate::database::{Database, PostedContent, QueuedPost};
 use chrono::DateTime;
 use indexmap::IndexMap;
-use instagram_scraper_rs::{InstagramScraper, Post, User};
+use instagram_scraper_rs::{InstagramScraper, InstagramScraperResult, Post, User};
 use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, SeedableRng};
@@ -9,17 +9,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::utils::now_in_my_timezone;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use crate::utils::now_in_my_timezone;
 
-pub async fn run_scraper(
-    tx: Sender<(String, String, String, String)>,
-    database: Database,
-    is_offline: bool,
-    credentials: HashMap<String, String>,
-) -> anyhow::Result<()> {
+pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) -> anyhow::Result<()> {
     let profile_list = vec![
         "qringey",
         "repostrandy",
@@ -30,7 +25,8 @@ pub async fn run_scraper(
         "hard.mp4s",
         "eclipsegotban",
         "zenxogg",
-        "autistic.browniez"
+        "autistic.browniez",
+        "viewingmag",
     ];
 
     let testing_urls = vec!
@@ -40,9 +36,9 @@ pub async fn run_scraper(
                                         "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/48718206_1450879249116459_8164759842261415987_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=103&_nc_ohc=GUN_mDr2OYsAX9fRqgF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfC78iGTuJdhnNbhO_fuieXvYT5R3pkhMAD-MLNxtxR7TQ&oe=65D572F7&_nc_sid=2999b8",
                                         "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428456788_295092509963149_5948637286561662383_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=101&_nc_ohc=zkatv7OeKwUAX8YNkBr&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAQIp78Fu1NCj719FprGjWMV_gZ3s_b8Ux_mWy3Ek1uOA&oe=65D73480&_nc_sid=2999b8",
                                         "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428478842_735629148752808_8195281140553080552_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=100&_nc_ohc=C_p4c8oZuQAAX-v2g55&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfDFvSm0eBmcCsuO3rFKcdLFdi6HBHTKzAkN8tqdAoUn_w&oe=65D69DF3&_nc_sid=2999b8",
-                                        "https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/428226521_1419744418741015_2882822033667053284_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=107&_nc_ohc=Dir0Fhly2oQAX-WOLlD&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCdg_GUWzIIA6ueap7WZgK1zG1Zq903lp_RxGFMT22xWA&oe=65D6A70B&_nc_sid=2999b8",
-                                        "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
-                                        "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
+                                        //"https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/428226521_1419744418741015_2882822033667053284_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=107&_nc_ohc=Dir0Fhly2oQAX-WOLlD&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCdg_GUWzIIA6ueap7WZgK1zG1Zq903lp_RxGFMT22xWA&oe=65D6A70B&_nc_sid=2999b8",
+                                        //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
+                                        //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
                                     ];
 
     let loop_sleep_len = Duration::from_secs(60 * 60);
@@ -56,7 +52,6 @@ pub async fn run_scraper(
     let username = credentials.get("username").unwrap().clone();
     let password = credentials.get("password").unwrap().clone();
 
-
     if is_offline {
         println!("Sending offline data");
 
@@ -67,9 +62,8 @@ pub async fn run_scraper(
                 let mut inner_loop_iterations = 0;
                 for url in &testing_urls {
                     inner_loop_iterations += 1;
-                    let caption_string =
-                        format!("Video {}, loop {}", inner_loop_iterations, loop_iterations);
-                    tx.send((url.to_string(), caption_string, "local".to_string(), format!("shortcode{}", inner_loop_iterations) ))
+                    let caption_string = format!("Video {}, loop {}", inner_loop_iterations, loop_iterations);
+                    tx.send((url.to_string(), caption_string, "local".to_string(), format!("shortcode{}", inner_loop_iterations)))
                         .await
                         .unwrap();
                     sleep(Duration::from_secs(3)).await;
@@ -79,10 +73,36 @@ pub async fn run_scraper(
     } else {
         let scraper_loop_database = database.clone();
         scraper_loop = Some(tokio::spawn(async move {
-
             let cloned_scraper = Arc::clone(&scraper_clone);
 
             let mut rng = StdRng::from_entropy();
+
+            // Create a shared variable for the latest URL
+            let latest_url = Arc::new(Mutex::new(None));
+
+            // Create a clone of the shared variable for the separate task
+            let latest_url_for_task = Arc::clone(&latest_url);
+
+            // Create a separate task that sends the URL through the channel
+            tokio::spawn(async move {
+                loop {
+
+                    let url = {
+                        let lock = latest_url_for_task.lock().await;
+                        lock.clone()
+                    };
+
+                    if let Some((url, caption, author, shortcode)) = url {
+                        tx.send((url, caption, author, shortcode)).await.unwrap();
+
+                    } else {
+                        tx.send(("".to_string(), "".to_string(), "".to_string(), "C3daVhdxlBT".to_string())).await.unwrap();
+                    }
+
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                }
+            });
+
             {
                 let mut scraper_guard = cloned_scraper.lock().await;
 
@@ -104,41 +124,19 @@ pub async fn run_scraper(
             let mut accounts_being_scraped = Vec::new();
 
             for profile in &profile_list {
-                let mut scraper_guard = cloned_scraper.lock().await;
-                let user = scraper_guard.scrape_userinfo(&profile).await.unwrap();
-                accounts_being_scraped.push(user);
-                println!("Fetched user info for {}", profile);
-
+                {
+                    let mut scraper_guard = cloned_scraper.lock().await;
+                    let user = scraper_guard.scrape_userinfo(&profile).await.unwrap();
+                    accounts_being_scraped.push(user);
+                    println!("Fetched user info for {}", profile);
+                }
                 let sleep_duration = 10;
                 randomized_sleep(sleep_duration).await;
             }
 
-            // Create a shared variable for the latest URL
-            let latest_url = Arc::new(Mutex::new(None));
-
-            // Create a clone of the shared variable for the separate task
-            let latest_url_for_task = Arc::clone(&latest_url);
-
-            // Create a separate task that sends the URL through the channel
-            tokio::spawn(async move {
-                loop {
-                    let url = {
-                        let lock = latest_url_for_task.lock().await;
-                        lock.clone()
-                    };
-
-                    if let Some((url, caption, author, shortcode)) = url {
-                        //println!("Sending URL: {}", url);
-                        tx.send((url, caption, author, shortcode)).await.unwrap();
-                    }
-
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                }
-            });
 
             let inner_scraper_loop_database = scraper_loop_database.clone();
             loop {
-
                 let mut transaction = inner_scraper_loop_database.begin_transaction().unwrap();
 
                 //let random_profiles: Vec<_> = accounts_being_scraped.choose_multiple(&mut rng, 3).collect();
@@ -151,19 +149,13 @@ pub async fn run_scraper(
 
                 for user in accounts_being_scraped.iter() {
                     accounts_scraped += 1;
-                    println!(
-                        "{}/{} Retrieving posts from user {}",
-                        accounts_scraped, accounts_being_scraped_len, user.username
-                    );
+                    println!("{}/{} Retrieving posts from user {}", accounts_scraped, accounts_being_scraped_len, user.username);
 
                     // get posts
                     {
                         let mut scraper_guard = cloned_scraper.lock().await;
                         scraper_guard.scrape_posts(&user.id, 5).await.unwrap();
-                        posts.insert(
-                            user.clone(),
-                            scraper_guard.scrape_posts(&user.id, 5).await.unwrap(),
-                        );
+                        posts.insert(user.clone(), scraper_guard.scrape_posts(&user.id, 5).await.unwrap());
                     }
 
                     randomized_sleep(15).await;
@@ -186,15 +178,11 @@ pub async fn run_scraper(
 
                     // Send the URL through the channel
                     if post.is_video {
-
                         if transaction.does_content_exist_with_shortcode(post.shortcode.clone()) == false {
-                            println!(
-                                "{}/{} Scraping content: {}",
-                                flattened_posts_processed, flattened_posts_len, post.shortcode
-                            );
+
+                            println!("{}/{} Scraping content: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                             let mut scraper_guard = cloned_scraper.lock().await;
-                            let (url, caption) =
-                                scraper_guard.download_reel(&post.shortcode).await.unwrap();
+                            let (url, caption) = scraper_guard.download_reel(&post.shortcode).await.unwrap();
                             //println!("Sending caption: {}\n URL: {}", caption, url);
 
                             // Use a scoped block to immediately drop the lock
@@ -205,24 +193,15 @@ pub async fn run_scraper(
                                 *lock = Some((url, caption, author.username.clone(), post.shortcode.clone()));
                             }
                         } else {
-                            println!(
-                                "{}/{} Content already scraped: {}",
-                                flattened_posts_processed, flattened_posts_len, post.shortcode
-                            );
+                            println!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                         }
                     } else {
-                        println!(
-                            "{}/{} Content is not a video: {}",
-                            flattened_posts_processed, flattened_posts_len, post.shortcode
-                        );
+                        println!("{}/{} Content is not a video: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                     }
                     randomized_sleep(download_sleep_len.as_secs()).await;
                 }
                 // Wait for a while before the next iteration
-                println!(
-                    "Starting long sleep ({} minutes)",
-                    loop_sleep_len.as_secs() / 60
-                );
+                println!("Starting long sleep ({} minutes)", loop_sleep_len.as_secs() / 60);
                 randomized_sleep(loop_sleep_len.as_secs()).await;
             }
 
@@ -251,59 +230,54 @@ pub async fn run_scraper(
             //let queued_posts = Vec::new();
             for (message_id, mut video_info) in video_mapping {
                 if video_info.status.contains("accepted_") {
-
-                    let will_post_at = transaction
-                        .get_new_post_time(user_settings.clone())
-                        .unwrap();
+                    let last_updated_at = now_in_my_timezone(user_settings.clone()) - Duration::from_secs(60);
+                    let will_post_at = transaction.get_new_post_time(user_settings.clone()).unwrap();
                     let new_queued_post = QueuedPost {
                         url: video_info.url.clone(),
                         caption: video_info.caption.clone(),
                         hashtags: video_info.hashtags.clone(),
                         original_author: video_info.original_author.clone(),
                         original_shortcode: video_info.original_shortcode.clone(),
+                        last_updated_at: last_updated_at.to_rfc3339(),
                         will_post_at: will_post_at,
                     };
 
                     transaction.save_post_queue(new_queued_post).unwrap();
-                    video_info.status = "queued_hidden".to_string();
+                    if video_info.status.contains("shown") {
+                        video_info.status = "queued_shown".to_string();
+                    } else {
+                        video_info.status = "queued_hidden".to_string();
+                    }
                     let index_map = IndexMap::from([(message_id, video_info.clone())]);
                     transaction.save_video_info(index_map).unwrap();
                 }
                 if video_info.status.contains("queued_") {
                     let queued_posts = transaction.load_post_queue().unwrap();
                     for mut queued_post in queued_posts {
-                        if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap()
-                            < now_in_my_timezone(user_settings.clone())
-                        {
+                        if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(user_settings.clone()) {
                             if user_settings.can_post {
+                                let scraper_copy = Arc::clone(&scraper);
+                                let mut scraper_guard = scraper_copy.lock().await;
                                 if !is_offline {
-                                    let scraper_copy = Arc::clone(&scraper);
-                                    let mut scraper_guard = scraper_copy.lock().await;
+                                    let full_caption = format!("{}\n.\n.\n.\n.\n.\n.\n.\n{}", queued_post.caption, queued_post.hashtags);
 
-                                    let full_caption = format!(
-                                        "{}\n.\n.\n.\n.\n.\n.\n.\n{}",
-                                        queued_post.caption, queued_post.hashtags
-                                    );
-
-                                    let user_id =
-                                        credentials.get("instagram_business_account_id").unwrap();
+                                    let user_id = credentials.get("instagram_business_account_id").unwrap();
                                     let access_token = credentials.get("fb_access_token").unwrap();
-                                    scraper_guard
-                                        .upload_reel(
-                                            user_id,
-                                            access_token,
-                                            &queued_post.url,
-                                            &full_caption,
-                                        )
-                                        .await
-                                        .unwrap();
-                                    println!("Uploaded content successfully: {}", queued_post.original_shortcode);
+                                    println!(" [+] Uploading content to instagram: {}", queued_post.original_shortcode);
+                                    match scraper_guard.upload_reel(user_id, access_token, &queued_post.url, &full_caption).await {
+                                        Ok(_) => {
+                                            println!(" [+] Uploaded content successfully: {}", queued_post.original_shortcode);
+                                        }
+                                        Err(_) => {
+                                            println!(" [!] ERRROR: couldn't upload content to instagram! {}", queued_post.url);
+                                            transaction.remove_post_from_queue_with_shortcode(queued_post.original_shortcode.clone()).unwrap();
+                                        }
+                                    }
                                 } else {
-                                    println!("Uploaded content offline: {}", queued_post.url);
+                                    println!(" [!] Uploaded content offline: {}", queued_post.url);
                                 }
 
-                                let (message_id, mut video_info) =
-                                    transaction.get_video_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
+                                let (message_id, mut video_info) = transaction.get_video_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
                                 video_info.status = "posted_hidden".to_string();
                                 let index_map = IndexMap::from([(message_id, video_info.clone())]);
                                 transaction.save_video_info(index_map).unwrap();
@@ -315,20 +289,18 @@ pub async fn run_scraper(
                                     original_author: queued_post.original_author.clone(),
                                     original_shortcode: queued_post.original_shortcode.clone(),
                                     posted_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
+                                    last_updated_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
                                     expired: false,
                                 };
 
                                 transaction.save_posted_content(posted_content).unwrap();
+                                println!(" [+] Saved posted content: {}", queued_post.original_shortcode);
                             } else {
-
-                                let new_will_post_at = transaction
-                                    .get_new_post_time(user_settings.clone())
-                                    .unwrap();
+                                let new_will_post_at = transaction.get_new_post_time(user_settings.clone()).unwrap();
                                 queued_post.will_post_at = new_will_post_at;
                                 transaction.save_post_queue(queued_post.clone()).unwrap();
 
-                                let (message_id, mut video_info) =
-                                    transaction.get_video_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
+                                let (message_id, mut video_info) = transaction.get_video_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
                                 video_info.status = "queued_hidden".to_string();
                                 let index_map = IndexMap::from([(message_id, video_info.clone())]);
                                 transaction.save_video_info(index_map).unwrap();
@@ -338,7 +310,7 @@ pub async fn run_scraper(
                 }
             }
 
-            sleep(Duration::from_secs(3)).await;
+            sleep(Duration::from_secs(1)).await;
         }
     });
 

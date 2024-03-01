@@ -1,12 +1,6 @@
-use crate::telegram_bot::callbacks::{
-    handle_accepted_view, handle_edit_view, handle_rejected_view, handle_remove_from_view,
-    handle_settings, handle_undo, handle_video_action,
-};
+use crate::telegram_bot::callbacks::{handle_accepted_view, handle_edit_view, handle_rejected_view, handle_remove_from_view, handle_settings, handle_undo, handle_video_action};
 use crate::telegram_bot::commands::{help, settings, start, Command};
-use crate::telegram_bot::messages::{
-    receive_caption, receive_hashtags, receive_posted_content_lifespan, receive_posting_interval,
-    receive_random_interval, receive_rejected_content_lifespan,
-};
+use crate::telegram_bot::messages::{receive_caption, receive_hashtags, receive_posted_content_lifespan, receive_posting_interval, receive_random_interval, receive_rejected_content_lifespan};
 use std::error::Error;
 use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::dispatching::{dialogue, UpdateFilterExt, UpdateHandler};
@@ -108,12 +102,7 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
     let callback_handler = Update::filter_callback_query()
         .branch(case![State::AcceptedView].endpoint(handle_accepted_view))
         .branch(case![State::RejectedView].endpoint(handle_rejected_view))
-        .branch(
-            case![State::EditView {
-                stored_messages_to_delete
-            }]
-            .endpoint(handle_edit_view),
-        )
+        .branch(case![State::EditView { stored_messages_to_delete }].endpoint(handle_edit_view))
         .branch(case![State::ScrapeView].endpoint(handle_video_action))
         .branch(case![State::ScrapeView].endpoint(handle_undo))
         .branch(case![State::ScrapeView].endpoint(handle_remove_from_view))
@@ -125,7 +114,5 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
             .endpoint(handle_settings),
         );
 
-    dialogue::enter::<Update, InMemStorage<State>, State, _>()
-        .branch(message_handler)
-        .branch(callback_handler)
+    dialogue::enter::<Update, InMemStorage<State>, State, _>().branch(message_handler).branch(callback_handler)
 }

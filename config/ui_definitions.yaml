@@ -19,5 +19,5 @@ labels:
   settings_title: "⚙️  Settings  🔧\n\n🕒"
   accepted_caption: "✅  Accepted"
   rejected_caption: "👎  Rejected"
-  posted_video_caption: "📬  Posted"
-  queued_video_caption: "⏳  Queued"
+  posted_caption: "📬  Posted"
+  queued_caption: "⏳  Queued"
