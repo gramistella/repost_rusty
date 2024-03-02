@@ -23,7 +23,7 @@ use teloxide::{
 use tokio::sync::mpsc::Receiver;
 use tokio::time::sleep;
 
-use crate::database::{Database, DatabaseTransaction, PostedContent, QueuedPost, UserSettings, VideoInfo};
+use crate::database::{Database, DatabaseTransaction, PostedContent, QueuedContent, UserSettings, VideoInfo};
 use crate::telegram_bot::state::{schema, State};
 use indexmap::IndexMap;
 
@@ -41,7 +41,7 @@ struct UIDefinitions {
 type BotDialogue = Dialogue<State, InMemStorage<State>>;
 
 const CHAT_ID: ChatId = ChatId(34957918);
-const REFRESH_RATE: Duration = Duration::from_secs(60);
+const REFRESH_RATE: Duration = Duration::from_secs(30);
 
 pub(crate) async fn run_bot(rx: Receiver<(String, String, String, String)>, database: Database, credentials: HashMap<String, String>) {
     let api_token = credentials.get("telegram_api_token").unwrap();
@@ -103,9 +103,9 @@ async fn receive_videos(mut rx: Receiver<(String, String, String, String)>, bot:
                 };
 
                 let message_id = tx.get_temp_message_id(user_settings);
-                let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(MessageId(message_id), video.clone())]);
+                let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(MessageId(message_id), video.clone())]);
 
-                tx.save_video_info(video_mapping).unwrap();
+                tx.save_content_mapping(content_mapping).unwrap();
             };
 
             //println!("Received URL: \n\"{}\"\ncaption: \n\"{}\"\n", received_url, received_caption);
@@ -118,12 +118,10 @@ async fn receive_videos(mut rx: Receiver<(String, String, String, String)>, bot:
                 println!("Error sending video in loop: {}", e)
             }
         };
-
     }
 }
 
 async fn send_videos(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
-
     let _mutex_guard = execution_mutex.lock().await;
 
     let dialogue_state = dialogue.get().await.unwrap().unwrap_or_else(|| State::ScrapeView);
@@ -133,7 +131,7 @@ async fn send_videos(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex
     }
 
     let mut tx = database.begin_transaction().unwrap();
-    if let Ok(video_mapping) = tx.load_video_mapping() {
+    if let Ok(video_mapping) = tx.load_content_mapping() {
         for (message_id, mut video_info) in video_mapping {
             let input_file = InputFile::url(video_info.url.parse().unwrap());
             let full_video_caption = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
@@ -153,6 +151,8 @@ async fn send_videos(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex
                 "queued_shown" => process_queued_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await,
                 "rejected_hidden" => process_rejected_hidden(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await,
                 "rejected_shown" => process_rejected_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await,
+                "failed_hidden" => process_failed_hidden(&bot, &ui_definitions, &mut video_info, input_file, full_video_caption).await,
+                "failed_shown" => process_failed_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info, full_video_caption).await,
                 "removed_from_view" => Ok((message_id, video_info)),
                 _ => {
                     println!("Unknown status: {}", video_info.status);
@@ -163,8 +163,8 @@ async fn send_videos(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex
 
             match result {
                 Ok((message_id, video_info)) => {
-                    let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info)]);
-                    tx.save_video_info(video_mapping).unwrap();
+                    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info)]);
+                    tx.save_content_mapping(content_mapping).unwrap();
                 }
                 Err(e) => {
                     println!("Error: {}", e);
@@ -175,27 +175,45 @@ async fn send_videos(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex
     Ok(())
 }
 
-async fn process_pending_shown(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-    input_file: InputFile,
-    mut full_video_caption: String,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_failed_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo, mut full_video_caption: String) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+    let failed_content = tx.load_failed_content().unwrap();
+    for mut content in failed_content {
+        if content.original_shortcode == video_info.original_shortcode {
+            // Parse content failed at into a DateTime
+            let datetime = DateTime::parse_from_rfc3339(&content.last_updated_at)?;
+            let now = now_in_my_timezone(tx.load_user_settings()?);
+            // Check
+            if now > datetime {
+                let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], message_id);
+                video_info.status = "failed_shown".to_string();
+                let full_video_caption = format!("{}\n\n{}", full_video_caption, ui_definitions.labels.get("failed_caption").unwrap());
+                edit_message_caption_and_markup(&bot, CHAT_ID, message_id, full_video_caption, video_actions).await?;
+
+                content.last_updated_at = (now + Duration::from_secs(60)).to_rfc3339();
+                tx.update_failed_content(content.clone())?;
+
+                return Ok((message_id, video_info.clone()));
+            }
+        }
+    }
+
+    Ok((message_id, video_info.clone()))
+}
+
+async fn process_failed_hidden(bot: &Bot, ui_definitions: &UIDefinitions, mut video_info: &mut VideoInfo, input_file: InputFile, mut full_video_caption: String) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+    let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
+    let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], sent_message_id);
+    video_info.status = "failed_shown".to_string();
+    let full_video_caption = format!("{}\n\n{}", full_video_caption, ui_definitions.labels.get("failed_caption").unwrap());
+    edit_message_caption_and_markup(&bot, CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
+    Ok((sent_message_id, video_info.clone()))
+}
+
+async fn process_pending_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo, input_file: InputFile, mut full_video_caption: String) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     return Ok((message_id, video_info.clone()));
 }
 
-async fn process_pending_hidden(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-    input_file: InputFile,
-    mut full_video_caption: String,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_pending_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo, input_file: InputFile, mut full_video_caption: String) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
     let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
     video_info.status = "pending_shown".to_string();
@@ -203,15 +221,7 @@ async fn process_pending_hidden(
     Ok((sent_message_id, video_info.clone()))
 }
 
-async fn process_waiting(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-    input_file: InputFile,
-    mut full_video_caption: String,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_waiting(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo, input_file: InputFile, mut full_video_caption: String) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
     let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
     video_info.status = "pending_shown".to_string();
@@ -219,15 +229,7 @@ async fn process_waiting(
     Ok((sent_message_id, video_info.clone()))
 }
 
-async fn process_accepted_hidden(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-    input_file: InputFile,
-    mut full_video_caption: String,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_accepted_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo, input_file: InputFile, mut full_video_caption: String) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     // Use the helper function to send the video and get the message ID.
     let sent_message_id = send_video_and_get_id(bot, input_file).await?;
 
@@ -250,14 +252,7 @@ async fn process_accepted_hidden(
     Ok((sent_message_id, video_info.clone()))
 }
 
-async fn process_accepted_shown(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    mut tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
-
+async fn process_accepted_shown(bot: &Bot, ui_definitions: &UIDefinitions, mut tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     //println!("process_accepted_shown - Message ID: {}", message_id);
     /*
     let mut content_list = tx.load_video_mapping().unwrap();
@@ -297,13 +292,7 @@ async fn process_accepted_shown(
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_rejected_hidden(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    mut tx: &mut DatabaseTransaction,
-    mut message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_rejected_hidden(bot: &Bot, ui_definitions: &UIDefinitions, mut tx: &mut DatabaseTransaction, mut message_id: MessageId, mut video_info: &mut VideoInfo) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     video_info.status = "rejected_shown".to_string();
 
     let rejected_content = tx.load_rejected_content()?;
@@ -323,7 +312,7 @@ async fn process_rejected_hidden(
                 did_expire = true;
                 content.expired = true;
                 tx.save_rejected_content(content.clone())?;
-                tx.remove_video_info_with_shortcode(content.original_shortcode.clone())?;
+                tx.remove_content_info_with_shortcode(content.original_shortcode.clone())?;
                 //println!("Permanently removed post from video_info: {}", content.url);
             } else {
                 video_info.status = "rejected_shown".to_string();
@@ -359,34 +348,17 @@ async fn process_rejected_hidden(
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_queued_hidden(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-    input_file: &InputFile,
-    mut full_video_caption: String,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_queued_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo, input_file: &InputFile, mut full_video_caption: String) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     video_info.status = "queued_shown".to_string();
 
     // Extract the queued post information
-    let queued_post = match tx
-        .load_post_queue()
-        .unwrap()
-        .into_iter()
-        .find(|post| post.original_shortcode == video_info.original_shortcode){
-            Some(post) => Some(post),
-            None => None
+    let queued_post = match tx.load_content_queue().unwrap().into_iter().find(|post| post.original_shortcode == video_info.original_shortcode) {
+        Some(post) => Some(post),
+        None => None,
     };
 
     if queued_post == None {
-        let posted_content = tx
-            .load_post_queue()
-            .unwrap()
-            .into_iter()
-            .find(|post| post.original_shortcode == video_info.original_shortcode)
-            .expect("No queued or uploaded post found");
+        let posted_content = tx.load_content_queue().unwrap().into_iter().find(|post| post.original_shortcode == video_info.original_shortcode).expect("No queued or uploaded post found");
 
         let (message_id, video_info) = process_posted_hidden(bot, ui_definitions, tx, message_id, video_info, input_file, full_video_caption).await?;
         return Ok((message_id, video_info));
@@ -418,8 +390,8 @@ async fn process_queued_hidden(
             let remove_from_queue_action = get_action_buttons(ui_definitions, &["remove_from_queue"], message_id);
             edit_message_caption_and_markup(bot, CHAT_ID, message_id, full_video_caption, remove_from_queue_action).await?;
 
-            let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
-            tx.save_video_info(video_mapping).unwrap();
+            let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+            tx.save_content_mapping(content_mapping).unwrap();
             Ok((message_id, video_info.clone()))
         }
         Err(e) => {
@@ -437,16 +409,9 @@ async fn process_queued_hidden(
     }
 }
 
-async fn process_queued_shown(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_queued_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     //println!("process_queued_shown - Message ID: {}", message_id);
-    let mut queued_content_list = tx.load_post_queue().unwrap();
+    let mut queued_content_list = tx.load_content_queue().unwrap();
     for mut queued_content in &mut queued_content_list {
         if queued_content.original_shortcode == video_info.original_shortcode {
             let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
@@ -462,10 +427,7 @@ async fn process_queued_shown(
             let posted_caption = ui_definitions.labels.get("queued_caption").unwrap();
             let formatted_datetime = will_post_at.format("%H:%M %m/%d").to_string();
 
-            let mut countdown_caption = format!(
-                "({} hours, {} minutes and {} seconds from now)",
-                hours_until_expiration, minutes_until_expiration, seconds_until_expiration
-            );
+            let mut countdown_caption = format!("({} hours, {} minutes and {} seconds from now)", hours_until_expiration, minutes_until_expiration, seconds_until_expiration);
 
             let hours = hours_until_expiration.parse::<i32>().unwrap_or(0);
             let minutes = minutes_until_expiration.parse::<i32>().unwrap_or(0);
@@ -481,7 +443,6 @@ async fn process_queued_shown(
             );
 
             if last_updated_at < now - REFRESH_RATE {
-
                 let remove_from_queue_action_text = ui_definitions.buttons.get("remove_from_queue").unwrap();
                 let _ = match bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
                     Ok(_) => {
@@ -494,7 +455,7 @@ async fn process_queued_shown(
 
                         let undo_action = [InlineKeyboardButton::callback(remove_from_queue_action_text, format!("remove_from_queue_{}", new_message.id))];
 
-                        tx.save_video_info(IndexMap::from([(new_message.id, video_info.clone())]))?;
+                        tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
 
                         let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
                     }
@@ -502,7 +463,7 @@ async fn process_queued_shown(
 
                 if !tx.load_posted_content().unwrap().iter().any(|content| content.original_shortcode == video_info.original_shortcode) {
                     queued_content.last_updated_at = now.to_rfc3339();
-                    tx.save_post_queue(queued_content.clone())?;
+                    tx.save_content_queue(queued_content.clone())?;
                 } else {
                     video_info.status = "posted_hidden".to_string();
                 }
@@ -514,24 +475,14 @@ async fn process_queued_shown(
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_posted_hidden(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    mut tx: &mut DatabaseTransaction,
-    mut message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-    input_file: &InputFile,
-    mut full_video_caption: String,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_posted_hidden(bot: &Bot, ui_definitions: &UIDefinitions, mut tx: &mut DatabaseTransaction, mut message_id: MessageId, mut video_info: &mut VideoInfo, input_file: &InputFile, mut full_video_caption: String) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     //println!("process_posted_hidden - Message ID: {}", message_id);
     video_info.status = "posted_shown".to_string();
     let mut posted_content_list = tx.load_posted_content().unwrap();
     for mut posted_content in &mut posted_content_list {
         if posted_content.original_shortcode == video_info.original_shortcode {
             let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
-            let will_expire_at = datetime
-                .checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60))
-                .unwrap();
+            let will_expire_at = datetime.checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60)).unwrap();
 
             let user_settings = tx.load_user_settings().unwrap();
             let now = now_in_my_timezone(user_settings);
@@ -544,14 +495,7 @@ async fn process_posted_hidden(
             let formatted_datetime = datetime.format("%H:%M %m/%d").to_string();
             full_video_caption = format!(
                 "{}\n{}\n(from @{})\n\n{} at {}\n\nWill expire in {} hours, {} minutes and {} seconds",
-                posted_content.caption,
-                posted_content.hashtags,
-                posted_content.original_author,
-                posted_caption,
-                formatted_datetime,
-                hours_until_expiration,
-                minutes_until_expiration,
-                seconds_until_expiration
+                posted_content.caption, posted_content.hashtags, posted_content.original_author, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
             );
 
             match bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
@@ -559,13 +503,10 @@ async fn process_posted_hidden(
                     let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
                     let remove_from_view_action = [InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", message_id))];
 
-                    bot.edit_message_reply_markup(CHAT_ID, message_id)
-                        .reply_markup(InlineKeyboardMarkup::new([remove_from_view_action]))
-                        .await?;
+                    bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([remove_from_view_action])).await?;
 
-                    let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
-                    tx.save_video_info(video_mapping).unwrap();
-
+                    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+                    tx.save_content_mapping(content_mapping).unwrap();
                 }
                 Err(_) => {
                     let new_message = bot.send_video(CHAT_ID, input_file.to_owned()).caption(full_video_caption.clone()).await.unwrap();
@@ -594,13 +535,13 @@ async fn update_reply_markup(bot: &Bot, message_id: MessageId, ui_definitions: &
 }
 
 enum ContentType {
-    QueuedPost(QueuedPost),
+    QueuedContent(QueuedContent),
     PostedContent(PostedContent),
 }
 
 fn get_content_details(content: ContentType, user_settings: &UserSettings, ui_definitions: &UIDefinitions) -> Option<(String, String)> {
     match content {
-        ContentType::QueuedPost(queued_post) => {
+        ContentType::QueuedContent(queued_post) => {
             let datetime = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap();
             let formatted_datetime = datetime.format("%H:%M %m-%d").to_string();
             let caption_label = ui_definitions.labels.get("queued_caption").unwrap();
@@ -609,33 +550,21 @@ fn get_content_details(content: ContentType, user_settings: &UserSettings, ui_de
         ContentType::PostedContent(posted_content) => {
             let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
             let formatted_datetime = datetime.format("%H:%M %m-%d").to_string();
-            let will_expire_at = datetime
-                .checked_add_signed(chrono::Duration::seconds(user_settings.posted_content_lifespan * 60))
-                .unwrap()
-                .format("%H:%M %m-%d")
-                .to_string();
+            let will_expire_at = datetime.checked_add_signed(chrono::Duration::seconds(user_settings.posted_content_lifespan * 60)).unwrap().format("%H:%M %m-%d").to_string();
             let caption_label = ui_definitions.labels.get("posted_caption").unwrap();
             Some((format!("{} at {}\n  Will expire at {}", caption_label, formatted_datetime, will_expire_at), formatted_datetime))
         }
     }
 }
 
-async fn process_rejected_shown(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    mut tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_rejected_shown(bot: &Bot, ui_definitions: &UIDefinitions, mut tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     let mut rejected_content_list = tx.load_rejected_content().unwrap();
     for mut rejected_content in &mut rejected_content_list {
         if rejected_content.original_shortcode == video_info.original_shortcode {
             let datetime = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
             //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
 
-            let will_expire_at = datetime
-                .checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60))
-                .unwrap();
+            let will_expire_at = datetime.checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60)).unwrap();
 
             let user_settings = tx.load_user_settings().unwrap();
             if will_expire_at < now_in_my_timezone(user_settings.clone()) {
@@ -661,13 +590,7 @@ async fn process_rejected_shown(
                     let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
                     let full_video_caption = format!(
                         "{}\n{}\n(from @{})\n\n{}\n\nWill expire in {} hours, {} minutes and {} seconds",
-                        rejected_content.caption,
-                        rejected_content.hashtags,
-                        rejected_content.original_author,
-                        rejected_caption,
-                        hours_until_expiration,
-                        minutes_until_expiration,
-                        seconds_until_expiration
+                        rejected_content.caption, rejected_content.hashtags, rejected_content.original_author, rejected_caption, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
                     );
 
                     let _ = match bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
@@ -683,10 +606,7 @@ async fn process_rejected_shown(
                         }
                         Err(e) => {
                             println!("Error: {}", e);
-                            let new_message = bot
-                                .send_video(CHAT_ID, InputFile::url(rejected_content.url.clone().parse().unwrap()))
-                                .caption(full_video_caption)
-                                .await?;
+                            let new_message = bot.send_video(CHAT_ID, InputFile::url(rejected_content.url.clone().parse().unwrap())).caption(full_video_caption).await?;
 
                             let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
                             let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
@@ -695,7 +615,7 @@ async fn process_rejected_shown(
                                 InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id)),
                             ];
 
-                            tx.save_video_info(IndexMap::from([(new_message.id, video_info.clone())]))?;
+                            tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
 
                             let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
                         }
@@ -712,13 +632,7 @@ async fn process_rejected_shown(
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_posted_shown(
-    bot: &Bot,
-    ui_definitions: &UIDefinitions,
-    mut tx: &mut DatabaseTransaction,
-    message_id: MessageId,
-    mut video_info: &mut VideoInfo,
-) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
+async fn process_posted_shown(bot: &Bot, ui_definitions: &UIDefinitions, mut tx: &mut DatabaseTransaction, message_id: MessageId, mut video_info: &mut VideoInfo) -> Result<(MessageId, VideoInfo), Box<dyn Error + Send + Sync>> {
     //println!("process_posted_shown - Message ID: {}", message_id);
     let mut posted_content_list = tx.load_posted_content().unwrap();
     for mut posted_content in &mut posted_content_list {
@@ -726,9 +640,7 @@ async fn process_posted_shown(
             let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
             //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
 
-            let will_expire_at = datetime
-                .checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60))
-                .unwrap();
+            let will_expire_at = datetime.checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60)).unwrap();
 
             let user_settings = tx.load_user_settings().unwrap();
             if will_expire_at < now_in_my_timezone(user_settings.clone()) {
@@ -770,7 +682,7 @@ async fn process_posted_shown(
                             let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
                             let undo_action = [InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id))];
 
-                            tx.save_video_info(IndexMap::from([(new_message.id, video_info.clone())]))?;
+                            tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
 
                             let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
                         }

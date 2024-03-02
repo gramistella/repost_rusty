@@ -85,7 +85,10 @@ pub async fn display_settings_message(bot: Bot, dialogue: BotDialogue, database:
     } else {
         "UTC".to_string()
     };
-    let settings_message_string = format!("{}  {} {}\n\nPosting is currently {}.\nInterval between posts is {} minutes.\nRandom interval is ±{} minutes\nRejected content expires after {} minutes\nPosted content expires after {} minutes\n\nWhat would you like to change?", settings_title_text, current_time, utc_string, posting_status, user_settings.posting_interval, user_settings.random_interval_variance, user_settings.rejected_content_lifespan, user_settings.posted_content_lifespan);
+    let settings_message_string = format!(
+        "{}  {} {}\n\nPosting is currently {}.\nInterval between posts is {} minutes.\nRandom interval is ±{} minutes\nRejected content expires after {} minutes\nPosted content expires after {} minutes\n\nWhat would you like to change?",
+        settings_title_text, current_time, utc_string, posting_status, user_settings.posting_interval, user_settings.random_interval_variance, user_settings.rejected_content_lifespan, user_settings.posted_content_lifespan
+    );
 
     let settings_message = bot.send_message(CHAT_ID, settings_message_string).await?;
 
@@ -106,39 +109,22 @@ pub async fn display_settings_message(bot: Bot, dialogue: BotDialogue, database:
     };
 
     let go_back_action_text = ui_definitions.buttons.get("go_back").unwrap();
-    let settings_actions_row_1 = vec![
-        InlineKeyboardButton::callback(go_back_action_text, format!("go_back_{}", settings_message.id)),
-        settings_action_row_1_col_2,
-    ];
+    let settings_actions_row_1 = vec![InlineKeyboardButton::callback(go_back_action_text, format!("go_back_{}", settings_message.id)), settings_action_row_1_col_2];
 
     let adjust_posting_interval_action_text = ui_definitions.buttons.get("adjust_posting_interval").unwrap();
-    let settings_actions_row_2 = vec![InlineKeyboardButton::callback(
-        adjust_posting_interval_action_text,
-        format!("adjust_posting_interval_{}", settings_message.id),
-    )];
+    let settings_actions_row_2 = vec![InlineKeyboardButton::callback(adjust_posting_interval_action_text, format!("adjust_posting_interval_{}", settings_message.id))];
 
     let adjust_random_interval_action_text = ui_definitions.buttons.get("adjust_random_interval").unwrap();
-    let settings_actions_row_3 = vec![InlineKeyboardButton::callback(
-        adjust_random_interval_action_text,
-        format!("adjust_random_interval_{}", settings_message.id),
-    )];
+    let settings_actions_row_3 = vec![InlineKeyboardButton::callback(adjust_random_interval_action_text, format!("adjust_random_interval_{}", settings_message.id))];
 
     let adjust_rejected_content_lifespan_action_text = ui_definitions.buttons.get("adjust_rejected_content_lifespan").unwrap();
-    let settings_actions_row_4 = vec![InlineKeyboardButton::callback(
-        adjust_rejected_content_lifespan_action_text,
-        format!("adjust_rejected_content_lifespan_{}", settings_message.id),
-    )];
+    let settings_actions_row_4 = vec![InlineKeyboardButton::callback(adjust_rejected_content_lifespan_action_text, format!("adjust_rejected_content_lifespan_{}", settings_message.id))];
 
     let adjust_posted_content_lifespan_action_text = ui_definitions.buttons.get("adjust_posted_content_lifespan").unwrap();
-    let settings_actions_row_5 = vec![InlineKeyboardButton::callback(
-        adjust_posted_content_lifespan_action_text,
-        format!("adjust_posted_content_lifespan_{}", settings_message.id),
-    )];
+    let settings_actions_row_5 = vec![InlineKeyboardButton::callback(adjust_posted_content_lifespan_action_text, format!("adjust_posted_content_lifespan_{}", settings_message.id))];
 
     let settings_actions = [settings_actions_row_1, settings_actions_row_2, settings_actions_row_3, settings_actions_row_4, settings_actions_row_5];
 
-    bot.edit_message_reply_markup(CHAT_ID, settings_message.id)
-        .reply_markup(InlineKeyboardMarkup::new(settings_actions))
-        .await?;
+    bot.edit_message_reply_markup(CHAT_ID, settings_message.id).reply_markup(InlineKeyboardMarkup::new(settings_actions)).await?;
     Ok(())
 }

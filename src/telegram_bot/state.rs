@@ -56,48 +56,12 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
 
     let message_handler = Update::filter_message()
         .branch(command_handler)
-        .branch(
-            case![State::ReceivePostingInterval {
-                stored_messages_to_delete,
-                original_message_id,
-            }]
-            .endpoint(receive_posting_interval),
-        )
-        .branch(
-            case![State::ReceiveRandomInterval {
-                stored_messages_to_delete,
-                original_message_id,
-            }]
-            .endpoint(receive_random_interval),
-        )
-        .branch(
-            case![State::ReceiveRejectedContentLifespan {
-                stored_messages_to_delete,
-                original_message_id,
-            }]
-            .endpoint(receive_rejected_content_lifespan),
-        )
-        .branch(
-            case![State::ReceivePostedContentLifespan {
-                stored_messages_to_delete,
-                original_message_id,
-            }]
-            .endpoint(receive_posted_content_lifespan),
-        )
-        .branch(
-            case![State::ReceiveCaption {
-                stored_messages_to_delete,
-                original_message_id,
-            }]
-            .endpoint(receive_caption),
-        )
-        .branch(
-            case![State::ReceiveHashtags {
-                stored_messages_to_delete,
-                original_message_id,
-            }]
-            .endpoint(receive_hashtags),
-        );
+        .branch(case![State::ReceivePostingInterval { stored_messages_to_delete, original_message_id }].endpoint(receive_posting_interval))
+        .branch(case![State::ReceiveRandomInterval { stored_messages_to_delete, original_message_id }].endpoint(receive_random_interval))
+        .branch(case![State::ReceiveRejectedContentLifespan { stored_messages_to_delete, original_message_id }].endpoint(receive_rejected_content_lifespan))
+        .branch(case![State::ReceivePostedContentLifespan { stored_messages_to_delete, original_message_id }].endpoint(receive_posted_content_lifespan))
+        .branch(case![State::ReceiveCaption { stored_messages_to_delete, original_message_id }].endpoint(receive_caption))
+        .branch(case![State::ReceiveHashtags { stored_messages_to_delete, original_message_id }].endpoint(receive_hashtags));
 
     let callback_handler = Update::filter_callback_query()
         .branch(case![State::AcceptedView].endpoint(handle_accepted_view))
@@ -106,13 +70,7 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
         .branch(case![State::ScrapeView].endpoint(handle_video_action))
         .branch(case![State::ScrapeView].endpoint(handle_undo))
         .branch(case![State::ScrapeView].endpoint(handle_remove_from_view))
-        .branch(
-            case![State::SettingsView {
-                stored_messages_to_delete,
-                original_message_id
-            }]
-            .endpoint(handle_settings),
-        );
+        .branch(case![State::SettingsView { stored_messages_to_delete, original_message_id }].endpoint(handle_settings));
 
     dialogue::enter::<Update, InMemStorage<State>, State, _>().branch(message_handler).branch(callback_handler)
 }

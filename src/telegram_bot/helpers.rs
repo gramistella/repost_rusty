@@ -14,11 +14,10 @@ pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Resul
     // Load the video mappings
 
     let mut tx = database.begin_transaction().unwrap();
-    let mut video_mapping = tx.load_video_mapping().unwrap();
+    let mut content_mapping = tx.load_content_mapping().unwrap();
     // println!("Trying to clear messages");
-    for (message_id, video_info) in &mut video_mapping {
-
-        println!("Clearing message with ID: {}, status {}", message_id, video_info.status);
+    for (message_id, video_info) in &mut content_mapping {
+        //println!("Clearing message with ID: {}, status {}", message_id, video_info.status);
 
         if video_info.status == "pending_shown" {
             video_info.status = "pending_hidden".to_string();
@@ -89,7 +88,7 @@ pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Resul
 
     // Save the updated video mappings
     let mut tx = database.begin_transaction().unwrap();
-    tx.save_video_info(video_mapping).unwrap();
+    tx.save_content_mapping(content_mapping).unwrap();
 
     Ok(())
 }

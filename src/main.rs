@@ -29,7 +29,6 @@ async fn main() -> anyhow::Result<()> {
 
     let credentials = read_credentials("config/credentials.yaml");
 
-
     // Run the scraper and the bot concurrently
     let scraper = tokio::spawn(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone()));
     let telegram_bot = tokio::spawn(telegram_bot::run_bot(rx, db, credentials));

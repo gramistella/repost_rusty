@@ -1,39 +1,37 @@
 use crate::database::{Database, RejectedContent, UserSettings, VideoInfo};
 use crate::telegram_bot::commands::{display_settings_message, restore_sent_messages};
-use crate::telegram_bot::helpers::{clear_sent_messages};
-use crate::telegram_bot::{send_videos, BotDialogue, HandlerResult, State, UIDefinitions, process_rejected_shown, process_accepted_shown, process_queued_shown, process_accepted_hidden};
+use crate::telegram_bot::helpers::clear_sent_messages;
+use crate::telegram_bot::{process_accepted_hidden, process_accepted_shown, process_queued_shown, process_rejected_shown, send_videos, BotDialogue, HandlerResult, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
+use chrono::Duration;
 use indexmap::IndexMap;
 use std::sync::Arc;
-use chrono::Duration;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId};
 use teloxide::Bot;
 use tokio::sync::Mutex;
 
 pub async fn handle_accepted_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
-
-
     let chat_id = q.message.clone().unwrap().chat.id;
 
     // Extract the message id from the callback data
     let (_action, message_id) = parse_callback_query(&q);
     let mut tx = database.begin_transaction().unwrap();
-    let mut video_info = tx.get_video_info_by_message_id(message_id).unwrap();
+    let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
     //println!("original message id {}, action {}", message_id, action);
 
     let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
     let undo_action = [InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", message_id))];
 
     let accepted_caption_text = ui_definitions.labels.get("accepted_caption").unwrap();
-    let full_caption = format!("{}\n{}\n(from @{})\n\n{} - {} ", video_info.caption, video_info.hashtags, video_info.original_author, accepted_caption_text, message_id.0);
+    let full_caption = format!("{}\n{}\n(from @{})\n\n{}", video_info.caption, video_info.hashtags, video_info.original_author, accepted_caption_text);
     bot.edit_message_caption(chat_id, message_id).caption(full_caption.clone()).await?;
 
     let _msg = bot.edit_message_reply_markup(chat_id, message_id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
     //println!("accepted ids: {}, {}", msg.id, message_id);
     video_info.status = "accepted_shown".to_string();
-    let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
-    tx.save_video_info(video_mapping).unwrap();
+    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    tx.save_content_mapping(content_mapping).unwrap();
 
     process_accepted_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await?;
 
@@ -43,19 +41,17 @@ pub async fn handle_accepted_view(bot: Bot, dialogue: BotDialogue, q: CallbackQu
 }
 
 pub async fn handle_rejected_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, user_settings: UserSettings, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
-
-
     let _chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
     let mut tx = database.begin_transaction().unwrap();
-    let mut video_info = tx.get_video_info_by_message_id(message_id).unwrap();
+    let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
     //println!("original message id {}, action {}", message_id, action);
 
     video_info.status = "rejected_shown".to_string();
-    let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
     let mut tx = database.begin_transaction().unwrap();
-    tx.save_video_info(video_mapping).unwrap();
+    tx.save_content_mapping(content_mapping).unwrap();
 
     let now = now_in_my_timezone(user_settings.clone());
 
@@ -79,7 +75,7 @@ pub async fn handle_rejected_view(bot: Bot, dialogue: BotDialogue, q: CallbackQu
     //let _did_expire = expire_rejected_content(&bot, ui_definitions, &mut tx, message_id, &mut video_info).await?;
     process_rejected_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await?;
 
-    tx.save_video_info(IndexMap::from([(message_id, video_info)])).unwrap();
+    tx.save_content_mapping(IndexMap::from([(message_id, video_info)])).unwrap();
     dialogue.update(State::ScrapeView).await.unwrap();
 
     Ok(())
@@ -91,12 +87,12 @@ pub async fn handle_undo(bot: Bot, q: CallbackQuery, database: Database, ui_defi
     // Extract the message id from the callback data
     let (_action, message_id) = parse_callback_query(&q);
     let mut tx = database.begin_transaction().unwrap();
-    let mut video_info = tx.get_video_info_by_message_id(message_id).unwrap();
+    let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
     video_info.status = "pending_shown".to_string();
-    let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
     let mut tx = database.begin_transaction().unwrap();
-    tx.save_video_info(video_mapping).unwrap();
+    tx.save_content_mapping(content_mapping).unwrap();
 
     let full_video_caption = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
     bot.edit_message_caption(chat_id, message_id).caption(full_video_caption).await?;
@@ -132,9 +128,9 @@ pub async fn handle_remove_from_view(bot: Bot, q: CallbackQuery, database: Datab
 
     let (_action, message_id) = parse_callback_query(&q);
     let mut tx = database.begin_transaction().unwrap();
-    let video_info = tx.get_video_info_by_message_id(message_id).unwrap();
+    let video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
-    tx.remove_video_info_with_shortcode(video_info.original_shortcode).unwrap();
+    tx.remove_content_info_with_shortcode(video_info.original_shortcode).unwrap();
 
     bot.delete_message(chat_id, message_id).await?;
 
@@ -156,11 +152,7 @@ pub async fn handle_video_action(bot: Bot, dialogue: BotDialogue, execution_mute
             let user_settings = tx.load_user_settings().unwrap();
             handle_rejected_view(bot, dialogue, q, database, ui_definitions, user_settings, execution_mutex).await?;
         } else if action == "edit" {
-            dialogue
-                .update(State::EditView {
-                    stored_messages_to_delete: Vec::new(),
-                })
-                .await?;
+            dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
             handle_edit_view(bot, dialogue, q, execution_mutex, database, ui_definitions).await?;
         } else if action == "undo" {
             dialogue.update(State::ScrapeView).await.unwrap();
@@ -248,7 +240,6 @@ pub async fn handle_settings(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, 
 }
 
 pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, execution_mutex: Arc<Mutex<()>>, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
-
     {
         let _execution_lock_copy = Arc::clone(&execution_mutex);
         let _execution_lock_copy = _execution_lock_copy.lock().await;
@@ -271,10 +262,10 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
         //println!("accept - message id: {}", message_id);
         // Clear the sent messages, from message_id to the latest message
         let mut tx = database.begin_transaction().unwrap();
-        let mut video = tx.get_video_info_by_message_id(message_id).unwrap();
+        let mut video = tx.get_content_info_by_message_id(message_id).unwrap();
 
         video.status = "accepted_hidden".to_string();
-        tx.save_video_info(IndexMap::from([(message_id, video)])).unwrap();
+        tx.save_content_mapping(IndexMap::from([(message_id, video)])).unwrap();
 
         bot.delete_message(chat_id, q.message.unwrap().id).await?;
         send_videos(bot.clone(), dialogue.clone(), execution_mutex, database, ui_definitions).await?;
@@ -283,7 +274,7 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
         return Ok(());
     } else if action == "edit" {
         let mut tx = database.begin_transaction().unwrap();
-        let video = tx.get_video_info_by_message_id(message_id).unwrap();
+        let video = tx.get_content_info_by_message_id(message_id).unwrap();
         clear_sent_messages(bot.clone(), database).await.unwrap();
 
         let go_back_action_text = ui_definitions.buttons.get("go_back").unwrap();
@@ -301,19 +292,12 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
         let edit_actions = [edit_action_row_1, edit_action_row_2, edit_action_row_3, edit_action_row_4];
 
         let msg2 = bot
-            .send_message(
-                q.message.clone().unwrap().chat.id,
-                format!("Url: {}\nCaption: {}\nHashtags: {}\n(from @{})", video.url, video.caption, video.hashtags, video.original_author),
-            )
+            .send_message(q.message.clone().unwrap().chat.id, format!("Url: {}\nCaption: {}\nHashtags: {}\n(from @{})", video.url, video.caption, video.hashtags, video.original_author))
             .reply_markup(InlineKeyboardMarkup::new(edit_actions))
             .await?;
 
         // Update the dialogue with the new state
-        dialogue
-            .update(State::EditView {
-                stored_messages_to_delete: vec![msg2.id],
-            })
-            .await?;
+        dialogue.update(State::EditView { stored_messages_to_delete: vec![msg2.id] }).await?;
     } else if action == "edit_caption" {
         let mut messages_to_delete = Vec::new();
 
@@ -323,7 +307,7 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
             }
         }
 
-        let caption_message = bot.send_message(chat_id, "Please send your caption.").await?;
+        let caption_message = bot.send_message(chat_id, "Please send your caption.\nUse '!' to empty the field").await?;
         messages_to_delete.push(caption_message.id);
         // Update the dialogue with the new state
 
@@ -343,7 +327,7 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
             }
         }
 
-        let caption_message = bot.send_message(chat_id, "Please send your hashtags.").await?;
+        let caption_message = bot.send_message(chat_id, "Please send your hashtags.\nUse '!' to empty the field").await?;
         messages_to_delete.push(caption_message.id);
         // Update the dialogue with the new state
 
@@ -392,15 +376,15 @@ pub async fn handle_remove_from_queue(bot: Bot, q: CallbackQuery, database: Data
     let (_action, message_id) = parse_callback_query(&q);
 
     let mut tx = database.begin_transaction().unwrap();
-    let mut video_info = tx.get_video_info_by_message_id(message_id).unwrap();
+    let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
     let mut tx = database.begin_transaction().unwrap();
     tx.remove_post_from_queue_with_shortcode(video_info.original_shortcode.clone()).unwrap();
 
     video_info.status = "pending_shown".to_string();
-    let video_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
     let mut tx = database.begin_transaction().unwrap();
-    tx.save_video_info(video_mapping).unwrap();
+    tx.save_content_mapping(content_mapping).unwrap();
 
     let full_video_caption = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
     bot.edit_message_caption(chat_id, message_id).caption(full_video_caption).await?;

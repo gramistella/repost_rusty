@@ -1,4 +1,4 @@
-use crate::database::{Database, PostedContent, QueuedPost};
+use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
 use chrono::DateTime;
 use indexmap::IndexMap;
 use instagram_scraper_rs::{InstagramScraper, InstagramScraperResult, Post, User};
@@ -15,34 +15,21 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) -> anyhow::Result<()> {
-    let profile_list = vec![
-        "qringey",
-        "repostrandy",
-        "cringepostrandy",
-        "cringechub",
-        "cloinking",
-        "rightaccountrandy",
-        "hard.mp4s",
-        "eclipsegotban",
-        "zenxogg",
-        "autistic.browniez",
-        "viewingmag",
+    let profile_list = vec!["qringey", "repostrandy", "cringepostrandy", "cringechub", "cloinking", "rightaccountrandy", "hard.mp4s", "eclipsegotban", "zenxogg", "autistic.browniez", "viewingmag"];
+
+    let testing_urls = vec![
+        "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/427593823_409517391528628_721852697655626393_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=104&_nc_ohc=9pssChekERcAX_XayYY&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAXS0ConI008uTXkgc-woujGN6BchRo_ofWZkPVrg1JfQ&oe=65D574C7&_nc_sid=2999b8",
+        "https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/429215690_1444115769649034_2337419377310423138_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=jEzG6M_uCAQAX8oTbjC&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCGYsCaoUB8qOYTSJJFJZbLMuKCbGZqfXH9ydMu9jKhxQ&oe=65D5D2CE&_nc_sid=2999b8",
+        "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/48718206_1450879249116459_8164759842261415987_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=103&_nc_ohc=GUN_mDr2OYsAX9fRqgF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfC78iGTuJdhnNbhO_fuieXvYT5R3pkhMAD-MLNxtxR7TQ&oe=65D572F7&_nc_sid=2999b8",
+        "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428456788_295092509963149_5948637286561662383_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=101&_nc_ohc=zkatv7OeKwUAX8YNkBr&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAQIp78Fu1NCj719FprGjWMV_gZ3s_b8Ux_mWy3Ek1uOA&oe=65D73480&_nc_sid=2999b8",
+        "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428478842_735629148752808_8195281140553080552_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=100&_nc_ohc=C_p4c8oZuQAAX-v2g55&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfDFvSm0eBmcCsuO3rFKcdLFdi6HBHTKzAkN8tqdAoUn_w&oe=65D69DF3&_nc_sid=2999b8",
+        //"https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/428226521_1419744418741015_2882822033667053284_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=107&_nc_ohc=Dir0Fhly2oQAX-WOLlD&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCdg_GUWzIIA6ueap7WZgK1zG1Zq903lp_RxGFMT22xWA&oe=65D6A70B&_nc_sid=2999b8",
+        //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
+        //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
     ];
 
-    let testing_urls = vec!
-                                    [
-                                        "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/427593823_409517391528628_721852697655626393_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=104&_nc_ohc=9pssChekERcAX_XayYY&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAXS0ConI008uTXkgc-woujGN6BchRo_ofWZkPVrg1JfQ&oe=65D574C7&_nc_sid=2999b8",
-                                        "https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/429215690_1444115769649034_2337419377310423138_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=jEzG6M_uCAQAX8oTbjC&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCGYsCaoUB8qOYTSJJFJZbLMuKCbGZqfXH9ydMu9jKhxQ&oe=65D5D2CE&_nc_sid=2999b8",
-                                        "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/48718206_1450879249116459_8164759842261415987_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=103&_nc_ohc=GUN_mDr2OYsAX9fRqgF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfC78iGTuJdhnNbhO_fuieXvYT5R3pkhMAD-MLNxtxR7TQ&oe=65D572F7&_nc_sid=2999b8",
-                                        "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428456788_295092509963149_5948637286561662383_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=101&_nc_ohc=zkatv7OeKwUAX8YNkBr&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAQIp78Fu1NCj719FprGjWMV_gZ3s_b8Ux_mWy3Ek1uOA&oe=65D73480&_nc_sid=2999b8",
-                                        "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428478842_735629148752808_8195281140553080552_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=100&_nc_ohc=C_p4c8oZuQAAX-v2g55&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfDFvSm0eBmcCsuO3rFKcdLFdi6HBHTKzAkN8tqdAoUn_w&oe=65D69DF3&_nc_sid=2999b8",
-                                        //"https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/428226521_1419744418741015_2882822033667053284_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=107&_nc_ohc=Dir0Fhly2oQAX-WOLlD&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCdg_GUWzIIA6ueap7WZgK1zG1Zq903lp_RxGFMT22xWA&oe=65D6A70B&_nc_sid=2999b8",
-                                        //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
-                                        //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
-                                    ];
-
     let loop_sleep_len = Duration::from_secs(60 * 60);
-    let download_sleep_len = Duration::from_secs(180);
+    let download_sleep_len = Duration::from_secs(60 * 3);
     //let mut unique_post_ids = HashSet::new();
 
     let scraper_loop: Option<tokio::task::JoinHandle<anyhow::Result<()>>>;
@@ -63,9 +50,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                 for url in &testing_urls {
                     inner_loop_iterations += 1;
                     let caption_string = format!("Video {}, loop {}", inner_loop_iterations, loop_iterations);
-                    tx.send((url.to_string(), caption_string, "local".to_string(), format!("shortcode{}", inner_loop_iterations)))
-                        .await
-                        .unwrap();
+                    tx.send((url.to_string(), caption_string, "local".to_string(), format!("shortcode{}", inner_loop_iterations))).await.unwrap();
                     sleep(Duration::from_secs(3)).await;
                 }
             }
@@ -86,7 +71,6 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
             // Create a separate task that sends the URL through the channel
             tokio::spawn(async move {
                 loop {
-
                     let url = {
                         let lock = latest_url_for_task.lock().await;
                         lock.clone()
@@ -94,7 +78,6 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
 
                     if let Some((url, caption, author, shortcode)) = url {
                         tx.send((url, caption, author, shortcode)).await.unwrap();
-
                     } else {
                         tx.send(("".to_string(), "".to_string(), "".to_string(), "C3daVhdxlBT".to_string())).await.unwrap();
                     }
@@ -133,7 +116,6 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                 let sleep_duration = 10;
                 randomized_sleep(sleep_duration).await;
             }
-
 
             let inner_scraper_loop_database = scraper_loop_database.clone();
             loop {
@@ -179,7 +161,6 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                     // Send the URL through the channel
                     if post.is_video {
                         if transaction.does_content_exist_with_shortcode(post.shortcode.clone()) == false {
-
                             println!("{}/{} Scraping content: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                             let mut scraper_guard = cloned_scraper.lock().await;
                             let (url, caption) = scraper_guard.download_reel(&post.shortcode).await.unwrap();
@@ -224,35 +205,35 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
             // Check which video begins with status of "accepted_"
 
             let mut transaction = poster_loop_database.begin_transaction().unwrap();
-            let video_mapping = transaction.load_video_mapping().unwrap();
+            let content_mapping = transaction.load_content_mapping().unwrap();
             let user_settings = transaction.load_user_settings().unwrap();
 
             //let queued_posts = Vec::new();
-            for (message_id, mut video_info) in video_mapping {
-                if video_info.status.contains("accepted_") {
+            for (message_id, mut content_info) in content_mapping {
+                if content_info.status.contains("accepted_") {
                     let last_updated_at = now_in_my_timezone(user_settings.clone()) - Duration::from_secs(60);
                     let will_post_at = transaction.get_new_post_time(user_settings.clone()).unwrap();
-                    let new_queued_post = QueuedPost {
-                        url: video_info.url.clone(),
-                        caption: video_info.caption.clone(),
-                        hashtags: video_info.hashtags.clone(),
-                        original_author: video_info.original_author.clone(),
-                        original_shortcode: video_info.original_shortcode.clone(),
+                    let new_queued_post = QueuedContent {
+                        url: content_info.url.clone(),
+                        caption: content_info.caption.clone(),
+                        hashtags: content_info.hashtags.clone(),
+                        original_author: content_info.original_author.clone(),
+                        original_shortcode: content_info.original_shortcode.clone(),
                         last_updated_at: last_updated_at.to_rfc3339(),
                         will_post_at: will_post_at,
                     };
 
-                    transaction.save_post_queue(new_queued_post).unwrap();
-                    if video_info.status.contains("shown") {
-                        video_info.status = "queued_shown".to_string();
+                    transaction.save_content_queue(new_queued_post).unwrap();
+                    if content_info.status.contains("shown") {
+                        content_info.status = "queued_shown".to_string();
                     } else {
-                        video_info.status = "queued_hidden".to_string();
+                        content_info.status = "queued_hidden".to_string();
                     }
-                    let index_map = IndexMap::from([(message_id, video_info.clone())]);
-                    transaction.save_video_info(index_map).unwrap();
+                    let index_map = IndexMap::from([(message_id, content_info.clone())]);
+                    transaction.save_content_mapping(index_map).unwrap();
                 }
-                if video_info.status.contains("queued_") {
-                    let queued_posts = transaction.load_post_queue().unwrap();
+                if content_info.status.contains("queued_") {
+                    let queued_posts = transaction.load_content_queue().unwrap();
                     for mut queued_post in queued_posts {
                         if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(user_settings.clone()) {
                             if user_settings.can_post {
@@ -264,23 +245,47 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                     let user_id = credentials.get("instagram_business_account_id").unwrap();
                                     let access_token = credentials.get("fb_access_token").unwrap();
                                     println!(" [+] Uploading content to instagram: {}", queued_post.original_shortcode);
+
                                     match scraper_guard.upload_reel(user_id, access_token, &queued_post.url, &full_caption).await {
                                         Ok(_) => {
                                             println!(" [+] Uploaded content successfully: {}", queued_post.original_shortcode);
                                         }
                                         Err(_) => {
                                             println!(" [!] ERRROR: couldn't upload content to instagram! {}", queued_post.url);
-                                            transaction.remove_post_from_queue_with_shortcode(queued_post.original_shortcode.clone()).unwrap();
+
+                                            let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
+                                            if video_info.status.contains("shown") {
+                                                video_info.status = "failed_shown".to_string();
+                                            } else {
+                                                video_info.status = "failed_hidden".to_string();
+                                            }
+
+                                            let index_map = IndexMap::from([(message_id, video_info.clone())]);
+                                            transaction.save_content_mapping(index_map).unwrap();
+
+                                            let now = now_in_my_timezone(user_settings.clone()).to_rfc3339();
+                                            let failed_content = FailedContent {
+                                                url: queued_post.url.clone(),
+                                                caption: queued_post.caption.clone(),
+                                                hashtags: queued_post.hashtags.clone(),
+                                                original_author: queued_post.original_author.clone(),
+                                                original_shortcode: queued_post.original_shortcode.clone(),
+                                                last_updated_at: now.clone(),
+                                                failed_at: now,
+                                            };
+
+                                            transaction.save_failed_content(failed_content.clone()).unwrap();
+                                            continue;
                                         }
                                     }
                                 } else {
                                     println!(" [!] Uploaded content offline: {}", queued_post.url);
                                 }
 
-                                let (message_id, mut video_info) = transaction.get_video_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
+                                let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
                                 video_info.status = "posted_hidden".to_string();
                                 let index_map = IndexMap::from([(message_id, video_info.clone())]);
-                                transaction.save_video_info(index_map).unwrap();
+                                transaction.save_content_mapping(index_map).unwrap();
 
                                 let posted_content = PostedContent {
                                     url: queued_post.url.clone(),
@@ -298,12 +303,12 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                             } else {
                                 let new_will_post_at = transaction.get_new_post_time(user_settings.clone()).unwrap();
                                 queued_post.will_post_at = new_will_post_at;
-                                transaction.save_post_queue(queued_post.clone()).unwrap();
+                                transaction.save_content_queue(queued_post.clone()).unwrap();
 
-                                let (message_id, mut video_info) = transaction.get_video_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
+                                let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
                                 video_info.status = "queued_hidden".to_string();
                                 let index_map = IndexMap::from([(message_id, video_info.clone())]);
-                                transaction.save_video_info(index_map).unwrap();
+                                transaction.save_content_mapping(index_map).unwrap();
                             }
                         }
                     }

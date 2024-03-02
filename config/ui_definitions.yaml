@@ -21,3 +21,4 @@ labels:
   rejected_caption: "👎  Rejected"
   posted_caption: "📬  Posted"
   queued_caption: "⏳  Queued"
+  failed_caption: "⚠️  Failed"
