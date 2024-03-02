@@ -6,9 +6,8 @@ mod utils;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::database::Database;
 

@@ -1,13 +1,7 @@
-use crate::database::{Database, DatabaseTransaction, VideoInfo};
-use crate::telegram_bot::{UIDefinitions, CHAT_ID};
-use crate::utils::now_in_my_timezone;
-use chrono::DateTime;
-use indexmap::IndexMap;
-use std::error::Error;
-use std::time::Duration;
-use teloxide::payloads::{EditMessageCaptionSetters, EditMessageReplyMarkupSetters, SendVideoSetters};
+use crate::database::Database;
+use crate::telegram_bot::CHAT_ID;
+
 use teloxide::prelude::Requester;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId};
 use teloxide::Bot;
 
 pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Result<()> {

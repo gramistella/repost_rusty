@@ -1,7 +1,7 @@
 use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
 use chrono::DateTime;
 use indexmap::IndexMap;
-use instagram_scraper_rs::{InstagramScraper, InstagramScraperResult, Post, User};
+use instagram_scraper_rs::{InstagramScraper, Post, User};
 use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, SeedableRng};

@@ -1,17 +1,17 @@
 use crate::database::{Database, RejectedContent, UserSettings, VideoInfo};
 use crate::telegram_bot::commands::{display_settings_message, restore_sent_messages};
 use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{process_accepted_hidden, process_accepted_shown, process_queued_shown, process_rejected_shown, send_videos, BotDialogue, HandlerResult, State, UIDefinitions};
+use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, send_videos, BotDialogue, HandlerResult, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
 use chrono::Duration;
 use indexmap::IndexMap;
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
 use tokio::sync::Mutex;
 
-pub async fn handle_accepted_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
+pub async fn handle_accepted_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
     // Extract the message id from the callback data
@@ -33,14 +33,14 @@ pub async fn handle_accepted_view(bot: Bot, dialogue: BotDialogue, q: CallbackQu
     let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
     tx.save_content_mapping(content_mapping).unwrap();
 
-    process_accepted_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await?;
+    process_accepted_shown(message_id, &mut video_info).await?;
 
     dialogue.update(State::ScrapeView).await.unwrap();
 
     Ok(())
 }
 
-pub async fn handle_rejected_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, user_settings: UserSettings, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
+pub async fn handle_rejected_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, user_settings: UserSettings) -> HandlerResult {
     let _chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -145,12 +145,12 @@ pub async fn handle_video_action(bot: Bot, dialogue: BotDialogue, execution_mute
             handle_remove_from_queue(bot, q, database, ui_definitions).await?;
         } else if action == "accept" {
             dialogue.update(State::AcceptedView).await.unwrap();
-            handle_accepted_view(bot, dialogue, q, database, ui_definitions, execution_mutex).await?;
+            handle_accepted_view(bot, dialogue, q, database, ui_definitions).await?;
         } else if action == "reject" {
             dialogue.update(State::RejectedView).await.unwrap();
             let mut tx = database.begin_transaction().unwrap();
             let user_settings = tx.load_user_settings().unwrap();
-            handle_rejected_view(bot, dialogue, q, database, ui_definitions, user_settings, execution_mutex).await?;
+            handle_rejected_view(bot, dialogue, q, database, ui_definitions, user_settings).await?;
         } else if action == "edit" {
             dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
             handle_edit_view(bot, dialogue, q, execution_mutex, database, ui_definitions).await?;
