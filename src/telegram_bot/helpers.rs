@@ -96,7 +96,7 @@ pub async fn send_or_replace_navigation_bar(bot: Bot, database: Database, naviga
     let mut tx = database.begin_transaction().unwrap();
     let user_settings = tx.load_user_settings().unwrap();
     let current_page = user_settings.current_page;
-    let total_pages = ((tx.get_max_records_in_content_info().unwrap() as f64 / user_settings.page_size as f64) + 0.5).floor() as i32;
+    let total_pages = ((tx.get_max_records_in_content_info().unwrap() as f64 / user_settings.page_size as f64) + 1.0).floor() as i32;
     let navigation_string = format!("Page {} of {}", current_page, total_pages);
 
     let mut navigation_actions = Vec::new();

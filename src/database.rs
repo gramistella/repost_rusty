@@ -118,13 +118,14 @@ impl Database {
 
         let default_timezone_offset = 1;
         let default_current_page = 1;
-        let default_page_size = 2;
+
         if is_offline {
             let default_is_posting = 1;
             let default_posting_interval = 1;
             let default_random_interval = 0;
             let default_removed_content_lifespan = 2;
             let default_posted_content_lifespan = 2;
+            let default_page_size = 2;
 
             let query = format!(
                 "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
@@ -137,7 +138,7 @@ impl Database {
             let default_random_interval = 30;
             let default_removed_content_lifespan = 120;
             let default_posted_content_lifespan = 180;
-
+            let default_page_size = 8;
             let query = format!(
                 "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
                 default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
@@ -450,7 +451,7 @@ impl DatabaseTransaction {
         let mut video_mapping = IndexMap::new();
         for (index, content_info) in new_content_info {
             let (message_id, mut info) = content_info;
-            let correct_page_num = ((index as f64 / page_size as f64) + 0.5).floor() as i32;
+            let correct_page_num = ((index as f64 - 1.0) / page_size as f64 + 1.0).floor() as i32;
             if info.page_num != correct_page_num {
                 info.page_num = correct_page_num;
                 println!("Updating page_num to {} for shortcode: {}", info.page_num, info.original_shortcode);
