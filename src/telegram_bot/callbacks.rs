@@ -1,7 +1,7 @@
-use crate::database::{Database, RejectedContent, UserSettings, VideoInfo};
-use crate::telegram_bot::commands::{display_settings_message, restore_sent_messages};
+use crate::database::{ContentInfo, Database, RejectedContent, UserSettings};
+use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, send_videos, BotDialogue, HandlerResult, State, UIDefinitions};
+use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
 use chrono::Duration;
 use indexmap::IndexMap;
@@ -30,12 +30,12 @@ pub async fn handle_accepted_view(bot: Bot, dialogue: BotDialogue, q: CallbackQu
     let _msg = bot.edit_message_reply_markup(chat_id, message_id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
     //println!("accepted ids: {}, {}", msg.id, message_id);
     video_info.status = "accepted_shown".to_string();
-    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info.clone())]);
     tx.save_content_mapping(content_mapping).unwrap();
 
     process_accepted_shown(message_id, &mut video_info).await?;
 
-    dialogue.update(State::ScrapeView).await.unwrap();
+    dialogue.update(State::PageView).await.unwrap();
 
     Ok(())
 }
@@ -49,7 +49,7 @@ pub async fn handle_rejected_view(bot: Bot, dialogue: BotDialogue, q: CallbackQu
     //println!("original message id {}, action {}", message_id, action);
 
     video_info.status = "rejected_shown".to_string();
-    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info.clone())]);
     let mut tx = database.begin_transaction().unwrap();
     tx.save_content_mapping(content_mapping).unwrap();
 
@@ -76,11 +76,64 @@ pub async fn handle_rejected_view(bot: Bot, dialogue: BotDialogue, q: CallbackQu
     process_rejected_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await?;
 
     tx.save_content_mapping(IndexMap::from([(message_id, video_info)])).unwrap();
-    dialogue.update(State::ScrapeView).await.unwrap();
+    dialogue.update(State::PageView).await.unwrap();
 
     Ok(())
 }
 
+pub async fn handle_page_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
+    let chat_id = q.message.clone().unwrap().chat.id;
+    let action = q.data.clone().unwrap();
+    let mut tx = database.begin_transaction().unwrap();
+    let user_settings = tx.load_user_settings().unwrap();
+
+    match action.as_str() {
+        "next_page" => {
+            bot.delete_message(chat_id, q.message.unwrap().id).await?;
+            clear_sent_messages(bot.clone(), database.clone()).await?;
+            tx.load_next_page().unwrap();
+            return Ok(());
+        }
+        "previous_page" => {
+            bot.delete_message(chat_id, q.message.unwrap().id).await?;
+            clear_sent_messages(bot.clone(), database.clone()).await?;
+            tx.load_previous_page().unwrap();
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let (action, _message_id) = parse_callback_query(&q);
+
+    match action.as_str() {
+        "remove_from_queue" => {
+            handle_remove_from_queue(bot, q, database, ui_definitions).await?;
+        }
+        "accept" => {
+            dialogue.update(State::AcceptedView).await.unwrap();
+            handle_accepted_view(bot, dialogue, q, database, ui_definitions).await?;
+        }
+        "reject" => {
+            dialogue.update(State::RejectedView).await.unwrap();
+            handle_rejected_view(bot, dialogue, q, database, ui_definitions, user_settings).await?;
+        }
+        "edit" => {
+            dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
+            handle_edit_view(bot, dialogue, q, execution_mutex, database, ui_definitions, nav_bar_mutex).await?;
+        }
+        "undo" => {
+            dialogue.update(State::PageView).await.unwrap();
+            handle_undo(bot, q, database, ui_definitions).await?;
+        }
+        "remove_from_view" => {
+            dialogue.update(State::PageView).await.unwrap();
+            handle_remove_from_view(bot, dialogue, q, database).await?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
 pub async fn handle_undo(bot: Bot, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
@@ -90,7 +143,7 @@ pub async fn handle_undo(bot: Bot, q: CallbackQuery, database: Database, ui_defi
     let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
     video_info.status = "pending_shown".to_string();
-    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info.clone())]);
     let mut tx = database.begin_transaction().unwrap();
     tx.save_content_mapping(content_mapping).unwrap();
 
@@ -123,7 +176,7 @@ pub async fn handle_undo(bot: Bot, q: CallbackQuery, database: Database, ui_defi
     Ok(())
 }
 
-pub async fn handle_remove_from_view(bot: Bot, q: CallbackQuery, database: Database) -> HandlerResult {
+pub async fn handle_remove_from_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -134,10 +187,12 @@ pub async fn handle_remove_from_view(bot: Bot, q: CallbackQuery, database: Datab
 
     bot.delete_message(chat_id, message_id).await?;
 
+    dialogue.update(State::PageView).await.unwrap();
+
     Ok(())
 }
 
-pub async fn handle_video_action(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn handle_video_action(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
     if let Some(_data) = &q.data {
         let (action, _message_id) = parse_callback_query(&q);
 
@@ -153,16 +208,16 @@ pub async fn handle_video_action(bot: Bot, dialogue: BotDialogue, execution_mute
             handle_rejected_view(bot, dialogue, q, database, ui_definitions, user_settings).await?;
         } else if action == "edit" {
             dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
-            handle_edit_view(bot, dialogue, q, execution_mutex, database, ui_definitions).await?;
+            handle_edit_view(bot, dialogue, q, execution_mutex, database, ui_definitions, nav_bar_mutex).await?;
         } else if action == "undo" {
-            dialogue.update(State::ScrapeView).await.unwrap();
+            dialogue.update(State::PageView).await.unwrap();
             handle_undo(bot, q, database, ui_definitions).await?;
         } else if action == "remove_from_view" {
-            dialogue.update(State::ScrapeView).await.unwrap();
-            handle_remove_from_view(bot, q, database).await?;
+            dialogue.update(State::PageView).await.unwrap();
+            handle_remove_from_view(bot, dialogue, q, database).await?;
         } else {
             println!("Invalid action received: {}", action);
-            dialogue.update(State::ScrapeView).await.unwrap();
+            dialogue.update(State::PageView).await.unwrap();
         }
     }
 
@@ -174,7 +229,7 @@ pub async fn handle_settings(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, 
 
     if action == "go_back" {
         bot.delete_message(q.message.unwrap().chat.id, message_id).await?;
-        dialogue.update(State::ScrapeView).await.unwrap();
+        dialogue.update(State::PageView).await.unwrap();
     } else if action == "turn_on" {
         bot.delete_message(q.message.clone().unwrap().chat.id, message_id).await?;
         let mut tx = database.begin_transaction().unwrap();
@@ -239,7 +294,7 @@ pub async fn handle_settings(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, 
     Ok(())
 }
 
-pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, execution_mutex: Arc<Mutex<()>>, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, execution_mutex: Arc<Mutex<()>>, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
     {
         let _execution_lock_copy = Arc::clone(&execution_mutex);
         let _execution_lock_copy = _execution_lock_copy.lock().await;
@@ -247,16 +302,18 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
 
     let chat_id = q.message.clone().unwrap().chat.id;
 
+    let nav_bar_guard = nav_bar_mutex.lock().await;
+
     let (action, message_id) = parse_callback_query(&q);
     //println!("handle_edit_view original message id {}, action {}", message_id, action);
-
+    println!("handle_edit_view: action {}", action);
     if action == "go_back" {
         //println!("go back pressed");
 
         // Clear the sent messages, from message_id to the latest message
         bot.delete_message(chat_id, q.message.unwrap().id).await?;
-        restore_sent_messages(bot.clone(), dialogue.clone(), database.clone(), execution_mutex.clone(), ui_definitions.clone()).await?;
-        dialogue.update(State::ScrapeView).await.unwrap();
+        clear_sent_messages(bot.clone(), database.clone()).await?;
+        dialogue.update(State::PageView).await.unwrap();
         return Ok(());
     } else if action == "accept" {
         //println!("accept - message id: {}", message_id);
@@ -268,11 +325,21 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
         tx.save_content_mapping(IndexMap::from([(message_id, video)])).unwrap();
 
         bot.delete_message(chat_id, q.message.unwrap().id).await?;
-        send_videos(bot.clone(), dialogue.clone(), execution_mutex, database, ui_definitions).await?;
+        //send_videos(bot.clone(), dialogue.clone(), execution_mutex, database, ui_definitions).await?;
 
-        dialogue.update(State::ScrapeView).await.unwrap();
+        dialogue.update(State::PageView).await.unwrap();
         return Ok(());
     } else if action == "edit" {
+        match bot.delete_message(chat_id, nav_bar_guard.message_id).await {
+            Ok(_) => {}
+            Err(e) => {
+                if e.to_string().contains("MessageToDeleteNotFound") {
+                    //println!("Message to delete not found");
+                } else {
+                    println!("handle_edit_view - Error deleting message: {}", e);
+                }
+            }
+        }
         let mut tx = database.begin_transaction().unwrap();
         let video = tx.get_content_info_by_message_id(message_id).unwrap();
         clear_sent_messages(bot.clone(), database).await.unwrap();
@@ -382,7 +449,7 @@ pub async fn handle_remove_from_queue(bot: Bot, q: CallbackQuery, database: Data
     tx.remove_post_from_queue_with_shortcode(video_info.original_shortcode.clone()).unwrap();
 
     video_info.status = "pending_shown".to_string();
-    let content_mapping: IndexMap<MessageId, VideoInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info.clone())]);
     let mut tx = database.begin_transaction().unwrap();
     tx.save_content_mapping(content_mapping).unwrap();
 

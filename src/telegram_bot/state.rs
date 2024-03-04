@@ -1,4 +1,4 @@
-use crate::telegram_bot::callbacks::{handle_accepted_view, handle_edit_view, handle_rejected_view, handle_remove_from_view, handle_settings, handle_undo, handle_video_action};
+use crate::telegram_bot::callbacks::{handle_accepted_view, handle_edit_view, handle_page_view, handle_rejected_view, handle_remove_from_view, handle_settings, handle_undo, handle_video_action};
 use crate::telegram_bot::commands::{help, settings, start, Command};
 use crate::telegram_bot::messages::{receive_caption, receive_hashtags, receive_posted_content_lifespan, receive_posting_interval, receive_random_interval, receive_rejected_content_lifespan};
 use std::error::Error;
@@ -7,9 +7,11 @@ use teloxide::dispatching::{dialogue, UpdateFilterExt, UpdateHandler};
 use teloxide::prelude::*;
 use teloxide::types::MessageId;
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, Debug)]
 pub enum State {
     #[default]
+    StartView,
+    PageView,
     ScrapeView,
     SettingsView {
         stored_messages_to_delete: Vec<MessageId>,
@@ -67,9 +69,10 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
         .branch(case![State::AcceptedView].endpoint(handle_accepted_view))
         .branch(case![State::RejectedView].endpoint(handle_rejected_view))
         .branch(case![State::EditView { stored_messages_to_delete }].endpoint(handle_edit_view))
-        .branch(case![State::ScrapeView].endpoint(handle_video_action))
-        .branch(case![State::ScrapeView].endpoint(handle_undo))
-        .branch(case![State::ScrapeView].endpoint(handle_remove_from_view))
+        .branch(case![State::PageView].endpoint(handle_page_view))
+        .branch(case![State::PageView].endpoint(handle_video_action))
+        .branch(case![State::PageView].endpoint(handle_undo))
+        .branch(case![State::PageView].endpoint(handle_remove_from_view))
         .branch(case![State::SettingsView { stored_messages_to_delete, original_message_id }].endpoint(handle_settings));
 
     dialogue::enter::<Update, InMemStorage<State>, State, _>().branch(message_handler).branch(callback_handler)

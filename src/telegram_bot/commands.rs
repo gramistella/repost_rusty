@@ -1,6 +1,6 @@
 use crate::database::Database;
 use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{send_videos, BotDialogue, HandlerResult, State, UIDefinitions, CHAT_ID};
+use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions, CHAT_ID};
 use crate::utils::now_in_my_timezone;
 use std::error::Error;
 use std::sync::Arc;
@@ -27,11 +27,11 @@ pub async fn help(bot: Bot, msg: Message) -> HandlerResult {
     Ok(())
 }
 
-pub async fn start(bot: Bot, dialogue: BotDialogue, database: Database, execution_mutex: Arc<Mutex<()>>, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
+pub async fn start(bot: Bot, dialogue: BotDialogue, msg: Message, database: Database) -> HandlerResult {
     if msg.chat.id == ChatId(34957918) {
         bot.send_message(msg.chat.id, format!("Welcome back, {}! 🦀", msg.chat.first_name().unwrap()).to_string()).await?;
-
-        restore_sent_messages(bot, dialogue, database, execution_mutex, ui_definitions).await?;
+        clear_sent_messages(bot.clone(), database).await.unwrap();
+        dialogue.update(State::PageView).await.unwrap();
     } else {
         bot.send_message(msg.chat.id, "You can't use this bot.".to_string()).await?;
     }
@@ -54,15 +54,6 @@ pub async fn settings(bot: Bot, dialogue: BotDialogue, msg: Message, database: D
     let _ = clear_sent_messages(bot.clone(), database.clone()).await;
 
     display_settings_message(bot, dialogue, database, ui_definitions).await?;
-
-    Ok(())
-}
-
-pub async fn restore_sent_messages(bot: Bot, dialogue: BotDialogue, database: Database, execution_mutex: Arc<Mutex<()>>, ui_definitions: UIDefinitions) -> HandlerResult {
-    // Load the video mappings
-
-    clear_sent_messages(bot.clone(), database.clone()).await?;
-    send_videos(bot, dialogue, execution_mutex, database, ui_definitions).await?;
 
     Ok(())
 }

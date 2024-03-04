@@ -18,6 +18,8 @@ pub struct UserSettings {
     pub rejected_content_lifespan: i64,
     pub posted_content_lifespan: i64,
     pub timezone_offset: i32,
+    pub current_page: i32,
+    pub page_size: i32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -67,7 +69,7 @@ pub struct FailedContent {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct VideoInfo {
+pub struct ContentInfo {
     pub url: String,
     pub status: String,
     pub caption: String,
@@ -76,6 +78,7 @@ pub struct VideoInfo {
     pub original_shortcode: String,
     pub last_updated_at: String,
     pub encountered_errors: i32,
+    pub page_num: i32,
 }
 
 const PROD_DB: &str = "db/prod.db";
@@ -106,12 +109,16 @@ impl Database {
             random_interval_variance INTEGER NOT NULL,
             rejected_content_lifespan INTEGER NOT NULL,
             posted_content_lifespan INTEGER NOT NULL,
-            timezone_offset INTEGER NOT NULL
+            timezone_offset INTEGER NOT NULL,
+            current_page INTEGER NOT NULL,
+            page_size INTEGER NOT NULL
         )",
             [],
         )?;
 
         let default_timezone_offset = 1;
+        let default_current_page = 1;
+        let default_page_size = 2;
         if is_offline {
             let default_is_posting = 1;
             let default_posting_interval = 1;
@@ -120,8 +127,8 @@ impl Database {
             let default_posted_content_lifespan = 2;
 
             let query = format!(
-                "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset) VALUES ({}, {}, {}, {}, {}, {})",
-                default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset
+                "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+                default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
             );
             conn.execute(&query, [])?;
         } else {
@@ -132,8 +139,8 @@ impl Database {
             let default_posted_content_lifespan = 180;
 
             let query = format!(
-                "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset) VALUES ({}, {}, {}, {}, {}, {})",
-                default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset
+                "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+                default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
             );
             conn.execute(&query, [])?;
         }
@@ -147,8 +154,9 @@ impl Database {
             hashtags TEXT NOT NULL,
             original_author TEXT NOT NULL,
             original_shortcode TEXT NOT NULL,
-            encountered_errors INTEGER NOT NULL,
-            last_updated_at TEXT NOT NULL
+            last_updated_at TEXT NOT NULL,
+            page_num INTEGER NOT NULL,
+            encountered_errors INTEGER NOT NULL
         )",
             [],
         )?;
@@ -227,46 +235,25 @@ impl DatabaseTransaction {
         let mut rejected_content_lifespan: Option<i64> = None;
         let mut posted_content_lifespan: Option<i64> = None;
         let mut timezone_offset: Option<i32> = None;
+        let mut current_page: Option<i32> = None;
+        let mut page_size: Option<i32> = None;
         let tx = self.conn.transaction()?;
 
-        tx.query_row("SELECT can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset FROM user_settings", [], |row| {
-            can_post = Some(row.get(0)?);
-            posting_interval = Some(row.get(1)?);
-            random_interval_variance = Some(row.get(2)?);
-            rejected_content_lifespan = Some(row.get(3)?);
-            posted_content_lifespan = Some(row.get(4)?);
-            timezone_offset = Some(row.get(5)?);
-            Ok(())
-        })?;
-
-        let mut queued_videos_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, will_post_at FROM content_queue")?;
-        let video_queue_iter = queued_videos_stmt.query_map([], |row| {
-            let url: String = row.get(0)?;
-            let caption: String = row.get(1)?;
-            let hashtags: String = row.get(2)?;
-            let original_author: String = row.get(3)?;
-            let original_shortcode: String = row.get(4)?;
-            let last_updated_at: String = row.get(5)?;
-            let will_post_at: String = row.get(6)?;
-
-            let queued_post = QueuedContent {
-                url,
-                caption,
-                hashtags,
-                original_author,
-                original_shortcode,
-                last_updated_at,
-                will_post_at,
-            };
-
-            Ok(queued_post)
-        })?;
-
-        let mut queued_posts = Vec::new();
-        for queued_post in video_queue_iter {
-            let queued_post = queued_post?;
-            queued_posts.push(queued_post.clone());
-        }
+        tx.query_row(
+            "SELECT can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size FROM user_settings",
+            [],
+            |row| {
+                can_post = Some(row.get(0)?);
+                posting_interval = Some(row.get(1)?);
+                random_interval_variance = Some(row.get(2)?);
+                rejected_content_lifespan = Some(row.get(3)?);
+                posted_content_lifespan = Some(row.get(4)?);
+                timezone_offset = Some(row.get(5)?);
+                current_page = Some(row.get(6)?);
+                page_size = Some(row.get(7)?);
+                Ok(())
+            },
+        )?;
 
         let user_settings = UserSettings {
             can_post: can_post.unwrap(),
@@ -275,6 +262,8 @@ impl DatabaseTransaction {
             rejected_content_lifespan: rejected_content_lifespan.unwrap(),
             posted_content_lifespan: posted_content_lifespan.unwrap(),
             timezone_offset: timezone_offset.unwrap(),
+            current_page: current_page.unwrap(),
+            page_size: page_size.unwrap(),
         };
 
         Ok(user_settings)
@@ -284,14 +273,16 @@ impl DatabaseTransaction {
         let tx = self.conn.transaction()?;
         // Update user settings
         tx.execute(
-            "UPDATE user_settings SET can_post = ?1, posting_interval = ?2, random_interval_variance = ?3, rejected_content_lifespan = ?4, posted_content_lifespan = ?5, timezone_offset = ?6",
+            "UPDATE user_settings SET can_post = ?1, posting_interval = ?2, random_interval_variance = ?3, rejected_content_lifespan = ?4, posted_content_lifespan = ?5, timezone_offset = ?6, current_page = ?7, page_size = ?8",
             params![
                 user_settings.can_post as i64,
                 user_settings.posting_interval,
                 user_settings.random_interval_variance,
                 user_settings.rejected_content_lifespan,
                 user_settings.posted_content_lifespan,
-                user_settings.timezone_offset
+                user_settings.timezone_offset,
+                user_settings.current_page,
+                user_settings.page_size
             ],
         )?;
 
@@ -299,7 +290,7 @@ impl DatabaseTransaction {
 
         Ok(())
     }
-    pub fn get_content_info_by_message_id(&mut self, message_id: MessageId) -> Option<VideoInfo> {
+    pub fn get_content_info_by_message_id(&mut self, message_id: MessageId) -> Option<ContentInfo> {
         let video_mapping = self.load_content_mapping().unwrap();
 
         match video_mapping.get(&message_id) {
@@ -308,7 +299,7 @@ impl DatabaseTransaction {
         }
     }
 
-    pub fn get_content_info_by_shortcode(&mut self, shortcode: String) -> Option<(MessageId, VideoInfo)> {
+    pub fn get_content_info_by_shortcode(&mut self, shortcode: String) -> Option<(MessageId, ContentInfo)> {
         let video_mapping = self.load_content_mapping().unwrap();
 
         for (message_id, content_info) in video_mapping {
@@ -322,47 +313,216 @@ impl DatabaseTransaction {
     pub fn remove_content_info_with_shortcode(&mut self, shortcode: String) -> Result<()> {
         let tx = self.conn.transaction()?;
 
-        // Firstly we remove the posted_content from the content_queue
+        // Remove the content info with the given shortcode
         tx.execute("DELETE FROM content_info WHERE original_shortcode = ?1", params![shortcode])?;
 
         tx.commit()?;
 
+        // Load the remaining content info
+        let content_info = self.load_content_mapping()?;
+
+        // Recalculate the page numbers
+        let user_settings = self.load_user_settings()?;
+        let page_size = user_settings.page_size as i64;
+        let mut new_content_info = IndexMap::new();
+        let mut index = 0;
+        for (message_id, mut info) in content_info {
+            index += 1;
+            let correct_page_num = ((index as f64 / page_size as f64) + 0.5).floor() as i32;
+            if info.page_num != correct_page_num {
+                info.page_num = correct_page_num;
+                new_content_info.insert(message_id, info);
+            } else {
+                new_content_info.insert(message_id, info.clone());
+            }
+        }
+
+        // Save the updated content info back to the database
+        self.save_content_mapping(new_content_info)?;
+
         Ok(())
     }
 
-    pub fn save_content_mapping(&mut self, video_mapping: IndexMap<MessageId, VideoInfo>) -> Result<()> {
+    pub fn get_max_records_in_content_info(&self) -> rusqlite::Result<i64> {
+        let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM content_info", params![], |row| row.get(0))?;
+        Ok(count)
+    }
+
+    pub fn save_content_mapping(&mut self, video_mapping: IndexMap<MessageId, ContentInfo>) -> Result<()> {
         let existing_mapping = self.load_content_mapping()?;
+        let user_settings = self.load_user_settings()?;
+        let page_size = user_settings.page_size as i64;
+
+        let total_records;
+        {
+            total_records = self.get_max_records_in_content_info()? as i64;
+        }
+
         let tx = self.conn.transaction()?;
-        for (new_key, new_value) in video_mapping {
-            for (existing_key, existing_value) in &existing_mapping {
+        for (new_key, mut new_value) in video_mapping {
+            let mut is_replacement = false;
+            for (_existing_key, existing_value) in &existing_mapping {
                 if existing_value.original_shortcode == new_value.original_shortcode {
-                    tx.execute("DELETE FROM content_info WHERE message_id = ?1", params![existing_key.0])?;
+                    new_value.page_num = existing_value.page_num;
+                    tx.execute("DELETE FROM content_info WHERE original_shortcode = ?1", params![existing_value.original_shortcode])?;
+                    is_replacement = true;
                 }
             }
 
-            tx.execute(
-                "INSERT OR REPLACE INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    new_key.0,
-                    new_value.url,
-                    new_value.status,
-                    new_value.caption,
-                    new_value.hashtags,
-                    new_value.original_author,
-                    new_value.original_shortcode,
-                    new_value.last_updated_at,
-                    new_value.encountered_errors
-                ],
-            )?;
+            if !is_replacement {
+                new_value.page_num = (total_records / page_size + 1) as i32;
+                tx.execute(
+                    "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        new_key.0,
+                        new_value.url,
+                        new_value.status,
+                        new_value.caption,
+                        new_value.hashtags,
+                        new_value.original_author,
+                        new_value.original_shortcode,
+                        new_value.last_updated_at,
+                        new_value.page_num,
+                        new_value.encountered_errors
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        new_key.0,
+                        new_value.url,
+                        new_value.status,
+                        new_value.caption,
+                        new_value.hashtags,
+                        new_value.original_author,
+                        new_value.original_shortcode,
+                        new_value.last_updated_at,
+                        new_value.page_num,
+                        new_value.encountered_errors
+                    ],
+                )?;
+            }
+        }
+
+        tx.commit()?;
+
+        // Handle gaps in the content mapping
+        let tx = self.conn.transaction()?;
+        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info ORDER BY page_num, message_id")?;
+
+        let content_info_iter = stmt.query_map([], |row| {
+            let message_id: i32 = row.get(0)?;
+            let url: String = row.get(1)?;
+            let status: String = row.get(2)?;
+            let caption: String = row.get(3)?;
+            let hashtags: String = row.get(4)?;
+            let original_author: String = row.get(5)?;
+            let original_shortcode: String = row.get(6)?;
+            let last_updated_at: String = row.get(7)?;
+            let page_num: i32 = row.get(8)?;
+            let encountered_errors: i32 = row.get(9)?;
+
+            let content_info = ContentInfo {
+                url,
+                status,
+                caption,
+                hashtags,
+                original_author,
+                original_shortcode,
+                last_updated_at,
+                page_num,
+                encountered_errors,
+            };
+
+            Ok((MessageId(message_id), content_info))
+        })?;
+
+        let mut new_content_info = IndexMap::new();
+        let mut index = 0;
+        for content_info in content_info_iter {
+            index += 1;
+            new_content_info.insert(index, content_info?);
+        }
+
+        drop(stmt);
+
+        let mut video_mapping = IndexMap::new();
+        for (index, content_info) in new_content_info {
+            let (message_id, mut info) = content_info;
+            let correct_page_num = ((index as f64 / page_size as f64) + 0.5).floor() as i32;
+            if info.page_num != correct_page_num {
+                info.page_num = correct_page_num;
+                println!("Updating page_num to {} for shortcode: {}", info.page_num, info.original_shortcode);
+                tx.execute("UPDATE content_info SET page_num = ?1 WHERE original_shortcode = ?2", params![correct_page_num, info.original_shortcode])?;
+            }
+            video_mapping.insert(message_id, info);
         }
 
         tx.commit()?;
         Ok(())
     }
 
-    pub fn load_content_mapping(&mut self) -> Result<IndexMap<MessageId, VideoInfo>> {
+    pub fn load_next_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
+        let mut user_settings = self.load_user_settings().unwrap();
+        user_settings.current_page += 1;
+        self.save_user_settings(user_settings).unwrap();
+        self.load_page()
+    }
+
+    pub fn load_previous_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
+        let mut user_settings = self.load_user_settings().unwrap();
+        user_settings.current_page -= 1;
+        self.save_user_settings(user_settings).unwrap();
+        self.load_page()
+    }
+    pub fn load_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
+        let user_settings = self.load_user_settings().unwrap();
+        let current_page = user_settings.current_page as i64;
+
         let tx = self.conn.transaction()?;
-        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, encountered_errors FROM content_info")?;
+        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info")?;
+        let content_info_iter = stmt.query_map(params![], |row| {
+            let message_id: i32 = row.get(0)?;
+            let url: String = row.get(1)?;
+            let status: String = row.get(2)?;
+            let caption: String = row.get(3)?;
+            let hashtags: String = row.get(4)?;
+            let original_author: String = row.get(5)?;
+            let original_shortcode: String = row.get(6)?;
+            let last_updated_at: String = row.get(7)?;
+            let page_num: i32 = row.get(8)?;
+            let encountered_errors: i32 = row.get(9)?;
+
+            let content_info = ContentInfo {
+                url,
+                status,
+                caption,
+                hashtags,
+                original_author,
+                original_shortcode,
+                last_updated_at,
+                page_num,
+                encountered_errors,
+            };
+
+            Ok((MessageId(message_id), content_info))
+        })?;
+
+        let mut video_mapping = IndexMap::new();
+        for content_info in content_info_iter {
+            let (message_id, info) = content_info?;
+            if info.page_num == current_page as i32 {
+                video_mapping.insert(message_id, info);
+            }
+        }
+
+        Ok(video_mapping)
+    }
+
+    pub fn load_content_mapping(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
+        let tx = self.conn.transaction()?;
+        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info")?;
         let content_info_iter = stmt.query_map([], |row| {
             // let message_id: String = row.get(0)?;
             let url: String = row.get(1)?;
@@ -372,9 +532,10 @@ impl DatabaseTransaction {
             let original_author: String = row.get(5)?;
             let original_shortcode: String = row.get(6)?;
             let last_updated_at: String = row.get(7)?;
-            let encountered_errors: i32 = row.get(8)?;
+            let page_num: i32 = row.get(8)?;
+            let encountered_errors: i32 = row.get(9)?;
 
-            let content_info = VideoInfo {
+            let content_info = ContentInfo {
                 url,
                 status,
                 caption,
@@ -382,6 +543,7 @@ impl DatabaseTransaction {
                 original_author,
                 original_shortcode,
                 last_updated_at,
+                page_num,
                 encountered_errors,
             };
 
