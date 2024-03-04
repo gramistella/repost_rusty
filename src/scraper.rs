@@ -240,7 +240,18 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                 let scraper_copy = Arc::clone(&scraper);
                                 let mut scraper_guard = scraper_copy.lock().await;
                                 if !is_offline {
-                                    let full_caption = format!("{}\n.\n.\n.\n.\n.\n.\n.\n{}", queued_post.caption, queued_post.hashtags);
+
+                                    let full_caption;
+                                    let spacer = ".\n.\n.\n.\n.\n.\n.\n";
+                                    if queued_post.caption == "" && queued_post.hashtags == "" {
+                                        full_caption = "".to_string();
+                                    } else if queued_post.caption == "" {
+                                        full_caption = format!("{}", queued_post.hashtags);
+                                    } else if queued_post.hashtags == "" {
+                                        full_caption = format!("{}", queued_post.caption);
+                                    } else  {
+                                        full_caption = format!("{}{}{}", queued_post.caption, spacer, queued_post.hashtags);
+                                    }
 
                                     let user_id = credentials.get("instagram_business_account_id").unwrap();
                                     let access_token = credentials.get("fb_access_token").unwrap();
