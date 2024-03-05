@@ -3,12 +3,13 @@ use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions};
 use indexmap::IndexMap;
 use regex::Regex;
+use teloxide::adaptors::Throttle;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::{Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::Bot;
 
-pub async fn receive_posting_interval(bot: Bot, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_posting_interval(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(received_posting_interval) => {
             if let State::ReceivePostingInterval { stored_messages_to_delete, original_message_id } = state {
@@ -53,7 +54,7 @@ pub async fn receive_posting_interval(bot: Bot, dialogue: BotDialogue, msg: Mess
     Ok(())
 }
 
-pub async fn receive_random_interval(bot: Bot, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_random_interval(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(received_random_interval) => {
             if let State::ReceiveRandomInterval { stored_messages_to_delete, original_message_id } = state {
@@ -97,7 +98,7 @@ pub async fn receive_random_interval(bot: Bot, dialogue: BotDialogue, msg: Messa
     Ok(())
 }
 
-pub async fn receive_rejected_content_lifespan(bot: Bot, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_rejected_content_lifespan(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(received_random_interval) => {
             if let State::ReceiveRejectedContentLifespan { stored_messages_to_delete, original_message_id } = state {
@@ -141,7 +142,7 @@ pub async fn receive_rejected_content_lifespan(bot: Bot, dialogue: BotDialogue, 
     Ok(())
 }
 
-pub async fn receive_posted_content_lifespan(bot: Bot, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_posted_content_lifespan(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(received_random_interval) => {
             if let State::ReceivePostedContentLifespan { stored_messages_to_delete, original_message_id } = state {
@@ -185,7 +186,7 @@ pub async fn receive_posted_content_lifespan(bot: Bot, dialogue: BotDialogue, ms
     Ok(())
 }
 
-pub async fn receive_caption(bot: Bot, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_caption(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(caption) => {
             if let State::ReceiveCaption { stored_messages_to_delete, original_message_id } = state {
@@ -236,7 +237,7 @@ pub async fn receive_caption(bot: Bot, dialogue: BotDialogue, msg: Message, stat
     Ok(())
 }
 
-pub async fn receive_hashtags(bot: Bot, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_hashtags(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(hashtags) => {
             if let State::ReceiveHashtags { stored_messages_to_delete, original_message_id } = state {

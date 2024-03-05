@@ -4,6 +4,7 @@ use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions, CHAT
 use crate::utils::now_in_my_timezone;
 use std::error::Error;
 use std::sync::Arc;
+use teloxide::adaptors::Throttle;
 use teloxide::payloads::EditMessageReplyMarkupSetters;
 use teloxide::prelude::{ChatId, Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
@@ -27,7 +28,7 @@ pub async fn help(bot: Bot, msg: Message) -> HandlerResult {
     Ok(())
 }
 
-pub async fn start(bot: Bot, dialogue: BotDialogue, msg: Message, database: Database) -> HandlerResult {
+pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database) -> HandlerResult {
     if msg.chat.id == ChatId(34957918) {
         bot.send_message(msg.chat.id, format!("Welcome back, {}! 🦀", msg.chat.first_name().unwrap()).to_string()).await?;
         clear_sent_messages(bot.clone(), database).await.unwrap();
@@ -41,7 +42,7 @@ pub async fn start(bot: Bot, dialogue: BotDialogue, msg: Message, database: Data
     Ok(())
 }
 
-pub async fn settings(bot: Bot, dialogue: BotDialogue, msg: Message, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
+pub async fn settings(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
     if let Some(state) = dialogue.get().await.unwrap() {
         if state != State::ScrapeView {
             let _ = bot.delete_message(CHAT_ID, msg.id).await;
@@ -58,7 +59,7 @@ pub async fn settings(bot: Bot, dialogue: BotDialogue, msg: Message, database: D
     Ok(())
 }
 
-pub async fn display_settings_message(bot: Bot, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn display_settings_message(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut tx = database.begin_transaction().unwrap();
     let user_settings = tx.load_user_settings().unwrap();
     let mut posting_status = "disabled";

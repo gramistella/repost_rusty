@@ -2,6 +2,7 @@ use crate::database::Database;
 use crate::telegram_bot::{NavigationBar, CHAT_ID, REFRESH_RATE};
 use std::sync::Arc;
 
+use teloxide::adaptors::Throttle;
 use teloxide::payloads::EditMessageTextSetters;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::Requester;
@@ -9,7 +10,7 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
 use tokio::sync::Mutex;
 
-pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Result<()> {
+pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std::io::Result<()> {
     // Load the video mappings
 
     let mut tx = database.begin_transaction().unwrap();
@@ -76,10 +77,10 @@ pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Resul
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     // Update the status to "pending_hidden"
-                    println!("Deleted queued message with ID: {}", message_id);
+                    //println!("Deleted queued message with ID: {}", message_id);
                 }
                 Err(_e) => {
-                    println!("Error deleting queued message with ID: {}: {}", message_id, _e);
+                    //println!("Error deleting queued message with ID: {}: {}", message_id, _e);
                 }
             }
         }
@@ -92,11 +93,11 @@ pub async fn clear_sent_messages(bot: Bot, database: Database) -> std::io::Resul
     Ok(())
 }
 
-pub async fn send_or_replace_navigation_bar(bot: Bot, database: Database, navigation_bar: Arc<Mutex<NavigationBar>>) {
+pub async fn send_or_replace_navigation_bar(bot: Throttle<Bot>, database: Database, navigation_bar: Arc<Mutex<NavigationBar>>) {
     let mut tx = database.begin_transaction().unwrap();
     let user_settings = tx.load_user_settings().unwrap();
     let current_page = user_settings.current_page;
-    let total_pages = ((tx.get_max_records_in_content_info().unwrap() as i32 - 1) / user_settings.page_size + 1) as i32;
+    let total_pages = (tx.get_max_records_in_content_info().unwrap() as i32 - 1) / user_settings.page_size + 1;
     let navigation_string = format!("Page {} of {}", current_page, total_pages);
 
     let mut navigation_actions = Vec::new();

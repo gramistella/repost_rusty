@@ -6,12 +6,13 @@ use crate::utils::now_in_my_timezone;
 use chrono::Duration;
 use indexmap::IndexMap;
 use std::sync::Arc;
+use teloxide::adaptors::Throttle;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
 use tokio::sync::Mutex;
 
-pub async fn handle_accepted_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn handle_accepted_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
     // Extract the message id from the callback data
@@ -40,7 +41,7 @@ pub async fn handle_accepted_view(bot: Bot, dialogue: BotDialogue, q: CallbackQu
     Ok(())
 }
 
-pub async fn handle_rejected_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, user_settings: UserSettings) -> HandlerResult {
+pub async fn handle_rejected_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, user_settings: UserSettings) -> HandlerResult {
     let _chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -81,7 +82,7 @@ pub async fn handle_rejected_view(bot: Bot, dialogue: BotDialogue, q: CallbackQu
     Ok(())
 }
 
-pub async fn handle_page_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
+pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
     let action = q.data.clone().unwrap();
     let mut tx = database.begin_transaction().unwrap();
@@ -134,7 +135,7 @@ pub async fn handle_page_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
 
     Ok(())
 }
-pub async fn handle_undo(bot: Bot, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn handle_undo(bot: Throttle<Bot>, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
     // Extract the message id from the callback data
@@ -176,7 +177,7 @@ pub async fn handle_undo(bot: Bot, q: CallbackQuery, database: Database, ui_defi
     Ok(())
 }
 
-pub async fn handle_remove_from_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database) -> HandlerResult {
+pub async fn handle_remove_from_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -192,7 +193,7 @@ pub async fn handle_remove_from_view(bot: Bot, dialogue: BotDialogue, q: Callbac
     Ok(())
 }
 
-pub async fn handle_video_action(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
+pub async fn handle_video_action(bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
     if let Some(_data) = &q.data {
         let (action, _message_id) = parse_callback_query(&q);
 
@@ -224,7 +225,7 @@ pub async fn handle_video_action(bot: Bot, dialogue: BotDialogue, execution_mute
     Ok(())
 }
 
-pub async fn handle_settings(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn handle_settings(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let (action, message_id) = parse_callback_query(&q);
 
     if action == "go_back" {
@@ -294,7 +295,7 @@ pub async fn handle_settings(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, 
     Ok(())
 }
 
-pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery, execution_mutex: Arc<Mutex<()>>, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
+pub async fn handle_edit_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, execution_mutex: Arc<Mutex<()>>, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
     {
         let _execution_lock_copy = Arc::clone(&execution_mutex);
         let _execution_lock_copy = _execution_lock_copy.lock().await;
@@ -366,13 +367,7 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
         // Update the dialogue with the new state
         dialogue.update(State::EditView { stored_messages_to_delete: vec![msg2.id] }).await?;
     } else if action == "edit_caption" {
-        let mut messages_to_delete = Vec::new();
-
-        if let State::EditView { stored_messages_to_delete } = dialogue.get().await.unwrap().unwrap() {
-            for message_id in stored_messages_to_delete {
-                messages_to_delete.push(message_id);
-            }
-        }
+        let mut messages_to_delete = retrieve_state_stored_messages(&dialogue).await;
 
         let caption_message = bot.send_message(chat_id, "Please send your caption.\nUse '!' to empty the field").await?;
         messages_to_delete.push(caption_message.id);
@@ -386,13 +381,7 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
             .await
             .unwrap();
     } else if action == "edit_hashtags" {
-        let mut messages_to_delete = Vec::new();
-
-        if let State::EditView { stored_messages_to_delete } = dialogue.get().await.unwrap().unwrap() {
-            for message_id in stored_messages_to_delete {
-                messages_to_delete.push(message_id);
-            }
-        }
+        let mut messages_to_delete = retrieve_state_stored_messages(&dialogue).await;
 
         let caption_message = bot.send_message(chat_id, "Please send your hashtags.\nUse '!' to empty the field").await?;
         messages_to_delete.push(caption_message.id);
@@ -408,6 +397,16 @@ pub async fn handle_edit_view(bot: Bot, dialogue: BotDialogue, q: CallbackQuery,
     }
 
     Ok(())
+}
+
+async fn retrieve_state_stored_messages(dialogue: &BotDialogue) -> Vec<MessageId> {
+    let mut messages_to_delete = Vec::new();
+    if let State::EditView { stored_messages_to_delete } = dialogue.get().await.unwrap().unwrap() {
+        for message_id in stored_messages_to_delete {
+            messages_to_delete.push(message_id);
+        }
+    }
+    messages_to_delete
 }
 
 pub fn parse_callback_query(q: &CallbackQuery) -> (String, MessageId) {
@@ -437,7 +436,7 @@ pub fn parse_callback_query(q: &CallbackQuery) -> (String, MessageId) {
     (action, message_id)
 }
 
-pub async fn handle_remove_from_queue(bot: Bot, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn handle_remove_from_queue(bot: Throttle<Bot>, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);

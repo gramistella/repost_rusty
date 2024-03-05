@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, FixedOffset, ParseError, Timelike, Utc};
+use chrono::{DateTime, Duration, FixedOffset, Timelike, Utc};
 use indexmap::IndexMap;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -98,7 +98,7 @@ impl Database {
     pub fn new(is_offline: bool) -> Result<Self> {
         let manager = if is_offline { SqliteConnectionManager::file(DEV_DB) } else { SqliteConnectionManager::file(PROD_DB) };
 
-        let pool = r2d2::Pool::new(manager).unwrap();
+        let pool = Pool::new(manager).unwrap();
 
         let conn = pool.get().unwrap();
 
@@ -344,7 +344,7 @@ impl DatabaseTransaction {
         Ok(())
     }
 
-    pub fn get_max_records_in_content_info(&self) -> rusqlite::Result<i64> {
+    pub fn get_max_records_in_content_info(&self) -> Result<i64> {
         let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM content_info", params![], |row| row.get(0))?;
         Ok(count)
     }
@@ -356,7 +356,7 @@ impl DatabaseTransaction {
 
         let total_records;
         {
-            total_records = self.get_max_records_in_content_info()? as i64;
+            total_records = self.get_max_records_in_content_info()?;
         }
 
         let tx = self.conn.transaction()?;
@@ -409,44 +409,19 @@ impl DatabaseTransaction {
         tx.commit()?;
 
         // Handle gaps in the content mapping
+        let content_mapping;
+        {
+            content_mapping = self.load_content_mapping()?;
+        }
+
         let tx = self.conn.transaction()?;
-        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info ORDER BY page_num, message_id")?;
-
-        let content_info_iter = stmt.query_map([], |row| {
-            let message_id: i32 = row.get(0)?;
-            let url: String = row.get(1)?;
-            let status: String = row.get(2)?;
-            let caption: String = row.get(3)?;
-            let hashtags: String = row.get(4)?;
-            let original_author: String = row.get(5)?;
-            let original_shortcode: String = row.get(6)?;
-            let last_updated_at: String = row.get(7)?;
-            let page_num: i32 = row.get(8)?;
-            let encountered_errors: i32 = row.get(9)?;
-
-            let content_info = ContentInfo {
-                url,
-                status,
-                caption,
-                hashtags,
-                original_author,
-                original_shortcode,
-                last_updated_at,
-                page_num,
-                encountered_errors,
-            };
-
-            Ok((MessageId(message_id), content_info))
-        })?;
 
         let mut new_content_info = IndexMap::new();
         let mut index = 0;
-        for content_info in content_info_iter {
+        for content_info in content_mapping {
             index += 1;
-            new_content_info.insert(index, content_info?);
+            new_content_info.insert(index, content_info);
         }
-
-        drop(stmt);
 
         let mut video_mapping = IndexMap::new();
         for (index, content_info) in new_content_info {
@@ -454,7 +429,6 @@ impl DatabaseTransaction {
             let correct_page_num = ((index as f64 - 1.0) / page_size as f64 + 1.0).floor() as i32;
             if info.page_num != correct_page_num {
                 info.page_num = correct_page_num;
-                println!("Updating page_num to {} for shortcode: {}", info.page_num, info.original_shortcode);
                 tx.execute("UPDATE content_info SET page_num = ?1 WHERE original_shortcode = ?2", params![correct_page_num, info.original_shortcode])?;
             }
             video_mapping.insert(message_id, info);
@@ -481,9 +455,21 @@ impl DatabaseTransaction {
         let user_settings = self.load_user_settings().unwrap();
         let current_page = user_settings.current_page as i64;
 
+        let mut current_content_mapping = IndexMap::new();
+        for content_info in self.load_content_mapping().unwrap() {
+            let (message_id, info) = content_info;
+            if info.page_num == current_page as i32 {
+                current_content_mapping.insert(message_id, info);
+            }
+        }
+
+        Ok(current_content_mapping)
+    }
+
+    pub fn load_content_mapping(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let tx = self.conn.transaction()?;
         let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info")?;
-        let content_info_iter = stmt.query_map(params![], |row| {
+        let content_info_iter = stmt.query_map([], |row| {
             let message_id: i32 = row.get(0)?;
             let url: String = row.get(1)?;
             let status: String = row.get(2)?;
@@ -510,54 +496,13 @@ impl DatabaseTransaction {
             Ok((MessageId(message_id), content_info))
         })?;
 
-        let mut video_mapping = IndexMap::new();
+        let mut content_mapping = IndexMap::new();
         for content_info in content_info_iter {
             let (message_id, info) = content_info?;
-            if info.page_num == current_page as i32 {
-                video_mapping.insert(message_id, info);
-            }
+            content_mapping.insert(message_id, info);
         }
 
-        Ok(video_mapping)
-    }
-
-    pub fn load_content_mapping(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
-        let tx = self.conn.transaction()?;
-        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info")?;
-        let content_info_iter = stmt.query_map([], |row| {
-            // let message_id: String = row.get(0)?;
-            let url: String = row.get(1)?;
-            let status: String = row.get(2)?;
-            let caption: String = row.get(3)?;
-            let hashtags: String = row.get(4)?;
-            let original_author: String = row.get(5)?;
-            let original_shortcode: String = row.get(6)?;
-            let last_updated_at: String = row.get(7)?;
-            let page_num: i32 = row.get(8)?;
-            let encountered_errors: i32 = row.get(9)?;
-
-            let content_info = ContentInfo {
-                url,
-                status,
-                caption,
-                hashtags,
-                original_author,
-                original_shortcode,
-                last_updated_at,
-                page_num,
-                encountered_errors,
-            };
-
-            Ok((MessageId(row.get(0)?), content_info))
-        })?;
-
-        let mut video_mapping = IndexMap::new();
-        for content_info in content_info_iter {
-            let (message_id, info) = content_info?;
-            video_mapping.insert(message_id, info);
-        }
-
-        Ok(video_mapping)
+        Ok(content_mapping)
     }
 
     pub fn get_temp_message_id(&mut self, user_settings: UserSettings) -> i32 {
@@ -910,70 +855,64 @@ impl DatabaseTransaction {
         Ok(failed_content_list)
     }
 
-    pub fn get_new_post_time(&mut self, user_settings: UserSettings) -> std::result::Result<String, ParseError> {
-        let tx = self.conn.transaction().unwrap();
-        let mut stmt = tx.prepare("SELECT will_post_at FROM content_queue ORDER BY will_post_at DESC LIMIT 1").unwrap();
+    fn get_latest_time_from_db(&mut self, query: &str) -> Result<Option<DateTime<Utc>>, rusqlite::Error> {
+        let tx = self.conn.transaction()?;
+        let mut stmt = tx.prepare(query)?;
+        let mut iter = stmt.query_map([], |row| {
+            let time_str: String = row.get(0)?;
+            let post_time: DateTime<FixedOffset> = DateTime::parse_from_rfc3339(&time_str).unwrap();
+            Ok(post_time.with_timezone(&Utc))
+        })?;
 
-        let mut latest_post_time_iter = stmt
-            .query_map([], |row| {
-                let will_post_at: String = row.get(0)?;
-                let post_time: DateTime<FixedOffset> = DateTime::parse_from_rfc3339(&will_post_at).unwrap();
-                Ok(post_time.with_timezone(&Utc))
-            })
-            .unwrap();
+        iter.next().transpose()
+    }
+
+    pub fn get_new_post_time(&mut self, user_settings: UserSettings) -> Result<String, rusqlite::Error> {
+        let latest_post_time_option;
+        {
+            latest_post_time_option = self.get_latest_time_from_db("SELECT will_post_at FROM content_queue ORDER BY will_post_at DESC LIMIT 1")?;
+        }
 
         let posting_interval = Duration::seconds(user_settings.posting_interval * 60);
         let random_interval = Duration::seconds(user_settings.random_interval_variance * 60);
-
         let mut rng = rand::thread_rng();
         let random_variance = rng.gen_range(-random_interval.num_seconds()..=random_interval.num_seconds());
         let random_variance_seconds = Duration::seconds(random_variance);
 
-        let mut new_post_time: DateTime<Utc> = match latest_post_time_iter.next() {
-            Some(Ok(time)) => time + posting_interval + random_variance_seconds,
-            _ => {
-                let mut stmt = tx.prepare("SELECT posted_at FROM posted_content ORDER BY posted_at DESC LIMIT 1").unwrap();
-                let mut latest_posted_time_iter = stmt
-                    .query_map([], |row| {
-                        let posted_at: String = row.get(0)?;
-                        let post_time: DateTime<FixedOffset> = DateTime::parse_from_rfc3339(&posted_at).unwrap();
-                        Ok(post_time.with_timezone(&Utc))
-                    })
-                    .unwrap();
-
-                match latest_posted_time_iter.next() {
-                    Some(Ok(time)) => time + posting_interval + random_variance_seconds,
-                    _ => now_in_my_timezone(user_settings.clone()) + Duration::seconds(60),
+        let mut new_post_time = match latest_post_time_option {
+            Some(time) => time + posting_interval + random_variance_seconds,
+            None => {
+                let latest_posted_time_option;
+                {
+                    latest_posted_time_option = self.get_latest_time_from_db("SELECT posted_at FROM posted_content ORDER BY posted_at DESC LIMIT 1")?;
+                }
+                match latest_posted_time_option {
+                    Some(time) => time + posting_interval + random_variance_seconds,
+                    None => now_in_my_timezone(user_settings.clone()) + Duration::seconds(60),
                 }
             }
         };
 
         // Check if the new post time is in the past
         if new_post_time < now_in_my_timezone(user_settings.clone()) {
-            new_post_time = now_in_my_timezone(user_settings.clone()) + Duration::seconds(60)
+            new_post_time = now_in_my_timezone(user_settings.clone()) + Duration::seconds(60);
         }
 
         Ok(new_post_time.to_rfc3339())
     }
 
     pub fn does_content_exist_with_shortcode(&mut self, shortcode: String) -> bool {
-        let tx = self.conn.transaction().unwrap();
-
-        // Prepare statements for each table
-        let mut stmt_content_info = tx.prepare("SELECT url FROM content_info WHERE original_shortcode = ?1").unwrap();
-        let mut stmt_posted_content = tx.prepare("SELECT url FROM posted_content WHERE original_shortcode = ?1").unwrap();
-        let mut stmt_content_queue = tx.prepare("SELECT url FROM content_queue WHERE original_shortcode = ?1").unwrap();
-        let mut stmt_rejected_content = tx.prepare("SELECT url FROM rejected_content WHERE original_shortcode = ?1").unwrap();
-        let mut stmt_failed_content = tx.prepare("SELECT url FROM failed_content WHERE original_shortcode = ?1").unwrap();
-
         // Execute each statement and check if the URL exists
-        let exists_in_content_info = stmt_content_info.query_map(params![shortcode.clone()], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
-        let exists_in_posted_content = stmt_posted_content.query_map(params![shortcode.clone()], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
-        let exists_in_content_queue = stmt_content_queue.query_map(params![shortcode.clone()], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
-        let exists_in_rejected_content = stmt_rejected_content.query_map(params![shortcode], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
-        let exists_in_failed_content = stmt_failed_content.query_map(params![shortcode], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
+        let tables = ["content_info", "posted_content", "content_queue", "rejected_content", "failed_content"];
+        let exists = tables.iter().any(|table| self.shortcode_exists_in_table(table, &shortcode));
 
-        // Return true if the URL is found in any table
-        exists_in_content_info || exists_in_posted_content || exists_in_content_queue || exists_in_rejected_content || exists_in_failed_content
+        exists
+    }
+
+    fn shortcode_exists_in_table(&mut self, table_name: &str, shortcode: &str) -> bool {
+        let tx = self.conn.transaction().unwrap();
+        let mut stmt = tx.prepare(&format!("SELECT url FROM {} WHERE original_shortcode = ?1", table_name)).unwrap();
+        let exists = stmt.query_map(params![shortcode], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
+        exists
     }
 }

@@ -8,15 +8,23 @@ use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::fs::File;
+use tokio::io::AsyncReadExt;
 
 use crate::utils::now_in_my_timezone;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) -> anyhow::Result<()> {
-    let profile_list = vec!["qringey", "repostrandy", "cringepostrandy", "cringechub", "cloinking", "rightaccountrandy", "hard.mp4s", "eclipsegotban", "zenxogg", "autistic.browniez", "viewingmag"];
+async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, String> {
+    let mut file = File::open(path).await.expect("Unable to open credentials file");
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).await.expect("Unable to read the credentials file");
+    let accounts: HashMap<String, HashMap<String, String>> = serde_yaml::from_str(&contents).expect("Error parsing credentials file");
+    accounts.get(username).unwrap().clone()
+}
 
+pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) -> anyhow::Result<()> {
     let testing_urls = vec![
         "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/427593823_409517391528628_721852697655626393_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=104&_nc_ohc=9pssChekERcAX_XayYY&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAXS0ConI008uTXkgc-woujGN6BchRo_ofWZkPVrg1JfQ&oe=65D574C7&_nc_sid=2999b8",
         "https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/429215690_1444115769649034_2337419377310423138_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=jEzG6M_uCAQAX8oTbjC&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCGYsCaoUB8qOYTSJJFJZbLMuKCbGZqfXH9ydMu9jKhxQ&oe=65D5D2CE&_nc_sid=2999b8",
@@ -28,8 +36,8 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
         //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
     ];
 
-    let loop_sleep_len = Duration::from_secs(60 * 60);
-    let download_sleep_len = Duration::from_secs(60 * 3);
+    let loop_sleep_len = Duration::from_secs(60 * 90);
+    let download_sleep_len = Duration::from_secs(60 * 5);
     //let mut unique_post_ids = HashSet::new();
 
     let scraper_loop: Option<tokio::task::JoinHandle<anyhow::Result<()>>>;
@@ -38,6 +46,8 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
 
     let username = credentials.get("username").unwrap().clone();
     let password = credentials.get("password").unwrap().clone();
+
+    let accounts_to_scrape: HashMap<String, String> = read_accounts_to_scrape("config/accounts_to_scrape.yaml", username.as_str()).await;
 
     if is_offline {
         println!("Sending offline data");
@@ -82,7 +92,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                         tx.send(("".to_string(), "".to_string(), "".to_string(), "C4EXJ4NpQz3".to_string())).await.unwrap();
                     }
 
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    tokio::time::sleep(Duration::from_secs(3)).await;
                 }
             });
 
@@ -106,14 +116,14 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
             println!("Fetching user info...");
             let mut accounts_being_scraped = Vec::new();
 
-            for profile in &profile_list {
+            for (profile, _hashtags) in &accounts_to_scrape {
                 {
                     let mut scraper_guard = cloned_scraper.lock().await;
                     let user = scraper_guard.scrape_userinfo(&profile).await.unwrap();
                     accounts_being_scraped.push(user);
                     println!("Fetched user info for {}", profile);
                 }
-                let sleep_duration = 10;
+                let sleep_duration = 20;
                 randomized_sleep(sleep_duration).await;
             }
 
@@ -140,7 +150,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                         posts.insert(user.clone(), scraper_guard.scrape_posts(&user.id, 5).await.unwrap());
                     }
 
-                    randomized_sleep(15).await;
+                    randomized_sleep(30).await;
                 }
 
                 let mut flattened_posts: Vec<(User, Post)> = Vec::new();
@@ -164,8 +174,31 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                             println!("{}/{} Scraping content: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                             let mut scraper_guard = cloned_scraper.lock().await;
                             let (url, caption) = scraper_guard.download_reel(&post.shortcode).await.unwrap();
-                            //println!("Sending caption: {}\n URL: {}", caption, url);
 
+                            // Check if the caption contains any hashtags
+                            let mut hashtags = caption.split_whitespace().filter(|s| s.starts_with('#')).collect::<Vec<&str>>().join(" ");
+                            let selected_hashtags;
+                            if hashtags.len() > 0 {
+                                selected_hashtags = hashtags;
+                            } else {
+                                hashtags = accounts_to_scrape.get(&author.username.clone()).unwrap().clone();
+                                // Convert hashtag string from "#hastag, #hashtag2" to vec, and then pick 3 random hashtags
+                                // Split the string into a vector and trim each element
+                                let mut hashtags: Vec<&str> = hashtags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+                                // Shuffle the vector and select the first three elements
+
+                                hashtags.shuffle(&mut rng);
+                                let random_hashtags = &hashtags[0..3.min(hashtags.len())];
+
+                                // Join the selected hashtags into a single string
+                                selected_hashtags = random_hashtags.join(" ");
+                            }
+
+                            // Remove the hashtags from the caption
+                            let caption = caption.split_whitespace().filter(|s| !s.starts_with('#')).collect::<Vec<&str>>().join(" ");
+                            // Rebuild the caption
+                            let caption = format!("{} {}", caption, selected_hashtags);
                             // Use a scoped block to immediately drop the lock
                             {
                                 // Store the new URL in the shared variable
@@ -220,7 +253,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                         original_author: content_info.original_author.clone(),
                         original_shortcode: content_info.original_shortcode.clone(),
                         last_updated_at: last_updated_at.to_rfc3339(),
-                        will_post_at: will_post_at,
+                        will_post_at,
                     };
 
                     transaction.save_content_queue(new_queued_post).unwrap();
@@ -240,7 +273,6 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                 let scraper_copy = Arc::clone(&scraper);
                                 let mut scraper_guard = scraper_copy.lock().await;
                                 if !is_offline {
-
                                     let full_caption;
                                     let spacer = ".\n.\n.\n.\n.\n.\n.\n";
                                     if queued_post.caption == "" && queued_post.hashtags == "" {
@@ -249,7 +281,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                         full_caption = format!("{}", queued_post.hashtags);
                                     } else if queued_post.hashtags == "" {
                                         full_caption = format!("{}", queued_post.caption);
-                                    } else  {
+                                    } else {
                                         full_caption = format!("{}{}{}", queued_post.caption, spacer, queued_post.hashtags);
                                     }
 
@@ -262,7 +294,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                             println!(" [+] Uploaded content successfully: {}", queued_post.original_shortcode);
                                         }
                                         Err(_) => {
-                                            println!(" [!] ERRROR: couldn't upload content to instagram! {}", queued_post.url);
+                                            println!(" [!] ERROR: couldn't upload content to instagram! {}", queued_post.url);
 
                                             let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
                                             if video_info.status.contains("shown") {

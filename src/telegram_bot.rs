@@ -1,5 +1,6 @@
 mod callbacks;
 mod commands;
+mod errors;
 mod helpers;
 mod messages;
 mod state;
@@ -19,6 +20,8 @@ use teloxide::{
     types::{InlineKeyboardButton, InlineKeyboardMarkup},
 };
 
+use teloxide::adaptors::throttle::{Limits, Throttle};
+
 use tokio::sync::mpsc::Receiver;
 use tokio::time::sleep;
 
@@ -26,6 +29,7 @@ use crate::database::{ContentInfo, Database, DatabaseTransaction};
 use crate::telegram_bot::state::{schema, State};
 use indexmap::IndexMap;
 
+use crate::telegram_bot::errors::handle_message_is_not_modified_error;
 use crate::telegram_bot::helpers::send_or_replace_navigation_bar;
 use crate::utils::now_in_my_timezone;
 use tokio::sync::Mutex;
@@ -47,11 +51,11 @@ struct NavigationBar {
 type BotDialogue = Dialogue<State, InMemStorage<State>>;
 
 const CHAT_ID: ChatId = ChatId(34957918);
-const REFRESH_RATE: Duration = Duration::from_secs(60);
+const REFRESH_RATE: Duration = Duration::from_secs(90);
 
 pub(crate) async fn run_bot(rx: Receiver<(String, String, String, String)>, database: Database, credentials: HashMap<String, String>) {
     let api_token = credentials.get("telegram_api_token").unwrap();
-    let bot = Bot::new(api_token);
+    let bot = Bot::new(api_token).throttle(Limits::default());
 
     let storage = InMemStorage::new();
     let dialogue = BotDialogue::new(storage.clone(), CHAT_ID);
@@ -76,7 +80,7 @@ pub(crate) async fn run_bot(rx: Receiver<(String, String, String, String)>, data
     }
 }
 
-async fn start_dispatcher(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, database: Database, config: UIDefinitions, storage: Arc<InMemStorage<State>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>) {
+async fn start_dispatcher(bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, database: Database, config: UIDefinitions, storage: Arc<InMemStorage<State>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>) {
     let _ = execution_mutex.lock().await;
     let mut dispatcher_builder = Dispatcher::builder(bot.clone(), schema())
         .dependencies(dptree::deps![dialogue.clone(), storage.clone(), execution_mutex.clone(), database.clone(), config.clone(), nav_bar_mutex])
@@ -86,7 +90,7 @@ async fn start_dispatcher(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<
     dispatcher_future.await;
 }
 
-async fn receive_videos(mut rx: Receiver<(String, String, String, String)>, bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, database: Database, config: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) {
+async fn receive_videos(mut rx: Receiver<(String, String, String, String)>, bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, database: Database, config: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) {
     // Give a head start to the dispatcher
     sleep(Duration::from_secs(1)).await;
 
@@ -138,7 +142,7 @@ async fn receive_videos(mut rx: Receiver<(String, String, String, String)>, bot:
     }
 }
 
-async fn update_view(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
+async fn update_view(bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex: Arc<Mutex<()>>, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
     let _mutex_guard = execution_mutex.lock().await;
 
     let dialogue_state = dialogue.get().await.unwrap().unwrap_or_else(|| State::PageView);
@@ -198,7 +202,7 @@ async fn update_view(bot: Bot, dialogue: BotDialogue, execution_mutex: Arc<Mutex
     send_or_replace_navigation_bar(bot, database, nav_bar_mutex).await;
     Ok(())
 }
-async fn process_failed_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_failed_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     let failed_content = tx.load_failed_content().unwrap();
     for mut content in failed_content {
         if content.original_shortcode == video_info.original_shortcode {
@@ -223,7 +227,7 @@ async fn process_failed_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mu
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_failed_hidden(bot: &Bot, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_failed_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
     let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], sent_message_id);
     video_info.status = "failed_shown".to_string();
@@ -236,7 +240,7 @@ async fn process_pending_shown(message_id: MessageId, video_info: &mut ContentIn
     return Ok((message_id, video_info.clone()));
 }
 
-async fn process_pending_hidden(bot: &Bot, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_pending_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
     let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
     video_info.status = "pending_shown".to_string();
@@ -244,7 +248,7 @@ async fn process_pending_hidden(bot: &Bot, ui_definitions: &UIDefinitions, video
     Ok((sent_message_id, video_info.clone()))
 }
 
-async fn process_waiting(bot: &Bot, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_waiting(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
     let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
     video_info.status = "pending_shown".to_string();
@@ -252,7 +256,7 @@ async fn process_waiting(bot: &Bot, ui_definitions: &UIDefinitions, video_info: 
     Ok((sent_message_id, video_info.clone()))
 }
 
-async fn process_accepted_hidden(bot: &Bot, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, mut full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_accepted_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, mut full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     let sent_message_id = send_video_and_get_id(bot, input_file).await?;
 
     let undo_action = get_action_buttons(ui_definitions, &["undo"], sent_message_id);
@@ -272,7 +276,7 @@ async fn process_accepted_shown(message_id: MessageId, video_info: &mut ContentI
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_rejected_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, mut message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_rejected_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, mut message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     video_info.status = "rejected_shown".to_string();
 
     let rejected_content = tx.load_rejected_content()?;
@@ -325,7 +329,7 @@ async fn process_rejected_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: 
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_queued_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo, input_file: &InputFile, mut full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_queued_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo, input_file: &InputFile, mut full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     video_info.status = "queued_shown".to_string();
 
     // Extract the queued post information
@@ -384,7 +388,7 @@ async fn process_queued_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: &m
     }
 }
 
-async fn process_queued_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_queued_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     //println!("process_queued_shown - Message ID: {}", message_id);
     let mut queued_content_list = tx.load_content_queue().unwrap();
     for queued_content in &mut queued_content_list {
@@ -450,7 +454,7 @@ async fn process_queued_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mu
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_posted_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, mut message_id: MessageId, video_info: &mut ContentInfo, input_file: &InputFile, mut full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_posted_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, mut message_id: MessageId, video_info: &mut ContentInfo, input_file: &InputFile, mut full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     //println!("process_posted_hidden - Message ID: {}", message_id);
     video_info.status = "posted_shown".to_string();
     let mut posted_content_list = tx.load_posted_content().unwrap();
@@ -502,7 +506,7 @@ async fn process_posted_hidden(bot: &Bot, ui_definitions: &UIDefinitions, tx: &m
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_rejected_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_rejected_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     let mut rejected_content_list = tx.load_rejected_content().unwrap();
     for rejected_content in &mut rejected_content_list {
         if rejected_content.original_shortcode == video_info.original_shortcode {
@@ -572,7 +576,7 @@ async fn process_rejected_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_posted_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+async fn process_posted_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     //println!("process_posted_shown - Message ID: {}", message_id);
     let mut posted_content_list = tx.load_posted_content().unwrap();
     for posted_content in &mut posted_content_list {
@@ -632,7 +636,7 @@ async fn process_posted_shown(bot: &Bot, ui_definitions: &UIDefinitions, tx: &mu
     Ok((message_id, video_info.clone()))
 }
 
-async fn send_video_and_get_id(bot: &Bot, input_file: InputFile) -> Result<MessageId, Box<dyn Error + Send + Sync>> {
+async fn send_video_and_get_id(bot: &Throttle<Bot>, input_file: InputFile) -> Result<MessageId, Box<dyn Error + Send + Sync>> {
     let video_message = bot.send_video(CHAT_ID, input_file).await?;
     Ok(video_message.id)
 }
@@ -647,26 +651,12 @@ fn get_action_buttons(ui_definitions: &UIDefinitions, action_keys: &[&str], sent
         .collect()
 }
 
-async fn edit_message_caption_and_markup(bot: &Bot, chat_id: ChatId, message_id: MessageId, caption: String, markup_buttons: Vec<InlineKeyboardButton>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    match bot.edit_message_caption(chat_id, message_id).caption(caption).await {
-        Ok(_) => {}
-        Err(e) => {
-            if e.to_string().contains("message is not modified") {
-            } else {
-                return Err(Box::new(e));
-            }
-        }
-    }
+async fn edit_message_caption_and_markup(bot: &Throttle<Bot>, chat_id: ChatId, message_id: MessageId, caption: String, markup_buttons: Vec<InlineKeyboardButton>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let caption_edit_result = bot.edit_message_caption(chat_id, message_id).caption(caption).await;
+    handle_message_is_not_modified_error(caption_edit_result).await?;
 
-    match bot.edit_message_reply_markup(chat_id, message_id).reply_markup(InlineKeyboardMarkup::new([markup_buttons])).await {
-        Ok(_) => {}
-        Err(e) => {
-            if e.to_string().contains("message is not modified") {
-            } else {
-                return Err(Box::new(e));
-            }
-        }
-    }
+    let markup_edit_result = bot.edit_message_reply_markup(chat_id, message_id).reply_markup(InlineKeyboardMarkup::new([markup_buttons])).await;
+    handle_message_is_not_modified_error(markup_edit_result).await?;
 
     Ok(())
 }
