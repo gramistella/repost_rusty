@@ -272,19 +272,22 @@ impl DatabaseTransaction {
 
     pub fn save_user_settings(&mut self, user_settings: UserSettings) -> Result<()> {
         let tx = self.conn.transaction()?;
+
+        // Remove all the user settings
+        tx.execute("DELETE FROM user_settings", [])?;
         // Update user settings
         tx.execute(
-            "UPDATE user_settings SET can_post = ?1, posting_interval = ?2, random_interval_variance = ?3, rejected_content_lifespan = ?4, posted_content_lifespan = ?5, timezone_offset = ?6, current_page = ?7, page_size = ?8",
+            "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                user_settings.can_post as i64,
-                user_settings.posting_interval,
-                user_settings.random_interval_variance,
-                user_settings.rejected_content_lifespan,
-                user_settings.posted_content_lifespan,
-                user_settings.timezone_offset,
-                user_settings.current_page,
-                user_settings.page_size
-            ],
+            user_settings.can_post as i64,
+            user_settings.posting_interval,
+            user_settings.random_interval_variance,
+            user_settings.rejected_content_lifespan,
+            user_settings.posted_content_lifespan,
+            user_settings.timezone_offset,
+            user_settings.current_page,
+            user_settings.page_size
+        ],
         )?;
 
         tx.commit()?;
@@ -468,7 +471,7 @@ impl DatabaseTransaction {
 
     pub fn load_content_mapping(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let tx = self.conn.transaction()?;
-        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info")?;
+        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info ORDER BY page_num, message_id")?;
         let content_info_iter = stmt.query_map([], |row| {
             let message_id: i32 = row.get(0)?;
             let url: String = row.get(1)?;

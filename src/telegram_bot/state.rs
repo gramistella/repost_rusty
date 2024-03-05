@@ -1,5 +1,5 @@
 use crate::telegram_bot::callbacks::{handle_accepted_view, handle_edit_view, handle_page_view, handle_rejected_view, handle_remove_from_view, handle_settings, handle_undo, handle_video_action};
-use crate::telegram_bot::commands::{help, settings, start, Command};
+use crate::telegram_bot::commands::{help, settings, start, Command, page};
 use crate::telegram_bot::messages::{receive_caption, receive_hashtags, receive_posted_content_lifespan, receive_posting_interval, receive_random_interval, receive_rejected_content_lifespan};
 use std::error::Error;
 use teloxide::dispatching::dialogue::InMemStorage;
@@ -54,6 +54,7 @@ pub fn schema() -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
     let command_handler = teloxide::filter_command::<Command, _>()
         .branch(case![Command::Help].endpoint(help))
         .branch(case![Command::Start].endpoint(start))
+        .branch(case![Command::Page].endpoint(page))
         .branch(case![Command::Settings].endpoint(settings));
 
     let message_handler = Update::filter_message()

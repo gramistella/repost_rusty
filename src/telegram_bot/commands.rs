@@ -18,9 +18,9 @@ use tokio::sync::Mutex;
 pub enum Command {
     /// Display this text.
     Start,
+    Page,
     Help,
     Settings,
-    Restore,
 }
 
 pub async fn help(bot: Bot, msg: Message) -> HandlerResult {
@@ -39,6 +39,29 @@ pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, data
 
     // Can't delete this unfortunately
     // bot.delete_message(msg.chat.id, msg.id).await?;
+    Ok(())
+}
+
+pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database) -> HandlerResult {
+
+    let _ = bot.delete_message(CHAT_ID, msg.id).await;
+
+    if let Some(state) = dialogue.get().await.unwrap() {
+        if state != State::PageView {
+            return Ok(());
+        }
+    }
+
+    let _ = clear_sent_messages(bot.clone(), database.clone()).await;
+    let mut tx = database.begin_transaction().unwrap();
+    let mut user_settings = tx.load_user_settings().unwrap();
+    let page_num = msg.text().unwrap().split(" ").collect::<Vec<&str>>()[1].parse::<i32>().unwrap();
+
+    println!("Changed page number from {} to {}", user_settings.current_page,  page_num);
+    println!("Here you should check for bounds and stuff, but I'm not doing that right now.");
+    user_settings.current_page = page_num;
+    tx.save_user_settings(user_settings).unwrap();
+
     Ok(())
 }
 
