@@ -1,5 +1,6 @@
-use crate::database::UserSettings;
 use chrono::{DateTime, Duration, Utc};
+
+use crate::database::UserSettings;
 
 pub fn now_in_my_timezone(user_settings: UserSettings) -> DateTime<Utc> {
     let utc_now = Utc::now();

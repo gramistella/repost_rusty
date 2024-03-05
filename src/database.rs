@@ -3,12 +3,11 @@ use indexmap::IndexMap;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use rand::Rng;
-
+use rusqlite::{params, Result};
+use serde::{Deserialize, Serialize};
 use teloxide::types::MessageId;
 
 use crate::utils::now_in_my_timezone;
-use rusqlite::{params, Result};
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct UserSettings {

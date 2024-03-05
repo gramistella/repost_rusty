@@ -1,16 +1,18 @@
-use crate::database::Database;
-use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions, CHAT_ID};
-use crate::utils::now_in_my_timezone;
 use std::error::Error;
 use std::sync::Arc;
+
 use teloxide::adaptors::Throttle;
+use teloxide::Bot;
 use teloxide::payloads::EditMessageReplyMarkupSetters;
 use teloxide::prelude::{ChatId, Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::command::BotCommands;
-use teloxide::Bot;
 use tokio::sync::Mutex;
+
+use crate::database::Database;
+use crate::telegram_bot::{BotDialogue, CHAT_ID, HandlerResult, State, UIDefinitions};
+use crate::telegram_bot::helpers::clear_sent_messages;
+use crate::utils::now_in_my_timezone;
 
 /// These commands are supported:
 #[derive(BotCommands, Clone)]

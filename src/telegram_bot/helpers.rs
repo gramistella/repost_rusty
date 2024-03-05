@@ -1,14 +1,15 @@
-use crate::database::Database;
-use crate::telegram_bot::{NavigationBar, CHAT_ID, REFRESH_RATE};
 use std::sync::Arc;
 
 use teloxide::adaptors::Throttle;
+use teloxide::Bot;
 use teloxide::payloads::EditMessageTextSetters;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::Requester;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
-use teloxide::Bot;
 use tokio::sync::Mutex;
+
+use crate::database::Database;
+use crate::telegram_bot::{CHAT_ID, NavigationBar, REFRESH_RATE};
 
 pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std::io::Result<()> {
     // Load the video mappings

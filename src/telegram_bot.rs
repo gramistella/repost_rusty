@@ -1,38 +1,34 @@
+use std::collections::HashMap;
+use std::error::Error;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use teloxide::{
+    dispatching::dialogue::InMemStorage,
+    prelude::*,
+    types::{InlineKeyboardButton, InlineKeyboardMarkup},
+};
+use teloxide::adaptors::throttle::{Limits, Throttle};
+use teloxide::types::{InputFile, MessageId};
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::Mutex;
+use tokio::time::sleep;
+
+use crate::database::{ContentInfo, Database, DatabaseTransaction};
+use crate::telegram_bot::errors::handle_message_is_not_modified_error;
+use crate::telegram_bot::helpers::send_or_replace_navigation_bar;
+use crate::telegram_bot::state::{schema, State};
+use crate::utils::now_in_my_timezone;
+
 mod callbacks;
 mod commands;
 mod errors;
 mod helpers;
 mod messages;
 mod state;
-
-use chrono::{DateTime, Utc};
-
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::error::Error;
-
-use std::sync::Arc;
-use std::time::Duration;
-use teloxide::types::{InputFile, MessageId};
-use teloxide::{
-    dispatching::dialogue::InMemStorage,
-    prelude::*,
-    types::{InlineKeyboardButton, InlineKeyboardMarkup},
-};
-
-use teloxide::adaptors::throttle::{Limits, Throttle};
-
-use tokio::sync::mpsc::Receiver;
-use tokio::time::sleep;
-
-use crate::database::{ContentInfo, Database, DatabaseTransaction};
-use crate::telegram_bot::state::{schema, State};
-use indexmap::IndexMap;
-
-use crate::telegram_bot::errors::handle_message_is_not_modified_error;
-use crate::telegram_bot::helpers::send_or_replace_navigation_bar;
-use crate::utils::now_in_my_timezone;
-use tokio::sync::Mutex;
 
 type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
 

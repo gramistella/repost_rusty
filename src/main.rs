@@ -1,7 +1,5 @@
-mod database;
-mod scraper;
-mod telegram_bot;
-mod utils;
+extern crate r2d2;
+extern crate r2d2_sqlite;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -11,14 +9,16 @@ use tokio::sync::mpsc;
 
 use crate::database::Database;
 
-extern crate r2d2;
-extern crate r2d2_sqlite;
+mod database;
+mod scraper;
+mod telegram_bot;
+mod utils;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let is_offline = true;
+    let is_offline = false;
 
     // Initialize the database
     let db = Database::new(is_offline)?;

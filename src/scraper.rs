@@ -1,20 +1,21 @@
-use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
-use chrono::DateTime;
-use indexmap::IndexMap;
-use instagram_scraper_rs::{InstagramScraper, Post, User};
-use rand::prelude::SliceRandom;
-use rand::rngs::{OsRng, StdRng};
-use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use chrono::DateTime;
+use indexmap::IndexMap;
+use instagram_scraper_rs::{InstagramScraper, Post, User};
+use rand::{Rng, SeedableRng};
+use rand::prelude::SliceRandom;
+use rand::rngs::{OsRng, StdRng};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-
-use crate::utils::now_in_my_timezone;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+
+use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
+use crate::utils::now_in_my_timezone;
 
 async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, String> {
     let mut file = File::open(path).await.expect("Unable to open credentials file");
