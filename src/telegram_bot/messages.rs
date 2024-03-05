@@ -1,14 +1,14 @@
 use indexmap::IndexMap;
 use regex::Regex;
 use teloxide::adaptors::Throttle;
-use teloxide::Bot;
 use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::{Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
+use teloxide::Bot;
 
 use crate::database::Database;
-use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions};
 use crate::telegram_bot::commands::display_settings_message;
+use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions};
 
 pub async fn receive_posting_interval(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {

@@ -2,16 +2,16 @@ use std::error::Error;
 use std::sync::Arc;
 
 use teloxide::adaptors::Throttle;
-use teloxide::Bot;
 use teloxide::payloads::EditMessageReplyMarkupSetters;
 use teloxide::prelude::{ChatId, Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::command::BotCommands;
+use teloxide::Bot;
 use tokio::sync::Mutex;
 
 use crate::database::Database;
-use crate::telegram_bot::{BotDialogue, CHAT_ID, HandlerResult, State, UIDefinitions};
 use crate::telegram_bot::helpers::clear_sent_messages;
+use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions, CHAT_ID};
 use crate::utils::now_in_my_timezone;
 
 /// These commands are supported:
@@ -45,7 +45,6 @@ pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, data
 }
 
 pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database) -> HandlerResult {
-
     let _ = bot.delete_message(CHAT_ID, msg.id).await;
 
     if let Some(state) = dialogue.get().await.unwrap() {
@@ -59,7 +58,7 @@ pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, datab
     let mut user_settings = tx.load_user_settings().unwrap();
     let page_num = msg.text().unwrap().split(" ").collect::<Vec<&str>>()[1].parse::<i32>().unwrap();
 
-    println!("Changed page number from {} to {}", user_settings.current_page,  page_num);
+    println!("Changed page number from {} to {}", user_settings.current_page, page_num);
     println!("Here you should check for bounds and stuff, but I'm not doing that right now.");
     user_settings.current_page = page_num;
     tx.save_user_settings(user_settings).unwrap();

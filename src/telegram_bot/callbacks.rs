@@ -3,15 +3,15 @@ use std::sync::Arc;
 use chrono::Duration;
 use indexmap::IndexMap;
 use teloxide::adaptors::Throttle;
-use teloxide::Bot;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
+use teloxide::Bot;
 use tokio::sync::Mutex;
 
 use crate::database::{ContentInfo, Database, RejectedContent, UserSettings};
-use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, process_accepted_shown, process_rejected_shown, State, UIDefinitions};
 use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::helpers::clear_sent_messages;
+use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
 
 pub async fn handle_accepted_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {

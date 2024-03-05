@@ -1,12 +1,12 @@
 use std::error::Error;
 
-use teloxide::dispatching::{dialogue, UpdateFilterExt, UpdateHandler};
 use teloxide::dispatching::dialogue::InMemStorage;
+use teloxide::dispatching::{dialogue, UpdateFilterExt, UpdateHandler};
 use teloxide::prelude::*;
 use teloxide::types::MessageId;
 
 use crate::telegram_bot::callbacks::{handle_accepted_view, handle_edit_view, handle_page_view, handle_rejected_view, handle_remove_from_view, handle_settings, handle_undo, handle_video_action};
-use crate::telegram_bot::commands::{Command, help, page, settings, start};
+use crate::telegram_bot::commands::{help, page, settings, start, Command};
 use crate::telegram_bot::messages::{receive_caption, receive_hashtags, receive_posted_content_lifespan, receive_posting_interval, receive_random_interval, receive_rejected_content_lifespan};
 
 #[derive(Clone, Default, PartialEq, Debug)]

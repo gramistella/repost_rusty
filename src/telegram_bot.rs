@@ -6,13 +6,13 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use teloxide::adaptors::throttle::{Limits, Throttle};
+use teloxide::types::{InputFile, MessageId};
 use teloxide::{
     dispatching::dialogue::InMemStorage,
     prelude::*,
     types::{InlineKeyboardButton, InlineKeyboardMarkup},
 };
-use teloxide::adaptors::throttle::{Limits, Throttle};
-use teloxide::types::{InputFile, MessageId};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::sleep;

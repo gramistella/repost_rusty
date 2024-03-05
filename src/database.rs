@@ -278,15 +278,15 @@ impl DatabaseTransaction {
         tx.execute(
             "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-            user_settings.can_post as i64,
-            user_settings.posting_interval,
-            user_settings.random_interval_variance,
-            user_settings.rejected_content_lifespan,
-            user_settings.posted_content_lifespan,
-            user_settings.timezone_offset,
-            user_settings.current_page,
-            user_settings.page_size
-        ],
+                user_settings.can_post as i64,
+                user_settings.posting_interval,
+                user_settings.random_interval_variance,
+                user_settings.rejected_content_lifespan,
+                user_settings.posted_content_lifespan,
+                user_settings.timezone_offset,
+                user_settings.current_page,
+                user_settings.page_size
+            ],
         )?;
 
         tx.commit()?;
