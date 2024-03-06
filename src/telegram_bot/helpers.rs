@@ -9,7 +9,8 @@ use teloxide::Bot;
 use tokio::sync::Mutex;
 
 use crate::database::Database;
-use crate::telegram_bot::{NavigationBar, CHAT_ID, REFRESH_RATE};
+use crate::telegram_bot::{NavigationBar, CHAT_ID};
+use crate::REFRESH_RATE;
 
 pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std::io::Result<()> {
     // Load the video mappings

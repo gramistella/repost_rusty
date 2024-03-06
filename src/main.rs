@@ -4,6 +4,7 @@ extern crate r2d2_sqlite;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
@@ -13,6 +14,8 @@ mod database;
 mod scraper;
 mod telegram_bot;
 mod utils;
+
+const REFRESH_RATE: Duration = Duration::from_secs(90);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

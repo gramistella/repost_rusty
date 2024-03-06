@@ -276,6 +276,9 @@ impl DatabaseTransaction {
     pub fn save_user_settings(&mut self, user_settings: UserSettings) -> Result<()> {
         let tx = self.conn.transaction()?;
 
+        // Remove all the user settings
+        tx.execute("DELETE FROM user_settings", [])?;
+
         // Update user settings
         tx.execute(
             "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",

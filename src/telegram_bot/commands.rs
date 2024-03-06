@@ -39,8 +39,6 @@ pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, data
         bot.send_message(msg.chat.id, "You can't use this bot.".to_string()).await?;
     }
 
-    // Can't delete this unfortunately
-    // bot.delete_message(msg.chat.id, msg.id).await?;
     Ok(())
 }
 

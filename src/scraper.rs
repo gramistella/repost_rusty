@@ -16,6 +16,7 @@ use tokio::time::sleep;
 
 use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
 use crate::utils::now_in_my_timezone;
+use crate::REFRESH_RATE;
 
 async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, String> {
     let mut file = File::open(path).await.expect("Unable to open credentials file");
@@ -245,7 +246,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
             //let queued_posts = Vec::new();
             for (message_id, mut content_info) in content_mapping {
                 if content_info.status.contains("accepted_") {
-                    let last_updated_at = now_in_my_timezone(user_settings.clone()) - Duration::from_secs(60);
+                    let last_updated_at = now_in_my_timezone(user_settings.clone()) - REFRESH_RATE;
                     let will_post_at = transaction.get_new_post_time(user_settings.clone()).unwrap();
                     let new_queued_post = QueuedContent {
                         url: content_info.url.clone(),

@@ -22,6 +22,7 @@ use crate::telegram_bot::errors::handle_message_is_not_modified_error;
 use crate::telegram_bot::helpers::send_or_replace_navigation_bar;
 use crate::telegram_bot::state::{schema, State};
 use crate::utils::now_in_my_timezone;
+use crate::REFRESH_RATE;
 
 mod callbacks;
 mod commands;
@@ -47,7 +48,6 @@ struct NavigationBar {
 type BotDialogue = Dialogue<State, InMemStorage<State>>;
 
 const CHAT_ID: ChatId = ChatId(34957918);
-const REFRESH_RATE: Duration = Duration::from_secs(90);
 
 pub(crate) async fn run_bot(rx: Receiver<(String, String, String, String)>, database: Database, credentials: HashMap<String, String>) {
     let api_token = credentials.get("telegram_api_token").unwrap();
@@ -287,7 +287,16 @@ async fn process_rejected_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinit
         if content.url == video_info.url && !content.expired {
             if now > datetime + expiry_duration {
                 video_info.status = "removed_from_view".to_string();
-                bot.delete_message(CHAT_ID, message_id).await?;
+                match bot.delete_message(CHAT_ID, message_id).await {
+                    Ok(_) => {
+                        // println!("Permanently removed post from video_info: {}", content.url);
+                    }
+                    Err(_e) => {
+                        // This will happen when the message is rejected_hidden and is stored in another page,
+                        // as it gets loaded into the current page, the message to delete cannot be found and the whole thing gets stuck
+                        // println!(" process_rejected_hidden - Error deleting rejected message with ID: {}: {}", message_id, e);
+                    }
+                }
                 content.expired = true;
                 tx.save_rejected_content(content.clone())?;
                 //println!("Permanently removed post from video_info: {}", content.url);

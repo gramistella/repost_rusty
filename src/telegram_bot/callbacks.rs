@@ -10,8 +10,9 @@ use tokio::sync::Mutex;
 use crate::database::{ContentInfo, Database, RejectedContent, UserSettings};
 use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions, REFRESH_RATE};
+use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
+use crate::REFRESH_RATE;
 
 pub async fn handle_accepted_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
