@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use chrono::Duration;
 use indexmap::IndexMap;
 use teloxide::adaptors::Throttle;
 use teloxide::prelude::*;
@@ -11,7 +10,7 @@ use tokio::sync::Mutex;
 use crate::database::{ContentInfo, Database, RejectedContent, UserSettings};
 use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
+use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions, REFRESH_RATE};
 use crate::utils::now_in_my_timezone;
 
 pub async fn handle_accepted_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
@@ -58,8 +57,8 @@ pub async fn handle_rejected_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: 
 
     let now = now_in_my_timezone(user_settings.clone());
 
-    // Subtract 60 seconds from the current time so that the rejected content is immediately shown
-    let last_updated_at = now - Duration::seconds(60);
+    // Subtract the refresh rate from the current time so that the rejected content is shown immediately
+    let last_updated_at = now - REFRESH_RATE;
 
     let rejected_content = RejectedContent {
         url: video_info.url.clone(),

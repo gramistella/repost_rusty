@@ -56,12 +56,21 @@ pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, datab
     let _ = clear_sent_messages(bot.clone(), database.clone()).await;
     let mut tx = database.begin_transaction().unwrap();
     let mut user_settings = tx.load_user_settings().unwrap();
-    let page_num = msg.text().unwrap().split(" ").collect::<Vec<&str>>()[1].parse::<i32>().unwrap();
+    let page_num = msg.text().unwrap().split(" ").collect::<Vec<&str>>()[1].parse::<i32>();
+    let page_num = match page_num {
+        Ok(num) => num,
+        Err(_) => {
+            bot.send_message(CHAT_ID, "Invalid page number.".to_string()).await?;
+            return Ok(());
+        }
+    };
 
-    println!("Changed page number from {} to {}", user_settings.current_page, page_num);
-    println!("Here you should check for bounds and stuff, but I'm not doing that right now.");
-    user_settings.current_page = page_num;
-    tx.save_user_settings(user_settings).unwrap();
+    if 0 < page_num && page_num <= tx.get_total_pages().unwrap() {
+        user_settings.current_page = page_num;
+        tx.save_user_settings(user_settings).unwrap();
+    } else {
+        bot.send_message(CHAT_ID, "Invalid page number.".to_string()).await?;
+    }
 
     Ok(())
 }

@@ -118,31 +118,35 @@ impl Database {
         let default_timezone_offset = 1;
         let default_current_page = 1;
 
-        if is_offline {
-            let default_is_posting = 1;
-            let default_posting_interval = 1;
-            let default_random_interval = 0;
-            let default_removed_content_lifespan = 2;
-            let default_posted_content_lifespan = 2;
-            let default_page_size = 2;
+        let user_settings_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_settings)", [], |row| row.get(0)).unwrap_or(false);
 
-            let query = format!(
-                "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
-                default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
-            );
-            conn.execute(&query, [])?;
-        } else {
-            let default_is_posting = 1;
-            let default_posting_interval = 180;
-            let default_random_interval = 30;
-            let default_removed_content_lifespan = 120;
-            let default_posted_content_lifespan = 180;
-            let default_page_size = 8;
-            let query = format!(
-                "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
-                default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
-            );
-            conn.execute(&query, [])?;
+        if !user_settings_exists {
+            if is_offline {
+                let default_is_posting = 1;
+                let default_posting_interval = 1;
+                let default_random_interval = 0;
+                let default_removed_content_lifespan = 2;
+                let default_posted_content_lifespan = 2;
+                let default_page_size = 2;
+
+                let query = format!(
+                    "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+                    default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
+                );
+                conn.execute(&query, [])?;
+            } else {
+                let default_is_posting = 1;
+                let default_posting_interval = 180;
+                let default_random_interval = 30;
+                let default_removed_content_lifespan = 120;
+                let default_posted_content_lifespan = 180;
+                let default_page_size = 8;
+                let query = format!(
+                    "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+                    default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
+                );
+                conn.execute(&query, [])?;
+            }
         }
 
         conn.execute(
@@ -272,8 +276,6 @@ impl DatabaseTransaction {
     pub fn save_user_settings(&mut self, user_settings: UserSettings) -> Result<()> {
         let tx = self.conn.transaction()?;
 
-        // Remove all the user settings
-        tx.execute("DELETE FROM user_settings", [])?;
         // Update user settings
         tx.execute(
             "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -350,7 +352,9 @@ impl DatabaseTransaction {
         let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM content_info", params![], |row| row.get(0))?;
         Ok(count)
     }
-
+    pub fn get_total_pages(&mut self) -> Result<i32> {
+        Ok((self.get_max_records_in_content_info().unwrap() as i32 - 1) / self.load_user_settings().unwrap().page_size + 1)
+    }
     pub fn save_content_mapping(&mut self, video_mapping: IndexMap<MessageId, ContentInfo>) -> Result<()> {
         let existing_mapping = self.load_content_mapping()?;
         let user_settings = self.load_user_settings()?;
