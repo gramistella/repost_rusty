@@ -86,6 +86,20 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
                 }
             }
         }
+
+        if video_info.status == "failed_shown" {
+            video_info.status = "failed_hidden".to_string();
+            match bot.delete_message(CHAT_ID, *message_id).await {
+                Ok(_) => {
+                    // Update the status to "pending_hidden"
+                    //println!("Deleted queued message with ID: {}", message_id);
+                }
+                Err(_e) => {
+                    //println!("Error deleting queued message with ID: {}: {}", message_id, _e);
+                }
+            }
+        }
+
     }
 
     // Save the updated video mappings

@@ -26,7 +26,7 @@ async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, 
     accounts.get(username).unwrap().clone()
 }
 
-pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) -> anyhow::Result<()> {
+pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) {
     let testing_urls = vec![
         "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/427593823_409517391528628_721852697655626393_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=104&_nc_ohc=9pssChekERcAX_XayYY&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAXS0ConI008uTXkgc-woujGN6BchRo_ofWZkPVrg1JfQ&oe=65D574C7&_nc_sid=2999b8",
         "https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/429215690_1444115769649034_2337419377310423138_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=jEzG6M_uCAQAX8oTbjC&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCGYsCaoUB8qOYTSJJFJZbLMuKCbGZqfXH9ydMu9jKhxQ&oe=65D5D2CE&_nc_sid=2999b8",
@@ -365,8 +365,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
     });
 
     let _ = tokio::try_join!(scraper_loop.unwrap(), poster_loop);
-
-    Ok(())
+    
 }
 
 /// Randomized sleep function, will randomize the sleep duration by up to 20% of the original duration

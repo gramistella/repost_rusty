@@ -254,17 +254,11 @@ async fn process_waiting(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, vi
 
 async fn process_accepted_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, mut full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     let sent_message_id = send_video_and_get_id(bot, input_file).await?;
-
     let undo_action = get_action_buttons(ui_definitions, &["undo"], sent_message_id);
-
     video_info.status = "accepted_shown".to_string();
-
     let accepted_caption_text = ui_definitions.labels.get("accepted_caption").unwrap();
-
     full_video_caption = format!("{}\n\n{}", full_video_caption, accepted_caption_text);
-
     edit_message_caption_and_markup(bot, CHAT_ID, sent_message_id, full_video_caption, undo_action).await?;
-
     Ok((sent_message_id, video_info.clone()))
 }
 
@@ -499,7 +493,6 @@ async fn process_posted_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitio
                     let undo_action = [InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id))];
 
                     message_id = new_message.id;
-                    //tx.save_video_info(IndexMap::from([(new_message.id, video_info.clone())]))?;
 
                     let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
                 }

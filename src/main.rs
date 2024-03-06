@@ -26,25 +26,39 @@ async fn main() -> anyhow::Result<()> {
     // Initialize the database
     let db = Database::new(is_offline)?;
 
-    // Create a new channel
-    let (tx, rx) = mpsc::channel(100);
+    let all_credentials = read_credentials("config/credentials.yaml");
 
-    let credentials = read_credentials("config/credentials.yaml");
+    let mut all_handles = Vec::new();
 
-    // Run the scraper and the bot concurrently
-    let scraper = tokio::spawn(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone()));
-    let telegram_bot = tokio::spawn(telegram_bot::run_bot(rx, db, credentials));
+    for (username, credentials) in &all_credentials {
+        if credentials.get("enabled").expect("No enabled field in credentials") == "true"{
+
+            println!("Starting bot for user: {}", username);
+
+            // Create a new channel
+            let (tx, rx) = mpsc::channel(100);
+
+            // Run the scraper and the bot concurrently
+            let scraper = tokio::spawn(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone()));
+            let telegram_bot = tokio::spawn(telegram_bot::run_bot(rx, db.clone(), credentials.clone()));
+
+            all_handles.push(scraper);
+            all_handles.push(telegram_bot);
+        }
+    }
+
+
 
     // Wait for both tasks to complete
-    let _ = tokio::try_join!(scraper, telegram_bot)?;
+    let _ = futures::future::join_all(all_handles).await;
 
     Ok(())
 }
 
-fn read_credentials(path: &str) -> HashMap<String, String> {
+fn read_credentials(path: &str) -> HashMap<String, HashMap<String, String>> {
     let mut file = File::open(path).expect("Unable to open credentials file");
     let mut contents = String::new();
     file.read_to_string(&mut contents).expect("Unable to read the credentials file");
-    let credentials: HashMap<String, String> = serde_yaml::from_str(&contents).expect("Error parsing credentials file");
+    let credentials: HashMap<String, HashMap<String, String>> = serde_yaml::from_str(&contents).expect("Error parsing credentials file");
     credentials
 }
