@@ -6,6 +6,7 @@ use rand::Rng;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
 use teloxide::types::MessageId;
+use crate::REFRESH_RATE;
 
 use crate::utils::now_in_my_timezone;
 
@@ -566,6 +567,7 @@ impl DatabaseTransaction {
                 for post in queued_posts.iter_mut().skip(removed_post_index) {
                     let new_post_time = self.get_new_post_time(user_settings.clone()).unwrap();
                     post.will_post_at = new_post_time.clone();
+                    post.last_updated_at = (now_in_my_timezone(user_settings.clone()) - REFRESH_RATE).to_rfc3339();
 
                     let new_post = QueuedContent {
                         url: post.url.clone(),
@@ -576,6 +578,7 @@ impl DatabaseTransaction {
                         last_updated_at: post.last_updated_at.clone(),
                         will_post_at: post.will_post_at.clone(),
                     };
+
 
                     self.save_content_queue(new_post)?;
 
@@ -783,12 +786,28 @@ impl DatabaseTransaction {
     ///
     /// Will automatically remove the content from the content_queue
     pub fn save_failed_content(&mut self, failed_content: FailedContent) -> Result<()> {
+
+        // First we check if the content is actually in the content_queue
+        let mut exists = false;
         {
-            // Firstly we remove the failed_content from the content_queue using this method
-            // Since this one also automatically recalculates the will_post_at for the remaining posts
+            let queued_posts = self.load_content_queue()?;
+            for post in queued_posts {
+                if post.original_shortcode == failed_content.original_shortcode {
+                    exists = true;
+                    break;
+                }
+            }
+        }
+
+        //println!("Failed content exists in queue: {}", exists);
+
+        if exists {
+            // we remove the failed_content from the content_queue using this function
+            // Since it also automatically recalculates the will_post_at for the remaining posts
             self.remove_post_from_queue_with_shortcode(failed_content.original_shortcode.clone())?;
         }
-        // Then we add the posted_content to the posted_content table
+
+        // Then we add the failed_content to the failed_content table
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO failed_content (url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -907,6 +926,7 @@ impl DatabaseTransaction {
             new_post_time = now_in_my_timezone(user_settings.clone()) + Duration::seconds(60);
         }
 
+        // println!("New post time: {}", new_post_time.to_rfc3339());
         Ok(new_post_time.to_rfc3339())
     }
 

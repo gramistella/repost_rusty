@@ -785,6 +785,7 @@ dependencies = [
  "const_format",
  "log",
  "reqwest",
+ "reqwest_cookie_store",
  "serde",
  "serde_json",
  "serde_with",
@@ -1301,6 +1302,7 @@ dependencies = [
  "r2d2_sqlite",
  "rand",
  "regex",
+ "reqwest_cookie_store",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1354,6 +1356,18 @@ dependencies = [
  "wasm-streams",
  "web-sys",
  "winreg",
+]
+
+[[package]]
+name = "reqwest_cookie_store"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba529055ea150e42e4eb9c11dcd380a41025ad4d594b0cb4904ef28b037e1061"
+dependencies = [
+ "bytes",
+ "cookie_store",
+ "reqwest",
+ "url",
 ]
 
 [[package]]

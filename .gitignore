@@ -3,3 +3,4 @@
 /db
 /config/credentials.yaml
 /config/accounts_to_scrape.yaml
+/cookies

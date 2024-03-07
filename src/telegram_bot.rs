@@ -17,7 +17,7 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use crate::database::{ContentInfo, Database, DatabaseTransaction};
+use crate::database::{ContentInfo, Database, DatabaseTransaction, FailedContent};
 use crate::telegram_bot::errors::handle_message_is_not_modified_error;
 use crate::telegram_bot::helpers::send_or_replace_navigation_bar;
 use crate::telegram_bot::state::{schema, State};
@@ -157,7 +157,7 @@ async fn update_view(bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex:
                 continue;
             }
             let result = match video_info.status.as_str() {
-                "waiting" => process_waiting(&bot, &ui_definitions, &mut video_info, input_file, full_video_caption).await,
+                "waiting" => process_waiting(&bot, &mut tx, &ui_definitions, &mut video_info, input_file, full_video_caption).await,
                 "pending_hidden" => process_pending_hidden(&bot, &ui_definitions, &mut video_info, input_file, full_video_caption).await,
                 "pending_shown" => process_pending_shown(message_id, &mut video_info).await,
                 "posted_hidden" => process_posted_hidden(&bot, &ui_definitions, &mut tx, message_id, &mut video_info, &input_file, full_video_caption).await,
@@ -170,11 +170,11 @@ async fn update_view(bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex:
                 "rejected_shown" => process_rejected_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await,
                 "failed_hidden" => process_failed_hidden(&bot, &ui_definitions, &mut video_info, input_file, full_video_caption).await,
                 "failed_shown" => process_failed_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info, full_video_caption).await,
-                "removed_from_view" => Ok((message_id, video_info)),
+                "removed_from_view" => Ok((message_id, video_info.clone())),
                 _ => {
                     println!("Unknown status: {}", video_info.status);
                     println!("Video info: {:?}", video_info);
-                    Ok((message_id, video_info))
+                    Ok((message_id, video_info.clone()))
                 }
             };
 
@@ -189,7 +189,8 @@ async fn update_view(bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex:
                     }
                 }
                 Err(e) => {
-                    println!("Error: {}", e);
+                    println!("Error processing video {}, with status {}", video_info.original_shortcode, video_info.status);
+                    println!("With error: {}", e);
                 }
             }
         }
@@ -212,7 +213,7 @@ async fn process_failed_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
                 let full_video_caption = format!("{}\n\n{}", full_video_caption, ui_definitions.labels.get("failed_caption").unwrap());
                 edit_message_caption_and_markup(&bot, CHAT_ID, message_id, full_video_caption, video_actions).await?;
 
-                content.last_updated_at = (now + Duration::from_secs(60)).to_rfc3339();
+                content.last_updated_at = (now - REFRESH_RATE).to_rfc3339();
                 tx.update_failed_content(content.clone())?;
 
                 return Ok((message_id, video_info.clone()));
@@ -244,8 +245,31 @@ async fn process_pending_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefiniti
     Ok((sent_message_id, video_info.clone()))
 }
 
-async fn process_waiting(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-    let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
+async fn process_waiting(bot: &Throttle<Bot>, tx: &mut DatabaseTransaction, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+    let sent_message_id = match send_video_and_get_id(&bot, input_file).await{
+        Ok(id) => id,
+        Err(e) => {
+            if e.to_string().contains("wrong file identifier/HTTP URL specified") {
+
+                let now = now_in_my_timezone(tx.load_user_settings()?);
+                let failed_content = FailedContent{
+                    url: video_info.url.clone(),
+                    caption: video_info.caption.clone(),
+                    hashtags: video_info.hashtags.clone(),
+                    original_author: video_info.original_author.clone(),
+                    original_shortcode: video_info.original_shortcode.clone(),
+                    last_updated_at: (now - REFRESH_RATE).to_rfc3339(),
+                    failed_at: now.to_rfc3339(),
+                };
+                tx.save_failed_content(failed_content)?;
+                video_info.status = "removed_from_view".to_string();
+                return Ok((MessageId(0), video_info.clone()));
+            } else {
+                panic!("Error sending video in process_waiting: {}", e);
+            }
+
+        }
+    };
     let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
     video_info.status = "pending_shown".to_string();
     edit_message_caption_and_markup(&bot, CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;

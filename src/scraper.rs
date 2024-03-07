@@ -11,7 +11,7 @@ use rand::{Rng, SeedableRng};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::sleep;
 
 use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
@@ -42,12 +42,14 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
     let download_sleep_len = Duration::from_secs(60 * 5);
     //let mut unique_post_ids = HashSet::new();
 
-    let scraper_loop: Option<tokio::task::JoinHandle<anyhow::Result<()>>>;
-    let scraper = Arc::new(Mutex::new(InstagramScraper::default()));
-    let scraper_clone = Arc::clone(&scraper);
-
     let username = credentials.get("username").unwrap().clone();
     let password = credentials.get("password").unwrap().clone();
+
+    let scraper_loop: Option<tokio::task::JoinHandle<anyhow::Result<()>>>;
+    let cookie_store_path = format!("cookies/cookies_{}.json", username);
+    let scraper = Arc::new(Mutex::new(InstagramScraper::with_cookie_store(&cookie_store_path)));
+    let scraper_clone = Arc::clone(&scraper);
+
 
     let accounts_to_scrape: HashMap<String, String> = read_accounts_to_scrape("config/accounts_to_scrape.yaml", username.as_str()).await;
 
@@ -113,6 +115,9 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                         return Err(anyhow::anyhow!("login failed: {}", e));
                     }
                 }
+
+                save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
+
             }
 
             println!("Fetching user info...");
@@ -208,6 +213,8 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                 //println!("Storing URL: {}", url);
                                 *lock = Some((url, caption, author.username.clone(), post.shortcode.clone()));
                             }
+
+                            save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
                         } else {
                             println!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                         }
@@ -276,7 +283,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                 let mut scraper_guard = scraper_copy.lock().await;
                                 if !is_offline {
                                     let full_caption;
-                                    let spacer = ".\n.\n.\n.\n.\n.\n.\n";
+                                    let spacer = "\n.\n.\n.\n.\n.\n.\n.\n";
                                     if queued_post.caption == "" && queued_post.hashtags == "" {
                                         full_caption = "".to_string();
                                     } else if queued_post.caption == "" {
@@ -308,14 +315,16 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                             let index_map = IndexMap::from([(message_id, video_info.clone())]);
                                             transaction.save_content_mapping(index_map).unwrap();
 
+
                                             let now = now_in_my_timezone(user_settings.clone()).to_rfc3339();
+                                            let last_updated_at = (now_in_my_timezone(user_settings.clone()) - REFRESH_RATE).to_rfc3339();
                                             let failed_content = FailedContent {
                                                 url: queued_post.url.clone(),
                                                 caption: queued_post.caption.clone(),
                                                 hashtags: queued_post.hashtags.clone(),
                                                 original_author: queued_post.original_author.clone(),
                                                 original_shortcode: queued_post.original_shortcode.clone(),
-                                                last_updated_at: now.clone(),
+                                                last_updated_at,
                                                 failed_at: now,
                                             };
 
@@ -365,7 +374,16 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
     });
 
     let _ = tokio::try_join!(scraper_loop.unwrap(), poster_loop);
-    
+
+}
+
+fn save_cookie_store_to_json(cookie_store_path: String, scraper_guard: &mut MutexGuard<InstagramScraper>) {
+    let mut writer = std::fs::File::create(cookie_store_path)
+        .map(std::io::BufWriter::new)
+        .unwrap();
+
+    let cookie_store = Arc::clone(&scraper_guard.session.cookie_store);
+    cookie_store.lock().unwrap().save_json(&mut writer).expect("ERROR in scraper.rs, failed to save cookie_store!");
 }
 
 /// Randomized sleep function, will randomize the sleep duration by up to 20% of the original duration
