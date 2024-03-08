@@ -115,6 +115,7 @@ async fn receive_videos(mut rx: Receiver<(String, String, String, String)>, bot:
                     original_author: original_author.clone(),
                     original_shortcode: original_shortcode.clone(),
                     last_updated_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
+                    url_last_updated_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
                     page_num: 1,
                     encountered_errors: 0,
                 };
@@ -181,7 +182,7 @@ async fn update_view(bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex:
             match result {
                 Ok((message_id, video_info)) => {
                     if video_info.status == "removed_from_view" {
-                        println!("Removing video from view: {}", video_info.original_shortcode);
+                        // println!("Removing video from view: {}", video_info.original_shortcode);
                         tx.remove_content_info_with_shortcode(video_info.original_shortcode).unwrap();
                     } else {
                         let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info)]);
@@ -203,17 +204,17 @@ async fn process_failed_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
     let failed_content = tx.load_failed_content().unwrap();
     for mut content in failed_content {
         if content.original_shortcode == video_info.original_shortcode {
-            // Parse content failed at into a DateTime
-            let datetime = DateTime::parse_from_rfc3339(&content.last_updated_at)?;
+            // Parse last_updated_at at into a DateTime
+            let last_updated_at = DateTime::parse_from_rfc3339(&content.last_updated_at)?;
             let now = now_in_my_timezone(tx.load_user_settings()?);
             // Check
-            if now > datetime {
+            if now > last_updated_at + REFRESH_RATE {
                 let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], message_id);
                 video_info.status = "failed_shown".to_string();
                 let full_video_caption = format!("{}\n\n{}", full_video_caption, ui_definitions.labels.get("failed_caption").unwrap());
                 edit_message_caption_and_markup(&bot, CHAT_ID, message_id, full_video_caption, video_actions).await?;
 
-                content.last_updated_at = (now - REFRESH_RATE).to_rfc3339();
+                content.last_updated_at = now.to_rfc3339();
                 tx.update_failed_content(content.clone())?;
 
                 return Ok((message_id, video_info.clone()));
@@ -450,7 +451,11 @@ async fn process_queued_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
                     Ok(_) => {
                         let remove_action = [InlineKeyboardButton::callback(remove_from_queue_action_text, format!("remove_from_queue_{}", message_id))];
 
-                        let _msg = bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([remove_action])).await?;
+                        if countdown_caption == "(Posting now...)" {
+                            // We don't want to show the remove button if the video is being posted
+                        } else {
+                            let _msg = bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([remove_action])).await?;
+                        }
                     }
                     Err(_) => {
                         let new_message = bot.send_video(CHAT_ID, InputFile::url(queued_content.url.clone().parse().unwrap())).caption(full_video_caption).await?;
@@ -459,7 +464,12 @@ async fn process_queued_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
 
                         tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
 
-                        let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+                        if countdown_caption == "(Posting now...)" {
+                            // We don't want to show the remove button if the video is being posted
+                        } else {
+                            let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+                        }
+
                     }
                 };
 
@@ -484,7 +494,7 @@ async fn process_posted_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitio
     for posted_content in &mut posted_content_list {
         if posted_content.original_shortcode == video_info.original_shortcode {
             let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
-            let will_expire_at = datetime.checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60)).unwrap();
+            let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
 
             let user_settings = tx.load_user_settings().unwrap();
             let now = now_in_my_timezone(user_settings);
@@ -535,7 +545,7 @@ async fn process_rejected_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefiniti
             let datetime = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
             //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
 
-            let will_expire_at = datetime.checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60)).unwrap();
+            let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
 
             let user_settings = tx.load_user_settings().unwrap();
             if will_expire_at < now_in_my_timezone(user_settings.clone()) {
@@ -606,14 +616,14 @@ async fn process_posted_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
             let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
             //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
 
-            let will_expire_at = datetime.checked_add_signed(chrono::Duration::seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60)).unwrap();
+            let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
 
             let user_settings = tx.load_user_settings().unwrap();
             if will_expire_at < now_in_my_timezone(user_settings.clone()) {
                 video_info.status = "removed_from_view".to_string();
                 bot.delete_message(CHAT_ID, message_id).await?;
                 posted_content.expired = true;
-                println!("Posted content has expired");
+                // println!("Posted content has expired");
             } else {
                 let now = now_in_my_timezone(user_settings);
                 let duration_until_expiration = will_expire_at.signed_duration_since(now);

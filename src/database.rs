@@ -77,6 +77,7 @@ pub struct ContentInfo {
     pub original_author: String,
     pub original_shortcode: String,
     pub last_updated_at: String,
+    pub url_last_updated_at: String,
     pub encountered_errors: i32,
     pub page_num: i32,
 }
@@ -160,6 +161,7 @@ impl Database {
             original_author TEXT NOT NULL,
             original_shortcode TEXT NOT NULL,
             last_updated_at TEXT NOT NULL,
+            url_last_updated_at TEXT NOT NULL,
             page_num INTEGER NOT NULL,
             encountered_errors INTEGER NOT NULL
         )",
@@ -383,7 +385,7 @@ impl DatabaseTransaction {
             if !is_replacement {
                 new_value.page_num = (total_records / page_size + 1) as i32;
                 tx.execute(
-                    "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         new_key.0,
                         new_value.url,
@@ -393,13 +395,14 @@ impl DatabaseTransaction {
                         new_value.original_author,
                         new_value.original_shortcode,
                         new_value.last_updated_at,
+                        new_value.url_last_updated_at,
                         new_value.page_num,
                         new_value.encountered_errors
                     ],
                 )?;
             } else {
                 tx.execute(
-                    "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         new_key.0,
                         new_value.url,
@@ -409,6 +412,7 @@ impl DatabaseTransaction {
                         new_value.original_author,
                         new_value.original_shortcode,
                         new_value.last_updated_at,
+                        new_value.url_last_updated_at,
                         new_value.page_num,
                         new_value.encountered_errors
                     ],
@@ -478,7 +482,7 @@ impl DatabaseTransaction {
 
     pub fn load_content_mapping(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let tx = self.conn.transaction()?;
-        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, page_num, encountered_errors FROM content_info ORDER BY page_num, message_id")?;
+        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors FROM content_info ORDER BY page_num, message_id")?;
         let content_info_iter = stmt.query_map([], |row| {
             let message_id: i32 = row.get(0)?;
             let url: String = row.get(1)?;
@@ -488,8 +492,9 @@ impl DatabaseTransaction {
             let original_author: String = row.get(5)?;
             let original_shortcode: String = row.get(6)?;
             let last_updated_at: String = row.get(7)?;
-            let page_num: i32 = row.get(8)?;
-            let encountered_errors: i32 = row.get(9)?;
+            let url_last_updated_at: String = row.get(8)?;
+            let page_num: i32 = row.get(9)?;
+            let encountered_errors: i32 = row.get(10)?;
 
             let content_info = ContentInfo {
                 url,
@@ -499,6 +504,7 @@ impl DatabaseTransaction {
                 original_author,
                 original_shortcode,
                 last_updated_at,
+                url_last_updated_at,
                 page_num,
                 encountered_errors,
             };
@@ -901,11 +907,11 @@ impl DatabaseTransaction {
             latest_post_time_option = self.get_latest_time_from_db("SELECT will_post_at FROM content_queue ORDER BY will_post_at DESC LIMIT 1")?;
         }
 
-        let posting_interval = Duration::seconds(user_settings.posting_interval * 60);
-        let random_interval = Duration::seconds(user_settings.random_interval_variance * 60);
+        let posting_interval = Duration::try_seconds(user_settings.posting_interval * 60).unwrap();
+        let random_interval = Duration::try_seconds(user_settings.random_interval_variance * 60).unwrap();
         let mut rng = rand::thread_rng();
         let random_variance = rng.gen_range(-random_interval.num_seconds()..=random_interval.num_seconds());
-        let random_variance_seconds = Duration::seconds(random_variance);
+        let random_variance_seconds = Duration::try_seconds(random_variance).unwrap();
 
         let mut new_post_time = match latest_post_time_option {
             Some(time) => time + posting_interval + random_variance_seconds,
@@ -916,14 +922,14 @@ impl DatabaseTransaction {
                 }
                 match latest_posted_time_option {
                     Some(time) => time + posting_interval + random_variance_seconds,
-                    None => now_in_my_timezone(user_settings.clone()) + Duration::seconds(60),
+                    None => now_in_my_timezone(user_settings.clone()) + Duration::try_seconds(60).unwrap(),
                 }
             }
         };
 
         // Check if the new post time is in the past
         if new_post_time < now_in_my_timezone(user_settings.clone()) {
-            new_post_time = now_in_my_timezone(user_settings.clone()) + Duration::seconds(60);
+            new_post_time = now_in_my_timezone(user_settings.clone()) + Duration::try_seconds(60).unwrap();
         }
 
         // println!("New post time: {}", new_post_time.to_rfc3339());

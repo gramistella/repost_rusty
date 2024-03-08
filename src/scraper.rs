@@ -16,7 +16,7 @@ use tokio::time::sleep;
 
 use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
 use crate::utils::now_in_my_timezone;
-use crate::REFRESH_RATE;
+use crate::{REFRESH_RATE, CONTENT_EXPIRY};
 
 async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, String> {
     let mut file = File::open(path).await.expect("Unable to open credentials file");
@@ -153,8 +153,8 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                     // get posts
                     {
                         let mut scraper_guard = cloned_scraper.lock().await;
-                        scraper_guard.scrape_posts(&user.id, 5).await.unwrap();
-                        posts.insert(user.clone(), scraper_guard.scrape_posts(&user.id, 5).await.unwrap());
+                        let scraped_posts = scraper_guard.scrape_posts(&user.id, 5).await.unwrap();
+                        posts.insert(user.clone(), scraped_posts);
                     }
 
                     randomized_sleep(30).await;
@@ -171,6 +171,31 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
 
                 let mut flattened_posts_processed = 0;
                 let flattened_posts_len = flattened_posts.len();
+
+                let existing_content_mapping = transaction.load_content_mapping().unwrap();
+                let existing_posted_mapping = transaction.load_posted_content().unwrap();
+                let existing_failed_mapping = transaction.load_failed_content().unwrap();
+                let existing_rejected_mapping = transaction.load_rejected_content().unwrap();
+
+                let mut existing_content_shortcodes: Vec<String> = existing_content_mapping.values()
+                    .map(|content_info| content_info.original_shortcode.clone())
+                    .collect();
+
+                let existing_posted_shortcodes: Vec<String> = existing_posted_mapping
+                    .iter()
+                    .map(|existing_posted| existing_posted.original_shortcode.clone())
+                    .collect();
+
+                let existing_failed_shortcodes: Vec<String> = existing_failed_mapping
+                    .iter()
+                    .map(|existing_posted| existing_posted.original_shortcode.clone())
+                    .collect();
+
+                let existing_rejected_shortcodes: Vec<String> = existing_rejected_mapping
+                    .iter()
+                    .map(|existing_posted| existing_posted.original_shortcode.clone())
+                    .collect();
+
 
                 for (author, post) in flattened_posts {
                     flattened_posts_processed += 1;
@@ -216,13 +241,68 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
 
                             save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
                         } else {
-                            println!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+
+
+                            existing_content_shortcodes.remove( match existing_content_shortcodes.iter().position(|x| x == &post.shortcode){
+                                Some(index) => index,
+                                None => {
+                                    // Check if the shortcode is in the posted, failed or rejected content
+                                    if existing_posted_shortcodes.contains(&post.shortcode) {
+                                        //println!("{}/{} Content already posted: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                    } else if existing_failed_shortcodes.contains(&post.shortcode) {
+                                        //println!("{}/{} Content already failed: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                    } else if existing_rejected_shortcodes.contains(&post.shortcode) {
+                                        //println!("{}/{} Content already rejected: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                    } else {
+                                        panic!("Content not found in any mapping: {}", post.shortcode);
+                                    }
+                                    continue;
+                                }
+                            });
+
+                            // get existing content_info with shortcode
+                            let (message_id, mut content_info) = transaction.get_content_info_by_shortcode(post.shortcode.clone()).unwrap();
+
+                            let url_last_updated_at = DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap();
+                            let now = now_in_my_timezone(transaction.load_user_settings().unwrap());
+                            if now > url_last_updated_at + CONTENT_EXPIRY {
+                                println!("{}/{} Content is outdated, will update url: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                let mut scraper_guard = cloned_scraper.lock().await;
+                                let (url, _caption) = scraper_guard.download_reel(&post.shortcode).await.unwrap();
+                                content_info.url = url;
+                                content_info.url_last_updated_at = now.to_rfc3339();
+                                transaction.save_content_mapping(IndexMap::from([(message_id, content_info.clone())])).unwrap();
+                                save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
+                            } else {
+                                println!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                            }
+
                         }
                     } else {
                         println!("{}/{} Content is not a video: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                     }
                     randomized_sleep(download_sleep_len.as_secs()).await;
                 }
+
+                // Iterate over the remaining shortcodes and update them
+                for shortcode in existing_content_shortcodes {
+                    let (message_id, mut content_info) = transaction.get_content_info_by_shortcode(shortcode.clone()).unwrap();
+                    let url_last_updated_at = DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap();
+                    let now = now_in_my_timezone(transaction.load_user_settings().unwrap());
+                    if now > url_last_updated_at + CONTENT_EXPIRY {
+                        println!(" [@] Content is outdated, will update url: {}", shortcode);
+                        let mut scraper_guard = cloned_scraper.lock().await;
+                        let (url, _caption) = scraper_guard.download_reel(&shortcode).await.unwrap();
+                        content_info.url = url;
+                        content_info.url_last_updated_at = now.to_rfc3339();
+                        transaction.save_content_mapping(IndexMap::from([(message_id, content_info.clone())])).unwrap();
+                        save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
+                        randomized_sleep(download_sleep_len.as_secs()).await;
+                    } else {
+                        println!(" [@] Content is already up to date: {}", shortcode);
+                    }
+                }
+
                 // Wait for a while before the next iteration
                 println!("Starting long sleep ({} minutes)", loop_sleep_len.as_secs() / 60);
                 randomized_sleep(loop_sleep_len.as_secs()).await;
@@ -243,14 +323,15 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
     let poster_loop_database = database.clone();
     let poster_loop = tokio::spawn(async move {
         loop {
-            // Load current video mapping
-            // Check which video begins with status of "accepted_"
+
+
+            // Allow the scraper to login
+            sleep(Duration::from_secs(5)).await;
 
             let mut transaction = poster_loop_database.begin_transaction().unwrap();
             let content_mapping = transaction.load_content_mapping().unwrap();
             let user_settings = transaction.load_user_settings().unwrap();
 
-            //let queued_posts = Vec::new();
             for (message_id, mut content_info) in content_mapping {
                 if content_info.status.contains("accepted_") {
                     let last_updated_at = now_in_my_timezone(user_settings.clone()) - REFRESH_RATE;

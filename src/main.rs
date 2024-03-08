@@ -16,6 +16,7 @@ mod telegram_bot;
 mod utils;
 
 const REFRESH_RATE: Duration = Duration::from_secs(90);
+const CONTENT_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
