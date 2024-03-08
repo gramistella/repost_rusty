@@ -32,8 +32,7 @@ async fn main() -> anyhow::Result<()> {
     let mut all_handles = Vec::new();
 
     for (username, credentials) in &all_credentials {
-        if credentials.get("enabled").expect("No enabled field in credentials") == "true"{
-
+        if credentials.get("enabled").expect("No enabled field in credentials") == "true" {
             println!("Starting bot for user: {}", username);
 
             // Create a new channel
@@ -47,8 +46,6 @@ async fn main() -> anyhow::Result<()> {
             all_handles.push(telegram_bot);
         }
     }
-
-
 
     // Wait for both tasks to complete
     let _ = futures::future::join_all(all_handles).await;

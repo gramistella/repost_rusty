@@ -99,7 +99,6 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
                 }
             }
         }
-
     }
 
     // Save the updated video mappings

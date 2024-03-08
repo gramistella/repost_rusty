@@ -247,13 +247,12 @@ async fn process_pending_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefiniti
 }
 
 async fn process_waiting(bot: &Throttle<Bot>, tx: &mut DatabaseTransaction, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile, full_video_caption: String) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-    let sent_message_id = match send_video_and_get_id(&bot, input_file).await{
+    let sent_message_id = match send_video_and_get_id(&bot, input_file).await {
         Ok(id) => id,
         Err(e) => {
             if e.to_string().contains("wrong file identifier/HTTP URL specified") {
-
                 let now = now_in_my_timezone(tx.load_user_settings()?);
-                let failed_content = FailedContent{
+                let failed_content = FailedContent {
                     url: video_info.url.clone(),
                     caption: video_info.caption.clone(),
                     hashtags: video_info.hashtags.clone(),
@@ -268,7 +267,6 @@ async fn process_waiting(bot: &Throttle<Bot>, tx: &mut DatabaseTransaction, ui_d
             } else {
                 panic!("Error sending video in process_waiting: {}", e);
             }
-
         }
     };
     let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
@@ -469,7 +467,6 @@ async fn process_queued_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
                         } else {
                             let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
                         }
-
                     }
                 };
 

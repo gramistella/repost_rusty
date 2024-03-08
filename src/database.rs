@@ -6,9 +6,9 @@ use rand::Rng;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
 use teloxide::types::MessageId;
-use crate::REFRESH_RATE;
 
 use crate::utils::now_in_my_timezone;
+use crate::REFRESH_RATE;
 
 #[derive(Clone)]
 pub struct UserSettings {
@@ -373,51 +373,29 @@ impl DatabaseTransaction {
 
         let tx = self.conn.transaction()?;
         for (new_key, mut new_value) in video_mapping {
-            let mut is_replacement = false;
-            for (_existing_key, existing_value) in &existing_mapping {
-                if existing_value.original_shortcode == new_value.original_shortcode {
-                    new_value.page_num = existing_value.page_num;
-                    tx.execute("DELETE FROM content_info WHERE original_shortcode = ?1", params![existing_value.original_shortcode])?;
-                    is_replacement = true;
-                }
+            if let Some(existing_value) = existing_mapping.iter().find(|(_k, v)| v.original_shortcode == new_value.original_shortcode) {
+                new_value.page_num = existing_value.1.page_num;
+                tx.execute("DELETE FROM content_info WHERE original_shortcode = ?1", params![existing_value.1.original_shortcode])?;
+            } else {
+                new_value.page_num = (total_records / page_size + 1) as i32;
             }
 
-            if !is_replacement {
-                new_value.page_num = (total_records / page_size + 1) as i32;
-                tx.execute(
-                    "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        new_key.0,
-                        new_value.url,
-                        new_value.status,
-                        new_value.caption,
-                        new_value.hashtags,
-                        new_value.original_author,
-                        new_value.original_shortcode,
-                        new_value.last_updated_at,
-                        new_value.url_last_updated_at,
-                        new_value.page_num,
-                        new_value.encountered_errors
-                    ],
-                )?;
-            } else {
-                tx.execute(
-                    "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        new_key.0,
-                        new_value.url,
-                        new_value.status,
-                        new_value.caption,
-                        new_value.hashtags,
-                        new_value.original_author,
-                        new_value.original_shortcode,
-                        new_value.last_updated_at,
-                        new_value.url_last_updated_at,
-                        new_value.page_num,
-                        new_value.encountered_errors
-                    ],
-                )?;
-            }
+            tx.execute(
+                "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    new_key.0,
+                    new_value.url,
+                    new_value.status,
+                    new_value.caption,
+                    new_value.hashtags,
+                    new_value.original_author,
+                    new_value.original_shortcode,
+                    new_value.last_updated_at,
+                    new_value.url_last_updated_at,
+                    new_value.page_num,
+                    new_value.encountered_errors
+                ],
+            )?;
         }
 
         tx.commit()?;
@@ -584,7 +562,6 @@ impl DatabaseTransaction {
                         last_updated_at: post.last_updated_at.clone(),
                         will_post_at: post.will_post_at.clone(),
                     };
-
 
                     self.save_content_queue(new_post)?;
 
@@ -792,7 +769,6 @@ impl DatabaseTransaction {
     ///
     /// Will automatically remove the content from the content_queue
     pub fn save_failed_content(&mut self, failed_content: FailedContent) -> Result<()> {
-
         // First we check if the content is actually in the content_queue
         let mut exists = false;
         {
