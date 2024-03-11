@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Duration;
 
+use teloxide::prelude::ChatId;
 use tokio::sync::mpsc;
 
 use crate::database::Database;
@@ -15,14 +16,18 @@ mod scraper;
 mod telegram_bot;
 mod utils;
 
+const CHAT_ID: ChatId = ChatId(34957918);
 const REFRESH_RATE: Duration = Duration::from_secs(90);
 const CONTENT_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
+
+const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 90);
+const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let is_offline = false;
+    let is_offline = true;
 
     // Initialize the database
     let db = Database::new(is_offline)?;

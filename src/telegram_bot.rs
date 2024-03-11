@@ -17,12 +17,12 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use crate::database::{ContentInfo, Database, DatabaseTransaction, FailedContent};
+use crate::database::{ContentInfo, Database, DatabaseTransaction, FailedContent, DEFAULT_FAILURE_EXPIRATION};
 use crate::telegram_bot::errors::handle_message_is_not_modified_error;
 use crate::telegram_bot::helpers::send_or_replace_navigation_bar;
 use crate::telegram_bot::state::{schema, State};
 use crate::utils::now_in_my_timezone;
-use crate::REFRESH_RATE;
+use crate::{CHAT_ID, REFRESH_RATE};
 
 mod callbacks;
 mod commands;
@@ -46,8 +46,6 @@ struct NavigationBar {
     last_updated_at: DateTime<Utc>,
 }
 type BotDialogue = Dialogue<State, InMemStorage<State>>;
-
-const CHAT_ID: ChatId = ChatId(34957918);
 
 pub(crate) async fn run_bot(rx: Receiver<(String, String, String, String)>, database: Database, credentials: HashMap<String, String>) {
     let api_token = credentials.get("telegram_api_token").unwrap();
@@ -205,20 +203,40 @@ async fn process_failed_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
     for mut content in failed_content {
         if content.original_shortcode == video_info.original_shortcode {
             // Parse last_updated_at at into a DateTime
-            let last_updated_at = DateTime::parse_from_rfc3339(&content.last_updated_at)?;
+            let last_updated_at = DateTime::parse_from_rfc3339(&content.last_updated_at).unwrap();
+            let will_expire_at = DateTime::parse_from_rfc3339(&content.failed_at).unwrap().checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
             let now = now_in_my_timezone(tx.load_user_settings()?);
             // Check
+            if now > will_expire_at {
+                video_info.status = "removed_from_view".to_string();
+                content.expired = true;
+                bot.delete_message(CHAT_ID, message_id).await?;
+            }
             if now > last_updated_at + REFRESH_RATE {
-                let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], message_id);
+                let duration_until_expiration = will_expire_at.signed_duration_since(now);
+                let hours_until_expiration = format!("{:01}", duration_until_expiration.num_hours());
+                let minutes_until_expiration = format!("{:01}", duration_until_expiration.num_minutes() % 60);
+                let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
+
+                let failed_at = DateTime::parse_from_rfc3339(&content.failed_at).unwrap().format("%H:%M %m/%d").to_string();
                 video_info.status = "failed_shown".to_string();
-                let full_video_caption = format!("{}\n\n{}", full_video_caption, ui_definitions.labels.get("failed_caption").unwrap());
+                let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], message_id);
+
+                let full_video_caption = format!(
+                    "{}\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
+                    full_video_caption,
+                    ui_definitions.labels.get("failed_caption").unwrap(),
+                    failed_at,
+                    hours_until_expiration,
+                    minutes_until_expiration,
+                    seconds_until_expiration
+                );
                 edit_message_caption_and_markup(&bot, CHAT_ID, message_id, full_video_caption, video_actions).await?;
 
                 content.last_updated_at = now.to_rfc3339();
-                tx.update_failed_content(content.clone())?;
-
-                return Ok((message_id, video_info.clone()));
             }
+            tx.update_failed_content(content.clone())?;
+            return Ok((message_id, video_info.clone()));
         }
     }
 
@@ -260,6 +278,7 @@ async fn process_waiting(bot: &Throttle<Bot>, tx: &mut DatabaseTransaction, ui_d
                     original_shortcode: video_info.original_shortcode.clone(),
                     last_updated_at: (now - REFRESH_RATE).to_rfc3339(),
                     failed_at: now.to_rfc3339(),
+                    expired: false,
                 };
                 tx.save_failed_content(failed_content)?;
                 video_info.status = "removed_from_view".to_string();
@@ -425,7 +444,7 @@ async fn process_queued_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
             let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
 
             let last_updated_at = DateTime::parse_from_rfc3339(&queued_content.last_updated_at).unwrap();
-            let posted_caption = ui_definitions.labels.get("queued_caption").unwrap();
+            let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
             let formatted_datetime = will_post_at.format("%H:%M %m/%d").to_string();
 
             let mut countdown_caption = format!("({} hours, {} minutes and {} seconds from now)", hours_until_expiration, minutes_until_expiration, seconds_until_expiration);
@@ -440,7 +459,7 @@ async fn process_queued_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
 
             let full_video_caption = format!(
                 "{}\n{}\n(from @{})\n\n{}\n\nWill post at {}\n{}",
-                queued_content.caption, queued_content.hashtags, queued_content.original_author, posted_caption, formatted_datetime, countdown_caption
+                queued_content.caption, queued_content.hashtags, queued_content.original_author, queued_caption, formatted_datetime, countdown_caption
             );
 
             if last_updated_at < now - REFRESH_RATE {
@@ -503,7 +522,7 @@ async fn process_posted_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitio
             let posted_caption = ui_definitions.labels.get("posted_caption").unwrap();
             let formatted_datetime = datetime.format("%H:%M %m/%d").to_string();
             full_video_caption = format!(
-                "{}\n\n{} at {}\n\nWill expire in {} hours, {} minutes and {} seconds",
+                "{}\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
                 full_video_caption, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
             );
 
@@ -548,8 +567,7 @@ async fn process_rejected_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefiniti
             if will_expire_at < now_in_my_timezone(user_settings.clone()) {
                 video_info.status = "removed_from_view".to_string();
                 bot.delete_message(CHAT_ID, message_id).await?;
-                tx.remove_content_info_with_shortcode(rejected_content.original_shortcode.clone())?;
-
+                //tx.remove_content_info_with_shortcode(rejected_content.original_shortcode.clone())?;
                 rejected_content.expired = true;
             } else {
                 let now = now_in_my_timezone(user_settings);
@@ -594,10 +612,8 @@ async fn process_rejected_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefiniti
                         }
                     };
                     rejected_content.last_updated_at = now.to_rfc3339();
-                    tx.save_rejected_content(rejected_content.clone())?;
-                } else {
-                    //println!("No need to update the message");
                 }
+                tx.save_rejected_content(rejected_content.clone())?;
             }
         }
     }
@@ -610,10 +626,10 @@ async fn process_posted_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
     let mut posted_content_list = tx.load_posted_content().unwrap();
     for posted_content in &mut posted_content_list {
         if posted_content.original_shortcode == video_info.original_shortcode {
-            let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
+            let posted_at = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
             //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
 
-            let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
+            let will_expire_at = posted_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
 
             let user_settings = tx.load_user_settings().unwrap();
             if will_expire_at < now_in_my_timezone(user_settings.clone()) {
@@ -630,10 +646,11 @@ async fn process_posted_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
 
                 let last_updated_at = DateTime::parse_from_rfc3339(&posted_content.last_updated_at).unwrap();
                 if last_updated_at < now - REFRESH_RATE {
+                    let formatted_datetime = posted_at.format("%H:%M %m/%d").to_string();
                     let posted_caption = ui_definitions.labels.get("posted_caption").unwrap();
                     let full_video_caption = format!(
-                        "{}\n{}\n(from @{})\n\n{}\n\nWill expire in {} hours, {} minutes and {} seconds",
-                        posted_content.caption, posted_content.hashtags, posted_content.original_author, posted_caption, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
+                        "{}\n{}\n(from @{})\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
+                        posted_content.caption, posted_content.hashtags, posted_content.original_author, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
                     );
 
                     let _ = match bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {

@@ -14,9 +14,9 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::sleep;
 
-use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
+use crate::database::{Database, DatabaseTransaction, FailedContent, PostedContent, QueuedContent};
 use crate::utils::now_in_my_timezone;
-use crate::{CONTENT_EXPIRY, REFRESH_RATE};
+use crate::{CONTENT_EXPIRY, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
 async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, String> {
     let mut file = File::open(path).await.expect("Unable to open credentials file");
@@ -38,8 +38,6 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
         //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
     ];
 
-    let loop_sleep_len = Duration::from_secs(60 * 90);
-    let download_sleep_len = Duration::from_secs(60 * 5);
     //let mut unique_post_ids = HashSet::new();
 
     let username = credentials.get("username").unwrap().clone();
@@ -170,19 +168,6 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                 let mut flattened_posts_processed = 0;
                 let flattened_posts_len = flattened_posts.len();
 
-                let existing_content_mapping = transaction.load_content_mapping().unwrap();
-                let existing_posted_mapping = transaction.load_posted_content().unwrap();
-                let existing_failed_mapping = transaction.load_failed_content().unwrap();
-                let existing_rejected_mapping = transaction.load_rejected_content().unwrap();
-
-                let mut existing_content_shortcodes: Vec<String> = existing_content_mapping.values().map(|content_info| content_info.original_shortcode.clone()).collect();
-
-                let existing_posted_shortcodes: Vec<String> = existing_posted_mapping.iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-
-                let existing_failed_shortcodes: Vec<String> = existing_failed_mapping.iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-
-                let existing_rejected_shortcodes: Vec<String> = existing_rejected_mapping.iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-
                 for (author, post) in flattened_posts {
                     flattened_posts_processed += 1;
 
@@ -227,25 +212,35 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
 
                             save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
                         } else {
-                            existing_content_shortcodes.remove(match existing_content_shortcodes.iter().position(|x| x == &post.shortcode) {
+                            let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().values().map(|content_info| content_info.original_shortcode.clone()).collect();
+                            let existing_posted_shortcodes: Vec<String> = transaction.load_posted_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                            let existing_failed_shortcodes: Vec<String> = transaction.load_failed_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                            let existing_rejected_shortcodes: Vec<String> = transaction.load_rejected_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+
+                            match existing_content_shortcodes.iter().position(|x| x == &post.shortcode) {
                                 Some(index) => index,
                                 None => {
                                     // Check if the shortcode is in the posted, failed or rejected content
                                     if existing_posted_shortcodes.contains(&post.shortcode) {
-                                        //println!("{}/{} Content already posted: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                        println!("{}/{} Content already posted: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                                     } else if existing_failed_shortcodes.contains(&post.shortcode) {
-                                        //println!("{}/{} Content already failed: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                        println!("{}/{} Content already failed: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                                     } else if existing_rejected_shortcodes.contains(&post.shortcode) {
-                                        //println!("{}/{} Content already rejected: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                        println!("{}/{} Content already rejected: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                                     } else {
                                         panic!("Content not found in any mapping: {}", post.shortcode);
                                     }
                                     continue;
                                 }
-                            });
+                            };
 
                             // get existing content_info with shortcode
-                            let (message_id, mut content_info) = transaction.get_content_info_by_shortcode(post.shortcode.clone()).unwrap();
+                            let (message_id, mut content_info) = match transaction.get_content_info_by_shortcode(post.shortcode.clone()) {
+                                Some(content) => content,
+                                None => {
+                                    panic!("Content not found in current mapping: {}", post.shortcode);
+                                }
+                            };
 
                             let url_last_updated_at = DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap();
                             let now = now_in_my_timezone(transaction.load_user_settings().unwrap());
@@ -264,42 +259,15 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                     } else {
                         println!("{}/{} Content is not a video: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                     }
-                    randomized_sleep(download_sleep_len.as_secs()).await;
+                    randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;
                 }
 
-                // Iterate over the remaining shortcodes and update them
-                for shortcode in existing_content_shortcodes {
-                    let (message_id, mut content_info) = transaction.get_content_info_by_shortcode(shortcode.clone()).unwrap();
-                    let url_last_updated_at = DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap();
-                    let now = now_in_my_timezone(transaction.load_user_settings().unwrap());
-                    if now > url_last_updated_at + CONTENT_EXPIRY {
-                        println!(" [@] Content is outdated, will update url: {}", shortcode);
-                        let mut scraper_guard = cloned_scraper.lock().await;
-                        let (url, _caption) = scraper_guard.download_reel(&shortcode).await.unwrap();
-                        content_info.url = url;
-                        content_info.url_last_updated_at = now.to_rfc3339();
-                        transaction.save_content_mapping(IndexMap::from([(message_id, content_info.clone())])).unwrap();
-                        save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
-                        randomized_sleep(download_sleep_len.as_secs()).await;
-                    } else {
-                        println!(" [@] Content is already up to date: {}", shortcode);
-                    }
-                }
+                refresh_outdated_urls(cookie_store_path.clone(), cloned_scraper.clone(), transaction).await;
 
                 // Wait for a while before the next iteration
-                println!("Starting long sleep ({} minutes)", loop_sleep_len.as_secs() / 60);
-                randomized_sleep(loop_sleep_len.as_secs()).await;
+                println!("Starting long sleep ({} minutes)", SCRAPER_LOOP_SLEEP_LEN.as_secs() / 60);
+                randomized_sleep(SCRAPER_LOOP_SLEEP_LEN.as_secs()).await;
             }
-
-            //debug_account(&profile, &mut scraper).await?;
-            /*
-            //logout
-            scraper
-                .logout()
-                .await
-                .map_err(|e| anyhow::anyhow!("logout failed: {}", e))
-
-             */
         }));
     }
 
@@ -387,6 +355,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
                                                 original_shortcode: queued_post.original_shortcode.clone(),
                                                 last_updated_at,
                                                 failed_at: now,
+                                                expired: false,
                                             };
 
                                             transaction.save_failed_content(failed_content.clone()).unwrap();
@@ -435,6 +404,48 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
     });
 
     let _ = tokio::try_join!(scraper_loop.unwrap(), poster_loop);
+}
+
+async fn refresh_outdated_urls(cookie_store_path: String, cloned_scraper: Arc<Mutex<InstagramScraper>>, mut transaction: DatabaseTransaction) {
+    let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().values().map(|content_info| content_info.original_shortcode.clone()).collect();
+
+    // Iterate over the remaining shortcodes and update them
+    for shortcode in existing_content_shortcodes {
+        let (message_id, mut content_info) = match transaction.get_content_info_by_shortcode(shortcode.clone()) {
+            Some(content) => content,
+            None => {
+                println!("Content not found in current mapping when iterating over existing shortcodes, maybe it was removed?: {}", shortcode);
+                continue;
+            }
+        };
+        let url_last_updated_at = DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap();
+        let now = now_in_my_timezone(transaction.load_user_settings().unwrap());
+        if now > url_last_updated_at + CONTENT_EXPIRY {
+            println!(" [@] Content is outdated, will update url: {}", shortcode);
+            {
+                // Use a scoped block to drop the lock while waiting
+                let mut scraper_guard = cloned_scraper.lock().await;
+
+                let (url, _caption) = scraper_guard.download_reel(&shortcode).await.unwrap();
+                content_info.url = url;
+                content_info.url_last_updated_at = now.to_rfc3339();
+                transaction.save_content_mapping(IndexMap::from([(message_id, content_info.clone())])).unwrap();
+
+                // Search for the shortcode in the queued content and update it
+                let queued_posts = transaction.load_content_queue().unwrap();
+                for mut queued_post in queued_posts {
+                    if queued_post.original_shortcode == shortcode {
+                        queued_post.url = content_info.url.clone();
+                        transaction.save_content_queue(queued_post.clone()).unwrap();
+                    }
+                }
+                save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
+            }
+            randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;
+        } else {
+            println!(" [@] Content is already up to date: {}", shortcode);
+        }
+    }
 }
 
 fn save_cookie_store_to_json(cookie_store_path: String, scraper_guard: &mut MutexGuard<InstagramScraper>) {

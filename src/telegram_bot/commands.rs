@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::database::Database;
 use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions, CHAT_ID};
+use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions, CHAT_ID};
 use crate::utils::now_in_my_timezone;
 
 /// These commands are supported:
@@ -73,17 +73,19 @@ pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, datab
     Ok(())
 }
 
-pub async fn settings(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
+pub async fn settings(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
     if let Some(state) = dialogue.get().await.unwrap() {
-        if state != State::ScrapeView {
+        if state != State::PageView {
             let _ = bot.delete_message(CHAT_ID, msg.id).await;
             return Ok(());
         }
     }
 
     let _guard = execution_mutex.lock().await;
+    let navigation_bar = nav_bar_mutex.lock().await;
     let _ = bot.delete_message(CHAT_ID, msg.id).await;
     let _ = clear_sent_messages(bot.clone(), database.clone()).await;
+    let _ = bot.delete_message(CHAT_ID, navigation_bar.message_id).await;
 
     display_settings_message(bot, dialogue, database, ui_definitions).await?;
 

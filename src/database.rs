@@ -66,6 +66,7 @@ pub struct FailedContent {
     pub original_shortcode: String,
     pub last_updated_at: String,
     pub failed_at: String,
+    pub expired: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -84,6 +85,8 @@ pub struct ContentInfo {
 
 const PROD_DB: &str = "db/prod.db";
 const DEV_DB: &str = "db/dev.db";
+
+pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 
 pub(crate) struct Database {
     pool: Pool<SqliteConnectionManager>,
@@ -217,7 +220,8 @@ impl Database {
             original_author TEXT NOT NULL,
             original_shortcode TEXT NOT NULL,
             last_updated_at TEXT NOT NULL,
-            failed_at TEXT NOT NULL
+            failed_at TEXT NOT NULL,
+            expired BOOL NOT NULL
         )",
             [],
         )?;
@@ -792,7 +796,7 @@ impl DatabaseTransaction {
         // Then we add the failed_content to the failed_content table
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO failed_content (url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO failed_content (url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at, expired) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 failed_content.url,
                 failed_content.caption,
@@ -800,7 +804,8 @@ impl DatabaseTransaction {
                 failed_content.original_author,
                 failed_content.original_shortcode,
                 failed_content.last_updated_at,
-                failed_content.failed_at
+                failed_content.failed_at,
+                failed_content.expired
             ],
         )?;
 
@@ -813,7 +818,7 @@ impl DatabaseTransaction {
     pub fn update_failed_content(&mut self, failed_content: FailedContent) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
-            "UPDATE failed_content SET url = ?1, caption = ?2, hashtags = ?3, original_author = ?4, last_updated_at = ?5, failed_at = ?6 WHERE original_shortcode = ?7",
+            "UPDATE failed_content SET url = ?1, caption = ?2, hashtags = ?3, original_author = ?4, last_updated_at = ?5, failed_at = ?6, expired = ?7 WHERE original_shortcode = ?8",
             params![
                 failed_content.url,
                 failed_content.caption,
@@ -821,6 +826,7 @@ impl DatabaseTransaction {
                 failed_content.original_author,
                 failed_content.last_updated_at,
                 failed_content.failed_at,
+                failed_content.expired,
                 failed_content.original_shortcode
             ],
         )?;
@@ -833,7 +839,7 @@ impl DatabaseTransaction {
     pub fn load_failed_content(&mut self) -> Result<Vec<FailedContent>> {
         let tx = self.conn.transaction()?;
 
-        let mut failed_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at FROM failed_content")?;
+        let mut failed_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at, expired FROM failed_content")?;
         let failed_content_iter = failed_content_stmt.query_map([], |row| {
             let url: String = row.get(0)?;
             let caption: String = row.get(1)?;
@@ -842,6 +848,7 @@ impl DatabaseTransaction {
             let original_shortcode: String = row.get(4)?;
             let last_updated_at: String = row.get(5)?;
             let failed_at: String = row.get(6)?;
+            let expired: bool = row.get(7)?;
 
             let failed_content = FailedContent {
                 url,
@@ -851,6 +858,7 @@ impl DatabaseTransaction {
                 original_shortcode,
                 last_updated_at,
                 failed_at,
+                expired,
             };
 
             Ok(failed_content)
