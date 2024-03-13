@@ -145,7 +145,7 @@ impl Database {
                 let default_random_interval = 30;
                 let default_removed_content_lifespan = 120;
                 let default_posted_content_lifespan = 120;
-                let default_page_size = 8;
+                let default_page_size = 10;
                 let query = format!(
                     "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
                     default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size

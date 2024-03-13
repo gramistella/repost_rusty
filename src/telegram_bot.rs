@@ -194,147 +194,6 @@ async fn update_view(bot: Throttle<Bot>, dialogue: BotDialogue, execution_mutex:
     tokio::time::sleep(Duration::from_millis(250)).await;
     Ok(())
 }
-async fn process_failed_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-    let mut content = tx.get_failed_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
-    // Parse last_updated_at at into a DateTime
-    let last_updated_at = DateTime::parse_from_rfc3339(&content.last_updated_at).unwrap();
-    let will_expire_at = DateTime::parse_from_rfc3339(&content.failed_at).unwrap().checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
-    let now = now_in_my_timezone(tx.load_user_settings()?);
-    // Check
-    if now > will_expire_at {
-        video_info.status = "removed_from_view".to_string();
-        content.expired = true;
-        bot.delete_message(CHAT_ID, message_id).await?;
-    }
-    if now > last_updated_at + REFRESH_RATE {
-        video_info.status = "failed_shown".to_string();
-
-        let full_caption = generate_full_video_caption("failed", ui_definitions, tx, video_info);
-        let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], message_id);
-        edit_message_caption_and_markup(&bot, CHAT_ID, message_id, full_caption, video_actions).await?;
-
-        content.last_updated_at = now.to_rfc3339();
-    }
-    tx.update_failed_content(content.clone())?;
-    Ok((message_id, video_info.clone()))
-}
-
-pub fn generate_full_video_caption(caption_type: &str, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, video_info: &ContentInfo) -> String {
-    let caption_body = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
-
-    match caption_type {
-        "accepted" => {
-            let full_video_caption = format!("{}\n\n{}\n\n", caption_body, ui_definitions.labels.get("accepted_caption").unwrap());
-            full_video_caption
-        }
-        "rejected" => {
-            let full_video_caption = format!("{}\n\n{}\n\n", caption_body, ui_definitions.labels.get("rejected_caption").unwrap());
-            full_video_caption
-        }
-        "queued" => {
-            let queued_content = tx.get_queued_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
-
-            let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
-
-            let user_settings = tx.load_user_settings().unwrap();
-            let now = now_in_my_timezone(user_settings.clone());
-            let duration_until_expiration = will_post_at.signed_duration_since(now);
-            let hours_until_expiration = format!("{:01}", duration_until_expiration.num_hours());
-            let minutes_until_expiration = format!("{:01}", duration_until_expiration.num_minutes() % 60);
-            let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
-
-            let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
-            let formatted_datetime = will_post_at.format("%H:%M %m/%d").to_string();
-
-            let mut countdown_caption = format!("({} hours, {} minutes and {} seconds from now)", hours_until_expiration, minutes_until_expiration, seconds_until_expiration);
-
-            let hours = hours_until_expiration.parse::<i32>().unwrap_or(0);
-            let minutes = minutes_until_expiration.parse::<i32>().unwrap_or(0);
-            let seconds = seconds_until_expiration.parse::<i32>().unwrap_or(0);
-
-            if hours <= 0 && minutes <= 0 && seconds <= 0 {
-                countdown_caption = "(Posting now...)".to_string();
-            }
-
-            let full_video_caption = format!(
-                "{}\n{}\n(from @{})\n\n{}\n\nWill post at {}\n{}",
-                queued_content.caption, queued_content.hashtags, queued_content.original_author, queued_caption, formatted_datetime, countdown_caption
-            );
-            full_video_caption
-        }
-        "failed" => {
-            let failed_content = tx.get_failed_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
-
-            let failed_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap();
-            let will_expire_at = failed_at.checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
-
-            let user_settings = tx.load_user_settings().unwrap();
-            let now = now_in_my_timezone(user_settings.clone());
-            let duration_until_expiration = will_expire_at.signed_duration_since(now);
-            let hours_until_expiration = format!("{:01}", duration_until_expiration.num_hours());
-            let minutes_until_expiration = format!("{:01}", duration_until_expiration.num_minutes() % 60);
-            let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
-
-            let posted_caption = ui_definitions.labels.get("failed_caption").unwrap();
-            let formatted_datetime = failed_at.format("%H:%M %m/%d").to_string();
-            let full_video_caption = format!(
-                "{}\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
-                caption_body, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
-            );
-            full_video_caption
-        }
-        "pending" => caption_body.to_string(),
-        "waiting" => caption_body.to_string(),
-        "posted" => {
-            let posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
-
-            let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
-            let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
-
-            let user_settings = tx.load_user_settings().unwrap();
-            let now = now_in_my_timezone(user_settings.clone());
-            let duration_until_expiration = will_expire_at.signed_duration_since(now);
-            let hours_until_expiration = format!("{:01}", duration_until_expiration.num_hours());
-            let minutes_until_expiration = format!("{:01}", duration_until_expiration.num_minutes() % 60);
-            let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
-
-            let posted_caption = ui_definitions.labels.get("posted_caption").unwrap();
-            let formatted_datetime = datetime.format("%H:%M %m/%d").to_string();
-            let full_video_caption = format!(
-                "{}\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
-                caption_body, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
-            );
-            full_video_caption
-        }
-        _ => {
-            panic!("Unknown caption type: {}", caption_type);
-        }
-    }
-}
-
-async fn process_failed_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, video_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-    let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
-    let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], sent_message_id);
-    video_info.status = "failed_shown".to_string();
-    //let full_video_caption = format!("{}\n\n{}\n\n", full_video_caption, ui_definitions.labels.get("failed_caption").unwrap());
-
-    let full_video_caption = generate_full_video_caption("failed", ui_definitions, tx, video_info);
-    edit_message_caption_and_markup(&bot, CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
-    Ok((sent_message_id, video_info.clone()))
-}
-
-async fn process_pending_shown(message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-    return Ok((message_id, video_info.clone()));
-}
-
-async fn process_pending_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, video_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-    let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
-    let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
-    video_info.status = "pending_shown".to_string();
-    let full_video_caption = generate_full_video_caption("pending", ui_definitions, tx, video_info);
-    edit_message_caption_and_markup(&bot, CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
-    Ok((sent_message_id, video_info.clone()))
-}
 
 async fn process_waiting(bot: &Throttle<Bot>, tx: &mut DatabaseTransaction, ui_definitions: &UIDefinitions, video_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     let sent_message_id = match send_video_and_get_id(&bot, input_file).await {
@@ -360,6 +219,55 @@ async fn process_waiting(bot: &Throttle<Bot>, tx: &mut DatabaseTransaction, ui_d
             }
         }
     };
+    let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
+    video_info.status = "pending_shown".to_string();
+    let full_video_caption = generate_full_video_caption("pending", ui_definitions, tx, video_info);
+    edit_message_caption_and_markup(&bot, CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
+    Ok((sent_message_id, video_info.clone()))
+}
+
+async fn process_failed_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+    let mut content = tx.get_failed_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+    // Parse last_updated_at at into a DateTime
+    let last_updated_at = DateTime::parse_from_rfc3339(&content.last_updated_at).unwrap();
+    let will_expire_at = DateTime::parse_from_rfc3339(&content.failed_at).unwrap().checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
+    let now = now_in_my_timezone(tx.load_user_settings()?);
+    // Check
+    if now > will_expire_at {
+        video_info.status = "removed_from_view".to_string();
+        content.expired = true;
+        bot.delete_message(CHAT_ID, message_id).await?;
+    }
+    if now > last_updated_at + REFRESH_RATE {
+        video_info.status = "failed_shown".to_string();
+
+        let full_caption = generate_full_video_caption("failed", ui_definitions, tx, video_info);
+        let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], message_id);
+        edit_message_caption_and_markup(&bot, CHAT_ID, message_id, full_caption, video_actions).await?;
+
+        content.last_updated_at = now.to_rfc3339();
+    }
+    tx.update_failed_content(content.clone())?;
+    Ok((message_id, video_info.clone()))
+}
+
+async fn process_failed_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, video_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+    let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
+    let video_actions = get_action_buttons(ui_definitions, &["remove_from_view"], sent_message_id);
+    video_info.status = "failed_shown".to_string();
+    //let full_video_caption = format!("{}\n\n{}\n\n", full_video_caption, ui_definitions.labels.get("failed_caption").unwrap());
+
+    let full_video_caption = generate_full_video_caption("failed", ui_definitions, tx, video_info);
+    edit_message_caption_and_markup(&bot, CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
+    Ok((sent_message_id, video_info.clone()))
+}
+
+async fn process_pending_shown(message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+    return Ok((message_id, video_info.clone()));
+}
+
+async fn process_pending_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, video_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+    let sent_message_id = send_video_and_get_id(&bot, input_file).await?;
     let video_actions = get_action_buttons(ui_definitions, &["accept", "reject", "edit"], sent_message_id);
     video_info.status = "pending_shown".to_string();
     let full_video_caption = generate_full_video_caption("pending", ui_definitions, tx, video_info);
@@ -426,6 +334,61 @@ async fn process_rejected_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinit
         message_id = new_message.id;
 
         let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+    }
+
+    Ok((message_id, video_info.clone()))
+}
+
+async fn process_rejected_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+    let mut rejected_content = tx.get_rejected_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+    let datetime = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
+    //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
+
+    let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
+
+    let user_settings = tx.load_user_settings().unwrap();
+    if will_expire_at < now_in_my_timezone(user_settings.clone()) {
+        video_info.status = "removed_from_view".to_string();
+        bot.delete_message(CHAT_ID, message_id).await?;
+        //tx.remove_content_info_with_shortcode(rejected_content.original_shortcode.clone())?;
+        rejected_content.expired = true;
+    } else {
+        let now = now_in_my_timezone(user_settings.clone());
+
+        let last_updated_at = DateTime::parse_from_rfc3339(&rejected_content.last_updated_at).unwrap();
+        if last_updated_at < now - REFRESH_RATE {
+            let full_video_caption = generate_full_video_caption("rejected", ui_definitions, tx, video_info);
+
+            let _ = match bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
+                Ok(_) => {
+                    let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
+                    let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
+                    let undo_action = [
+                        InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", message_id)),
+                        InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", message_id)),
+                    ];
+
+                    let _msg = bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                    let new_message = bot.send_video(CHAT_ID, InputFile::url(rejected_content.url.clone().parse().unwrap())).caption(full_video_caption).await?;
+
+                    let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
+                    let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
+                    let undo_action = [
+                        InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", new_message.id)),
+                        InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id)),
+                    ];
+
+                    tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
+
+                    let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+                }
+            };
+            rejected_content.last_updated_at = now.to_rfc3339();
+        }
+        tx.save_rejected_content(rejected_content.clone())?;
     }
 
     Ok((message_id, video_info.clone()))
@@ -546,61 +509,6 @@ async fn process_posted_hidden(bot: &Throttle<Bot>, ui_definitions: &UIDefinitio
     Ok((message_id, video_info.clone()))
 }
 
-async fn process_rejected_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-    let mut rejected_content = tx.get_rejected_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
-    let datetime = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
-    //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
-
-    let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
-
-    let user_settings = tx.load_user_settings().unwrap();
-    if will_expire_at < now_in_my_timezone(user_settings.clone()) {
-        video_info.status = "removed_from_view".to_string();
-        bot.delete_message(CHAT_ID, message_id).await?;
-        //tx.remove_content_info_with_shortcode(rejected_content.original_shortcode.clone())?;
-        rejected_content.expired = true;
-    } else {
-        let now = now_in_my_timezone(user_settings.clone());
-
-        let last_updated_at = DateTime::parse_from_rfc3339(&rejected_content.last_updated_at).unwrap();
-        if last_updated_at < now - REFRESH_RATE {
-            let full_video_caption = generate_full_video_caption("rejected", ui_definitions, tx, video_info);
-
-            let _ = match bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
-                Ok(_) => {
-                    let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
-                    let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
-                    let undo_action = [
-                        InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", message_id)),
-                        InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", message_id)),
-                    ];
-
-                    let _msg = bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
-                }
-                Err(e) => {
-                    println!("Error: {}", e);
-                    let new_message = bot.send_video(CHAT_ID, InputFile::url(rejected_content.url.clone().parse().unwrap())).caption(full_video_caption).await?;
-
-                    let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
-                    let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
-                    let undo_action = [
-                        InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", new_message.id)),
-                        InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id)),
-                    ];
-
-                    tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
-
-                    let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
-                }
-            };
-            rejected_content.last_updated_at = now.to_rfc3339();
-        }
-        tx.save_rejected_content(rejected_content.clone())?;
-    }
-
-    Ok((message_id, video_info.clone()))
-}
-
 async fn process_posted_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
     //println!("process_posted_shown - Message ID: {}", message_id);
     let mut posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
@@ -652,6 +560,99 @@ async fn process_posted_shown(bot: &Throttle<Bot>, ui_definitions: &UIDefinition
 async fn send_video_and_get_id(bot: &Throttle<Bot>, input_file: InputFile) -> Result<MessageId, Box<dyn Error + Send + Sync>> {
     let video_message = bot.send_video(CHAT_ID, input_file).await?;
     Ok(video_message.id)
+}
+
+pub fn generate_full_video_caption(caption_type: &str, ui_definitions: &UIDefinitions, tx: &mut DatabaseTransaction, video_info: &ContentInfo) -> String {
+    let caption_body = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
+
+    match caption_type {
+        "accepted" => {
+            let full_video_caption = format!("{}\n\n{}\n\n", caption_body, ui_definitions.labels.get("accepted_caption").unwrap());
+            full_video_caption
+        }
+        "rejected" => {
+            let full_video_caption = format!("{}\n\n{}\n\n", caption_body, ui_definitions.labels.get("rejected_caption").unwrap());
+            full_video_caption
+        }
+        "queued" => {
+            let queued_content = tx.get_queued_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+
+            let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
+
+            let user_settings = tx.load_user_settings().unwrap();
+            let now = now_in_my_timezone(user_settings.clone());
+            let duration_until_expiration = will_post_at.signed_duration_since(now);
+            let hours_until_expiration = format!("{:01}", duration_until_expiration.num_hours());
+            let minutes_until_expiration = format!("{:01}", duration_until_expiration.num_minutes() % 60);
+            let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
+
+            let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
+            let formatted_datetime = will_post_at.format("%H:%M %m/%d").to_string();
+
+            let mut countdown_caption = format!("({} hours, {} minutes and {} seconds from now)", hours_until_expiration, minutes_until_expiration, seconds_until_expiration);
+
+            let hours = hours_until_expiration.parse::<i32>().unwrap_or(0);
+            let minutes = minutes_until_expiration.parse::<i32>().unwrap_or(0);
+            let seconds = seconds_until_expiration.parse::<i32>().unwrap_or(0);
+
+            if hours <= 0 && minutes <= 0 && seconds <= 0 {
+                countdown_caption = "(Posting now...)".to_string();
+            }
+
+            let full_video_caption = format!(
+                "{}\n{}\n(from @{})\n\n{}\n\nWill post at {}\n{}",
+                queued_content.caption, queued_content.hashtags, queued_content.original_author, queued_caption, formatted_datetime, countdown_caption
+            );
+            full_video_caption
+        }
+        "failed" => {
+            let failed_content = tx.get_failed_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+
+            let failed_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap();
+            let will_expire_at = failed_at.checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
+
+            let user_settings = tx.load_user_settings().unwrap();
+            let now = now_in_my_timezone(user_settings.clone());
+            let duration_until_expiration = will_expire_at.signed_duration_since(now);
+            let hours_until_expiration = format!("{:01}", duration_until_expiration.num_hours());
+            let minutes_until_expiration = format!("{:01}", duration_until_expiration.num_minutes() % 60);
+            let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
+
+            let posted_caption = ui_definitions.labels.get("failed_caption").unwrap();
+            let formatted_datetime = failed_at.format("%H:%M %m/%d").to_string();
+            let full_video_caption = format!(
+                "{}\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
+                caption_body, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
+            );
+            full_video_caption
+        }
+        "pending" => caption_body.to_string(),
+        "waiting" => caption_body.to_string(),
+        "posted" => {
+            let posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+
+            let datetime = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
+            let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
+
+            let user_settings = tx.load_user_settings().unwrap();
+            let now = now_in_my_timezone(user_settings.clone());
+            let duration_until_expiration = will_expire_at.signed_duration_since(now);
+            let hours_until_expiration = format!("{:01}", duration_until_expiration.num_hours());
+            let minutes_until_expiration = format!("{:01}", duration_until_expiration.num_minutes() % 60);
+            let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
+
+            let posted_caption = ui_definitions.labels.get("posted_caption").unwrap();
+            let formatted_datetime = datetime.format("%H:%M %m/%d").to_string();
+            let full_video_caption = format!(
+                "{}\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
+                caption_body, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
+            );
+            full_video_caption
+        }
+        _ => {
+            panic!("Unknown caption type: {}", caption_type);
+        }
+    }
 }
 
 fn get_action_buttons(ui_definitions: &UIDefinitions, action_keys: &[&str], sent_message_id: MessageId) -> Vec<InlineKeyboardButton> {
