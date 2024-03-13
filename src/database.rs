@@ -141,10 +141,10 @@ impl Database {
                 conn.execute(&query, [])?;
             } else {
                 let default_is_posting = 1;
-                let default_posting_interval = 180;
+                let default_posting_interval = 150;
                 let default_random_interval = 30;
                 let default_removed_content_lifespan = 120;
-                let default_posted_content_lifespan = 180;
+                let default_posted_content_lifespan = 120;
                 let default_page_size = 8;
                 let query = format!(
                     "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
@@ -551,7 +551,7 @@ impl DatabaseTransaction {
             queued_posts.remove(removed_post_index);
 
             // Recalculate will_post_at for remaining posts
-            if removed_post_index < queued_posts.len() {
+            if removed_post_index <= queued_posts.len() {
                 for post in queued_posts.iter_mut().skip(removed_post_index) {
                     let new_post_time = self.get_new_post_time(user_settings.clone()).unwrap();
                     post.will_post_at = new_post_time.clone();
@@ -578,7 +578,6 @@ impl DatabaseTransaction {
 
         Ok(())
     }
-
     pub fn save_content_queue(&mut self, queued_post: QueuedContent) -> Result<()> {
         let tx = self.conn.transaction()?;
 
@@ -627,6 +626,50 @@ impl DatabaseTransaction {
         }
 
         Ok(queued_posts)
+    }
+
+    pub fn get_queued_content_by_shortcode(&mut self, shortcode: String) -> Option<QueuedContent> {
+        let content_queue = self.load_content_queue().unwrap();
+
+        for content in content_queue {
+            if content.original_shortcode == shortcode {
+                return Some(content);
+            }
+        }
+        None
+    }
+
+    pub fn get_rejected_content_by_shortcode(&mut self, shortcode: String) -> Option<RejectedContent> {
+        let rejected_content = self.load_rejected_content().unwrap();
+
+        for content in rejected_content {
+            if content.original_shortcode == shortcode {
+                return Some(content);
+            }
+        }
+        None
+    }
+
+    pub fn get_failed_content_by_shortcode(&mut self, shortcode: String) -> Option<FailedContent> {
+        let failed_content = self.load_failed_content().unwrap();
+
+        for content in failed_content {
+            if content.original_shortcode == shortcode {
+                return Some(content);
+            }
+        }
+        None
+    }
+
+    pub fn get_posted_content_by_shortcode(&mut self, shortcode: String) -> Option<PostedContent> {
+        let failed_content = self.load_posted_content().unwrap();
+
+        for content in failed_content {
+            if content.original_shortcode == shortcode {
+                return Some(content);
+            }
+        }
+        None
     }
 
     pub fn remove_rejected_content_with_shortcode(&mut self, shortcode: String) -> Result<()> {
@@ -933,5 +976,31 @@ impl DatabaseTransaction {
         let mut stmt = tx.prepare(&format!("SELECT url FROM {} WHERE original_shortcode = ?1", table_name)).unwrap();
         let exists = stmt.query_map(params![shortcode], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
         exists
+    }
+
+    pub fn reorder_pages(&mut self) -> Result<()> {
+        let user_settings = self.load_user_settings()?;
+        let page_size = user_settings.page_size as i64;
+
+        // Load all content
+        let mut content_mapping = self.load_content_mapping()?;
+
+        // Sort content by page_num
+        content_mapping.sort_by(|_a, b, _c, d| b.page_num.cmp(&d.page_num));
+
+        // Recalculate page numbers
+        let mut new_content_info = IndexMap::new();
+        let mut index = 0;
+        for (message_id, mut info) in content_mapping {
+            let correct_page_num = ((index as f64 / page_size as f64) + 0.5).floor() as i32;
+            info.page_num = correct_page_num;
+            new_content_info.insert(message_id, info);
+            index += 1;
+        }
+
+        // Save the updated content info back to the database
+        self.save_content_mapping(new_content_info)?;
+
+        Ok(())
     }
 }

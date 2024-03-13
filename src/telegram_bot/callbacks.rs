@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use crate::database::{ContentInfo, Database, RejectedContent, UserSettings};
 use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{process_accepted_shown, process_rejected_shown, BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
+use crate::telegram_bot::{generate_full_video_caption, process_accepted_shown, BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
 use crate::REFRESH_RATE;
 
@@ -50,7 +50,7 @@ pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: Call
         }
         "reject" => {
             dialogue.update(State::RejectedView).await.unwrap();
-            handle_rejected_view(bot, dialogue, q, database, ui_definitions, user_settings).await?;
+            handle_rejected_view(dialogue, q, database, user_settings).await?;
         }
         "edit" => {
             dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
@@ -82,8 +82,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: 
     let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
     let undo_action = [InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", message_id))];
 
-    let accepted_caption_text = ui_definitions.labels.get("accepted_caption").unwrap();
-    let full_caption = format!("{}\n{}\n(from @{})\n\n{}", video_info.caption, video_info.hashtags, video_info.original_author, accepted_caption_text);
+    let full_caption = generate_full_video_caption("accepted", &ui_definitions, &mut tx, &video_info);
     bot.edit_message_caption(chat_id, message_id).caption(full_caption.clone()).await?;
 
     let _msg = bot.edit_message_reply_markup(chat_id, message_id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
@@ -99,7 +98,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: 
     Ok(())
 }
 
-pub async fn handle_rejected_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, user_settings: UserSettings) -> HandlerResult {
+pub async fn handle_rejected_view(dialogue: BotDialogue, q: CallbackQuery, database: Database, user_settings: UserSettings) -> HandlerResult {
     let _chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -132,7 +131,7 @@ pub async fn handle_rejected_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: 
     tx.save_rejected_content(rejected_content).unwrap();
 
     //let _did_expire = expire_rejected_content(&bot, ui_definitions, &mut tx, message_id, &mut video_info).await?;
-    process_rejected_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info).await?;
+    //process_rejected_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info, caption_body).await?;
 
     tx.save_content_mapping(IndexMap::from([(message_id, video_info)])).unwrap();
     dialogue.update(State::PageView).await.unwrap();
@@ -153,7 +152,7 @@ pub async fn handle_undo(bot: Throttle<Bot>, q: CallbackQuery, database: Databas
     let mut tx = database.begin_transaction().unwrap();
     tx.save_content_mapping(content_mapping).unwrap();
 
-    let full_video_caption = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
+    let full_video_caption = generate_full_video_caption("pending", &ui_definitions, &mut tx, &video_info);
     bot.edit_message_caption(chat_id, message_id).caption(full_video_caption).await?;
 
     let accept_action_text = ui_definitions.buttons.get("accept").unwrap();
@@ -211,7 +210,7 @@ pub async fn handle_video_action(bot: Throttle<Bot>, dialogue: BotDialogue, q: C
             dialogue.update(State::RejectedView).await.unwrap();
             let mut tx = database.begin_transaction().unwrap();
             let user_settings = tx.load_user_settings().unwrap();
-            handle_rejected_view(bot, dialogue, q, database, ui_definitions, user_settings).await?;
+            handle_rejected_view(dialogue, q, database, user_settings).await?;
         } else if action == "edit" {
             dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
             handle_edit_view(bot, dialogue, q, database, ui_definitions, nav_bar_mutex).await?;
@@ -452,7 +451,7 @@ pub async fn handle_remove_from_queue(bot: Throttle<Bot>, q: CallbackQuery, data
     let mut tx = database.begin_transaction().unwrap();
     tx.save_content_mapping(content_mapping).unwrap();
 
-    let full_video_caption = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
+    let full_video_caption = generate_full_video_caption("pending", &ui_definitions, &mut tx, &video_info);
     bot.edit_message_caption(chat_id, message_id).caption(full_video_caption).await?;
 
     let accept_action_text = ui_definitions.buttons.get("accept").unwrap();

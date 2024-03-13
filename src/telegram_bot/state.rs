@@ -14,7 +14,6 @@ pub enum State {
     #[default]
     StartView,
     PageView,
-    ScrapeView,
     SettingsView {
         stored_messages_to_delete: Vec<MessageId>,
         original_message_id: MessageId,
