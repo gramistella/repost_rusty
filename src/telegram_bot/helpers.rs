@@ -26,24 +26,23 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     // Update the status to "pending_hidden"
-                    //println!("Deleted pending message with ID: {}", message_id);
+                    tracing::info!("Deleted pending message with ID: {}", message_id);
                 }
-                Err(_e) => {
-                    //println!("Error deleting pending message with ID: {}: {}", message_id, e);
+                Err(e) => {
+                    tracing::warn!("Error deleting pending message with ID: {}: {}", message_id, e);
                 }
             }
         }
 
         if video_info.status == "accepted_shown" {
             video_info.status = "accepted_hidden".to_string();
-            println!("Deleting accepted message with ID: {}", message_id);
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     // Update the status to "pending_hidden"
-                    println!("Deleted accepted message with ID: {}", message_id);
+                    tracing::info!("Deleted accepted message with ID: {}", message_id);
                 }
-                Err(_e) => {
-                    println!("Error deleting accepted message with ID: {}: {}", message_id, _e);
+                Err(e) => {
+                    tracing::warn!("Error deleting accepted message with ID: {}: {}", message_id, e);
                 }
             }
         }
@@ -53,10 +52,10 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     // Update the status to "pending_hidden"
-                    //println!("Deleted rejected message with ID: {}", message_id);
+                    tracing::info!("Deleted rejected message with ID: {}", message_id);
                 }
-                Err(_e) => {
-                    //println!("Error deleting rejected message with ID: {}: {}", message_id, e);
+                Err(e) => {
+                    tracing::warn!("Error deleting rejected message with ID: {}: {}", message_id, e);
                 }
             }
         }
@@ -66,10 +65,10 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     // Update the status to "pending_hidden"
-                    //println!("Deleted posted message with ID: {}", message_id);
+                    tracing::info!("Deleted posted message with ID: {}", message_id);
                 }
-                Err(_e) => {
-                    //println!("Error deleting posted message with ID: {}: {}", message_id, e);
+                Err(e) => {
+                    tracing::warn!("Error deleting posted message with ID: {}: {}", message_id, e);
                 }
             }
         }
@@ -79,10 +78,10 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     // Update the status to "pending_hidden"
-                    //println!("Deleted queued message with ID: {}", message_id);
+                    tracing::info!("Deleted queued message with ID: {}", message_id);
                 }
-                Err(_e) => {
-                    //println!("Error deleting queued message with ID: {}: {}", message_id, _e);
+                Err(e) => {
+                    tracing::warn!("Error deleting queued message with ID: {}: {}", message_id, e);
                 }
             }
         }
@@ -92,9 +91,11 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     // Update the status to "pending_hidden"
+                    tracing::info!("Deleted failed message with ID: {}", message_id);
                     //println!("Deleted queued message with ID: {}", message_id);
                 }
-                Err(_e) => {
+                Err(e) => {
+                    tracing::warn!("Error deleting failed message with ID: {}: {}", message_id, e);
                     //println!("Error deleting queued message with ID: {}: {}", message_id, _e);
                 }
             }
@@ -146,9 +147,9 @@ pub async fn send_or_replace_navigation_bar(bot: Throttle<Bot>, database: Databa
                     Ok(_) => {}
                     Err(e) => {
                         if e.to_string() != "message to delete not found" {
-                            //println!("Error deleting message: {}", e);
+                            tracing::warn!("Error deleting message: {}", e);
                         } else {
-                            println!("ERROR in helpers.rs: \n{}", e.to_string());
+                            tracing::error!("ERROR in helpers.rs: \n{}", e.to_string());
                         }
                     }
                 }
@@ -160,9 +161,9 @@ pub async fn send_or_replace_navigation_bar(bot: Throttle<Bot>, database: Databa
                         Ok(_) => {}
                         Err(e) => {
                             if e.to_string() != "message to edit not found" {
-                                //println!("Error editing message: {}", e);
+                                tracing::warn!("Error editing message: {}", e);
                             } else {
-                                println!("ERROR in helpers.rs: \n{}", e.to_string());
+                                tracing::error!("ERROR in helpers.rs: \n{}", e.to_string());
                             }
                         }
                     }

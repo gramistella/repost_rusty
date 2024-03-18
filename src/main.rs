@@ -8,6 +8,10 @@ use std::time::Duration;
 
 use teloxide::prelude::ChatId;
 use tokio::sync::mpsc;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
 use crate::database::Database;
 
@@ -17,7 +21,7 @@ mod telegram_bot;
 mod utils;
 
 const CHAT_ID: ChatId = ChatId(34957918);
-const REFRESH_RATE: Duration = Duration::from_secs(90);
+const REFRESH_RATE: Duration = Duration::from_secs(60);
 const CONTENT_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
 
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 90);
@@ -25,7 +29,7 @@ const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    let (_file_guard, _stdout_guard) = init_logging();
 
     let is_offline = false;
 
@@ -39,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 
     for (username, credentials) in &all_credentials {
         if credentials.get("enabled").expect("No enabled field in credentials") == "true" {
-            println!("Starting bot for user: {}", username);
+            tracing::info!("Starting bot for user: {}", username);
 
             // Create a new channel
             let (tx, rx) = mpsc::channel(100);
@@ -57,6 +61,36 @@ async fn main() -> anyhow::Result<()> {
     let _ = futures::future::join_all(all_handles).await;
 
     Ok(())
+}
+
+fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appender::non_blocking::WorkerGuard) {
+    let file_appender = tracing_appender::rolling::hourly("logs/", "rolling.log");
+    let (non_blocking, file_guard) = tracing_appender::non_blocking(file_appender);
+
+    let file_layer = tracing_subscriber::fmt::Layer::new()
+        .compact()
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_target(false)
+        .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
+        .with_writer(non_blocking)
+        .with_filter(LevelFilter::INFO);
+
+    let (non_blocking, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
+    let layer2 = tracing_subscriber::fmt::Layer::default()
+        .compact()
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_target(false)
+        .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
+        .with_writer(non_blocking)
+        .with_filter(LevelFilter::WARN);
+
+    Registry::default().with(file_layer).with(layer2).init();
+
+    (file_guard, stdout_guard)
 }
 
 fn read_credentials(path: &str) -> HashMap<String, HashMap<String, String>> {

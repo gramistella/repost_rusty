@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use crate::database::{Database, DatabaseTransaction, FailedContent, PostedContent, QueuedContent};
+use crate::database::{Database, DatabaseTransaction, FailedContent, PostedContent, QueuedContent, UserSettings};
 use crate::utils::now_in_my_timezone;
 use crate::{CONTENT_EXPIRY, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
@@ -27,6 +27,7 @@ async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, 
     accounts.get(username).unwrap().clone()
 }
 
+#[tracing::instrument(skip(tx, database, is_offline, credentials))]
 pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) {
     //let mut unique_post_ids = HashSet::new();
 
@@ -42,6 +43,7 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
     let _ = tokio::try_join!(scraper_loop, poster_loop);
 }
 
+#[tracing::instrument(skip(tx, database, is_offline, username, password, cookie_store_path, scraper))]
 async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, username: String, password: String, cookie_store_path: String, scraper: Arc<Mutex<InstagramScraper>>) -> JoinHandle<anyhow::Result<()>> {
     let scraper_loop: JoinHandle<anyhow::Result<()>>;
     let accounts_to_scrape: HashMap<String, String> = read_accounts_to_scrape("config/accounts_to_scrape.yaml", username.as_str()).await;
@@ -53,9 +55,8 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
             "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/48718206_1450879249116459_8164759842261415987_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=103&_nc_ohc=GUN_mDr2OYsAX9fRqgF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfC78iGTuJdhnNbhO_fuieXvYT5R3pkhMAD-MLNxtxR7TQ&oe=65D572F7&_nc_sid=2999b8",
             "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428456788_295092509963149_5948637286561662383_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=101&_nc_ohc=zkatv7OeKwUAX8YNkBr&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAQIp78Fu1NCj719FprGjWMV_gZ3s_b8Ux_mWy3Ek1uOA&oe=65D73480&_nc_sid=2999b8",
             "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428478842_735629148752808_8195281140553080552_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=100&_nc_ohc=C_p4c8oZuQAAX-v2g55&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfDFvSm0eBmcCsuO3rFKcdLFdi6HBHTKzAkN8tqdAoUn_w&oe=65D69DF3&_nc_sid=2999b8",
-            //"https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/428226521_1419744418741015_2882822033667053284_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=107&_nc_ohc=Dir0Fhly2oQAX-WOLlD&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCdg_GUWzIIA6ueap7WZgK1zG1Zq903lp_RxGFMT22xWA&oe=65D6A70B&_nc_sid=2999b8",
-            //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
-            //"https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
+            "https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/428226521_1419744418741015_2882822033667053284_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=107&_nc_ohc=Dir0Fhly2oQAX-WOLlD&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCdg_GUWzIIA6ueap7WZgK1zG1Zq903lp_RxGFMT22xWA&oe=65D6A70B&_nc_sid=2999b8",
+            "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
         ];
 
         println!("Sending offline data");
@@ -67,7 +68,12 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                 let mut inner_loop_iterations = 0;
                 for url in &testing_urls {
                     inner_loop_iterations += 1;
-                    let caption_string = format!("Video {}, loop {} #meme", inner_loop_iterations, loop_iterations);
+                    let caption_string;
+                    if inner_loop_iterations == 2 {
+                        caption_string = format!("Video {}, loop {} #meme, will_fail", inner_loop_iterations, loop_iterations);
+                    } else {
+                        caption_string = format!("Video {}, loop {} #meme", inner_loop_iterations, loop_iterations);
+                    }
                     tx.send((url.to_string(), caption_string, "local".to_string(), format!("shortcode{}", inner_loop_iterations))).await.unwrap();
                     sleep(Duration::from_secs(3)).await;
                 }
@@ -233,7 +239,9 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                                     } else if existing_rejected_shortcodes.contains(&post.shortcode) {
                                         println!("{}/{} Content already rejected: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                                     } else {
-                                        panic!("Content not found in any mapping: {}", post.shortcode);
+                                        let error_message = format!("{}/{} Content not found in any mapping: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                        tracing::error!(error_message);
+                                        panic!("{}", error_message);
                                     }
                                     continue;
                                 }
@@ -243,7 +251,9 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                             let (message_id, mut content_info) = match transaction.get_content_info_by_shortcode(post.shortcode.clone()) {
                                 Some(content) => content,
                                 None => {
-                                    panic!("Content not found in current mapping: {}", post.shortcode);
+                                    let error_message = format!("{}/{} Content not found in current mapping: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                    tracing::error!(error_message);
+                                    panic!("{}", error_message);
                                 }
                             };
 
@@ -278,6 +288,7 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
     scraper_loop
 }
 
+#[tracing::instrument(skip(is_offline, credentials, scraper, poster_loop_database))]
 fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: Arc<Mutex<InstagramScraper>>, poster_loop_database: Database) -> JoinHandle<anyhow::Result<()>> {
     let poster_loop = tokio::spawn(async move {
         loop {
@@ -341,36 +352,18 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
                                         }
                                         Err(err) => {
                                             println!(" [!] ERROR: couldn't upload content to instagram!\nError: {}\n{}", err.to_string(), queued_post.url);
-
-                                            let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-                                            if video_info.status.contains("shown") {
-                                                video_info.status = "failed_shown".to_string();
-                                            } else {
-                                                video_info.status = "failed_hidden".to_string();
-                                            }
-
-                                            let index_map = IndexMap::from([(message_id, video_info.clone())]);
-                                            transaction.save_content_mapping(index_map).unwrap();
-
-                                            let now = now_in_my_timezone(user_settings.clone()).to_rfc3339();
-                                            let last_updated_at = (now_in_my_timezone(user_settings.clone()) - REFRESH_RATE).to_rfc3339();
-                                            let failed_content = FailedContent {
-                                                url: queued_post.url.clone(),
-                                                caption: queued_post.caption.clone(),
-                                                hashtags: queued_post.hashtags.clone(),
-                                                original_author: queued_post.original_author.clone(),
-                                                original_shortcode: queued_post.original_shortcode.clone(),
-                                                last_updated_at,
-                                                failed_at: now,
-                                                expired: false,
-                                            };
-
-                                            transaction.save_failed_content(failed_content.clone()).unwrap();
+                                            handle_failed_content(&mut transaction, &user_settings, &mut queued_post);
                                             continue;
                                         }
                                     }
                                 } else {
-                                    println!(" [!] Uploaded content offline: {}", queued_post.url);
+                                    if queued_post.caption.contains("will_fail") {
+                                        println!(" [!] Failed to upload content offline: {}", queued_post.url);
+                                        handle_failed_content(&mut transaction, &user_settings, &mut queued_post);
+                                        continue;
+                                    } else {
+                                        println!(" [!] Uploaded content offline: {}", queued_post.url);
+                                    }
                                 }
 
                                 let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
@@ -412,6 +405,34 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
     poster_loop
 }
 
+fn handle_failed_content(transaction: &mut DatabaseTransaction, user_settings: &UserSettings, queued_post: &mut QueuedContent) {
+    let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
+    if video_info.status.contains("shown") {
+        video_info.status = "failed_shown".to_string();
+    } else {
+        video_info.status = "failed_hidden".to_string();
+    }
+
+    let index_map = IndexMap::from([(message_id, video_info.clone())]);
+    transaction.save_content_mapping(index_map).unwrap();
+
+    let now = now_in_my_timezone(user_settings.clone()).to_rfc3339();
+    let last_updated_at = (now_in_my_timezone(user_settings.clone()) - REFRESH_RATE).to_rfc3339();
+    let failed_content = FailedContent {
+        url: queued_post.url.clone(),
+        caption: queued_post.caption.clone(),
+        hashtags: queued_post.hashtags.clone(),
+        original_author: queued_post.original_author.clone(),
+        original_shortcode: queued_post.original_shortcode.clone(),
+        last_updated_at,
+        failed_at: now,
+        expired: false,
+    };
+
+    transaction.save_failed_content(failed_content.clone()).unwrap();
+}
+
+#[tracing::instrument(skip(cookie_store_path, cloned_scraper, transaction))]
 async fn refresh_outdated_urls(cookie_store_path: String, cloned_scraper: Arc<Mutex<InstagramScraper>>, mut transaction: DatabaseTransaction) {
     let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().values().map(|content_info| content_info.original_shortcode.clone()).collect();
 
@@ -420,7 +441,7 @@ async fn refresh_outdated_urls(cookie_store_path: String, cloned_scraper: Arc<Mu
         let (message_id, mut content_info) = match transaction.get_content_info_by_shortcode(shortcode.clone()) {
             Some(content) => content,
             None => {
-                println!("Content not found in current mapping when iterating over existing shortcodes, maybe it was removed?: {}", shortcode);
+                tracing::warn!("Content not found in current mapping when iterating over existing shortcodes, maybe it was removed?: {}", shortcode);
                 continue;
             }
         };
@@ -454,6 +475,7 @@ async fn refresh_outdated_urls(cookie_store_path: String, cloned_scraper: Arc<Mu
     }
 }
 
+#[tracing::instrument(skip(cookie_store_path, scraper_guard))]
 fn save_cookie_store_to_json(cookie_store_path: String, scraper_guard: &mut MutexGuard<InstagramScraper>) {
     let mut writer = std::fs::File::create(cookie_store_path).map(std::io::BufWriter::new).unwrap();
 
@@ -462,6 +484,7 @@ fn save_cookie_store_to_json(cookie_store_path: String, scraper_guard: &mut Mute
 }
 
 /// Randomized sleep function, will randomize the sleep duration by up to 20% of the original duration
+#[tracing::instrument]
 async fn randomized_sleep(original_duration: u64) {
     let mut rng = StdRng::from_rng(OsRng).unwrap();
     let variance: u64 = rng.gen_range(0..=1); // generates a number between 0 and 1

@@ -10,7 +10,7 @@ use teloxide::types::MessageId;
 use crate::utils::now_in_my_timezone;
 use crate::REFRESH_RATE;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UserSettings {
     pub can_post: bool,
     pub posting_interval: i64,
@@ -88,6 +88,7 @@ const DEV_DB: &str = "db/dev.db";
 
 pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 
+#[derive(Debug)]
 pub(crate) struct Database {
     pool: Pool<SqliteConnectionManager>,
 }
@@ -128,11 +129,11 @@ impl Database {
         if !user_settings_exists {
             if is_offline {
                 let default_is_posting = 1;
-                let default_posting_interval = 1;
+                let default_posting_interval = 2;
                 let default_random_interval = 0;
                 let default_removed_content_lifespan = 2;
                 let default_posted_content_lifespan = 2;
-                let default_page_size = 2;
+                let default_page_size = 4;
 
                 let query = format!(
                     "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
@@ -234,6 +235,7 @@ impl Database {
     }
 }
 
+#[derive(Debug)]
 pub struct DatabaseTransaction {
     conn: PooledConnection<SqliteConnectionManager>,
 }
@@ -929,37 +931,65 @@ impl DatabaseTransaction {
     }
 
     pub fn get_new_post_time(&mut self, user_settings: UserSettings) -> Result<String, rusqlite::Error> {
-        let latest_post_time_option;
-        {
-            latest_post_time_option = self.get_latest_time_from_db("SELECT will_post_at FROM content_queue ORDER BY will_post_at DESC LIMIT 1")?;
+        let posted_content = self.load_posted_content()?;
+        let queued_content = self.load_content_queue()?;
+
+        let current_time = now_in_my_timezone(user_settings.clone());
+
+        let mut post_times = Vec::new();
+
+        if posted_content.len() == 0 {
+            post_times.push(current_time);
+        } else {
+            post_times.push(DateTime::parse_from_rfc3339(&posted_content.clone().last().unwrap().posted_at).unwrap().with_timezone(&Utc));
         }
+
+        for post in queued_content.clone() {
+            post_times.push(DateTime::parse_from_rfc3339(&post.will_post_at).unwrap().with_timezone(&Utc));
+        }
+
+        post_times.sort(); // Sort the combined times
 
         let posting_interval = Duration::try_seconds(user_settings.posting_interval * 60).unwrap();
-        let random_interval = Duration::try_seconds(user_settings.random_interval_variance * 60).unwrap();
+        let random_interval = user_settings.random_interval_variance * 60;
         let mut rng = rand::thread_rng();
-        let random_variance = rng.gen_range(-random_interval.num_seconds()..=random_interval.num_seconds());
-        let random_variance_seconds = Duration::try_seconds(random_variance).unwrap();
 
-        let mut new_post_time = match latest_post_time_option {
-            Some(time) => time + posting_interval + random_variance_seconds,
-            None => {
-                let latest_posted_time_option;
-                {
-                    latest_posted_time_option = self.get_latest_time_from_db("SELECT posted_at FROM posted_content ORDER BY posted_at DESC LIMIT 1")?;
-                }
-                match latest_posted_time_option {
-                    Some(time) => time + posting_interval + random_variance_seconds,
-                    None => now_in_my_timezone(user_settings.clone()) + Duration::try_seconds(60).unwrap(),
-                }
+        // Identify a suitable gap
+        let mut gap_start = None;
+        for windows in post_times.windows(2) {
+            let gap = windows[1] - windows[0];
+            tracing::info!("Gap: {:?}", gap);
+            if gap > posting_interval + Duration::try_seconds(random_interval).unwrap() {
+                tracing::info!("Gap found: {:?}", gap);
+                gap_start = Some(windows[0]);
+                break;
             }
-        };
-
-        // Check if the new post time is in the past
-        if new_post_time < now_in_my_timezone(user_settings.clone()) {
-            new_post_time = now_in_my_timezone(user_settings.clone()) + Duration::try_seconds(60).unwrap();
         }
 
-        // println!("New post time: {}", new_post_time.to_rfc3339());
+        let mut new_post_time = if posted_content.len() == 0 && queued_content.len() == 0 {
+            // If both posted_content and queued_content are empty, schedule 60 seconds from now
+            now_in_my_timezone(user_settings.clone()) + Duration::try_seconds(60).unwrap()
+        } else if let Some(start) = gap_start {
+            let random_variance = rng.gen_range(-random_interval..=random_interval);
+            let random_variance_seconds = Duration::try_seconds(random_variance).unwrap();
+            start.with_timezone(&Utc) + posting_interval + random_variance_seconds
+        } else {
+            let latest_will_post_at = if queued_content.len() != 0 {
+                self.get_latest_time_from_db("SELECT will_post_at FROM content_queue ORDER BY will_post_at DESC LIMIT 1")?.unwrap()
+            } else {
+                self.get_latest_time_from_db("SELECT posted_at FROM posted_content ORDER BY posted_at DESC LIMIT 1")?.unwrap()
+            };
+            let random_variance = rng.gen_range(-random_interval..=random_interval);
+            let random_variance_seconds = Duration::try_seconds(random_variance).unwrap();
+            latest_will_post_at + posting_interval + random_variance_seconds
+        };
+
+        // Check if the new post time is in the past, adjust if necessary
+        let current_time = now_in_my_timezone(user_settings);
+        if new_post_time < current_time {
+            new_post_time = current_time + Duration::try_seconds(60).unwrap();
+        }
+
         Ok(new_post_time.to_rfc3339())
     }
 
@@ -986,7 +1016,7 @@ impl DatabaseTransaction {
         let mut content_mapping = self.load_content_mapping()?;
 
         // Sort content by page_num
-        content_mapping.sort_by(|_a, b, _c, d| b.page_num.cmp(&d.page_num));
+        content_mapping.sort_by(|_a, b, _c, d| b.page_num.cmp(&d.page_num).reverse());
 
         // Recalculate page numbers
         let mut new_content_info = IndexMap::new();

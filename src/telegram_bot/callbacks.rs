@@ -14,6 +14,7 @@ use crate::telegram_bot::{generate_full_video_caption, process_accepted_shown, B
 use crate::utils::now_in_my_timezone;
 use crate::REFRESH_RATE;
 
+#[tracing::instrument(skip(bot, dialogue, q, database, ui_definitions, execution_mutex))]
 pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>, execution_mutex: Arc<Mutex<()>>) -> HandlerResult {
     let _mutex_guard = execution_mutex.lock().await;
 
@@ -69,7 +70,7 @@ pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: Call
 
     Ok(())
 }
-
+#[tracing::instrument(skip(bot, dialogue, q, database, ui_definitions))]
 pub async fn handle_accepted_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
@@ -97,7 +98,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: 
 
     Ok(())
 }
-
+#[tracing::instrument(skip(dialogue, q, database, user_settings))]
 pub async fn handle_rejected_view(dialogue: BotDialogue, q: CallbackQuery, database: Database, user_settings: UserSettings) -> HandlerResult {
     let _chat_id = q.message.clone().unwrap().chat.id;
 
@@ -138,7 +139,7 @@ pub async fn handle_rejected_view(dialogue: BotDialogue, q: CallbackQuery, datab
 
     Ok(())
 }
-
+#[tracing::instrument(skip(bot, q, database, ui_definitions))]
 pub async fn handle_undo(bot: Throttle<Bot>, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
@@ -180,7 +181,7 @@ pub async fn handle_undo(bot: Throttle<Bot>, q: CallbackQuery, database: Databas
 
     Ok(())
 }
-
+#[tracing::instrument(skip(bot, dialogue, q, database))]
 pub async fn handle_remove_from_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
@@ -196,7 +197,7 @@ pub async fn handle_remove_from_view(bot: Throttle<Bot>, dialogue: BotDialogue, 
 
     Ok(())
 }
-
+#[tracing::instrument(skip(bot, dialogue, q, database, ui_definitions, nav_bar_mutex))]
 pub async fn handle_video_action(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
     if let Some(_data) = &q.data {
         let (action, _message_id) = parse_callback_query(&q);
@@ -228,7 +229,7 @@ pub async fn handle_video_action(bot: Throttle<Bot>, dialogue: BotDialogue, q: C
 
     Ok(())
 }
-
+#[tracing::instrument(skip(bot, dialogue, database, ui_definitions))]
 pub async fn handle_settings(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let (action, message_id) = parse_callback_query(&q);
 
@@ -299,6 +300,7 @@ pub async fn handle_settings(bot: Throttle<Bot>, dialogue: BotDialogue, q: Callb
     Ok(())
 }
 
+#[tracing::instrument(skip(bot, dialogue, q, database, ui_definitions, nav_bar_mutex))]
 pub async fn handle_edit_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
@@ -306,10 +308,7 @@ pub async fn handle_edit_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: Call
 
     let (action, message_id) = parse_callback_query(&q);
     //println!("handle_edit_view original message id {}, action {}", message_id, action);
-    println!("handle_edit_view: action {}", action);
     if action == "go_back" {
-        //println!("go back pressed");
-
         // Clear the sent messages, from message_id to the latest message
         bot.delete_message(chat_id, q.message.unwrap().id).await?;
         clear_sent_messages(bot.clone(), database.clone()).await?;
@@ -397,7 +396,7 @@ pub async fn handle_edit_view(bot: Throttle<Bot>, dialogue: BotDialogue, q: Call
 
     Ok(())
 }
-
+#[tracing::instrument(skip(dialogue))]
 async fn retrieve_state_stored_messages(dialogue: &BotDialogue) -> Vec<MessageId> {
     let mut messages_to_delete = Vec::new();
     if let State::EditView { stored_messages_to_delete } = dialogue.get().await.unwrap().unwrap() {
@@ -407,7 +406,7 @@ async fn retrieve_state_stored_messages(dialogue: &BotDialogue) -> Vec<MessageId
     }
     messages_to_delete
 }
-
+#[tracing::instrument]
 pub fn parse_callback_query(q: &CallbackQuery) -> (String, MessageId) {
     // Extract the message id from the callback data
     let data_parts: Vec<&str> = q.data.as_ref().unwrap().split('_').collect();
@@ -434,7 +433,7 @@ pub fn parse_callback_query(q: &CallbackQuery) -> (String, MessageId) {
     let message_id = MessageId(message_id);
     (action, message_id)
 }
-
+#[tracing::instrument(skip(bot, q, database, ui_definitions))]
 pub async fn handle_remove_from_queue(bot: Throttle<Bot>, q: CallbackQuery, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
