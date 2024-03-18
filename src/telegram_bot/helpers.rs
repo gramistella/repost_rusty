@@ -13,19 +13,14 @@ use crate::telegram_bot::{NavigationBar, CHAT_ID};
 use crate::REFRESH_RATE;
 
 pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std::io::Result<()> {
-    // Load the video mappings
-
     let mut tx = database.begin_transaction().unwrap();
     let mut content_mapping = tx.load_content_mapping().unwrap();
-    // println!("Trying to clear messages");
     for (message_id, video_info) in &mut content_mapping {
-        //println!("Clearing message with ID: {}, status {}", message_id, video_info.status);
-
+        tracing::info!("Clearing message with ID: {}, status {}", message_id, video_info.status);
         if video_info.status == "pending_shown" {
             video_info.status = "pending_hidden".to_string();
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
-                    // Update the status to "pending_hidden"
                     tracing::info!("Deleted pending message with ID: {}", message_id);
                 }
                 Err(e) => {
@@ -38,7 +33,6 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             video_info.status = "accepted_hidden".to_string();
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
-                    // Update the status to "pending_hidden"
                     tracing::info!("Deleted accepted message with ID: {}", message_id);
                 }
                 Err(e) => {
@@ -51,7 +45,6 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             video_info.status = "rejected_hidden".to_string();
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
-                    // Update the status to "pending_hidden"
                     tracing::info!("Deleted rejected message with ID: {}", message_id);
                 }
                 Err(e) => {
@@ -64,7 +57,6 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             video_info.status = "posted_hidden".to_string();
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
-                    // Update the status to "pending_hidden"
                     tracing::info!("Deleted posted message with ID: {}", message_id);
                 }
                 Err(e) => {
@@ -77,7 +69,6 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             video_info.status = "queued_hidden".to_string();
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
-                    // Update the status to "pending_hidden"
                     tracing::info!("Deleted queued message with ID: {}", message_id);
                 }
                 Err(e) => {
@@ -90,13 +81,10 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> std:
             video_info.status = "failed_hidden".to_string();
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
-                    // Update the status to "pending_hidden"
                     tracing::info!("Deleted failed message with ID: {}", message_id);
-                    //println!("Deleted queued message with ID: {}", message_id);
                 }
                 Err(e) => {
                     tracing::warn!("Error deleting failed message with ID: {}: {}", message_id, e);
-                    //println!("Error deleting queued message with ID: {}: {}", message_id, _e);
                 }
             }
         }

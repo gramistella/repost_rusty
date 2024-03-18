@@ -579,7 +579,24 @@ pub fn generate_full_video_caption(caption_type: &str, ui_definitions: &UIDefini
             full_video_caption
         }
         "rejected" => {
-            let full_video_caption = format!("{}\n\n{}\n\n", caption_body, ui_definitions.labels.get("rejected_caption").unwrap());
+            let rejected_content = tx.get_rejected_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+
+            let rejected_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
+            let will_expire_at = rejected_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
+
+            let user_settings = tx.load_user_settings().unwrap();
+            let now = now_in_my_timezone(user_settings.clone());
+            let duration_until_expiration = will_expire_at.signed_duration_since(now);
+            let hours_until_expiration = format!("{:01}", duration_until_expiration.num_hours());
+            let minutes_until_expiration = format!("{:01}", duration_until_expiration.num_minutes() % 60);
+            let seconds_until_expiration = format!("{:01}", duration_until_expiration.num_seconds() % 60);
+
+            let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
+            let formatted_rejected_at = rejected_at.format("%H:%M %m/%d").to_string();
+
+            let countdown_caption = format!("{} hours, {} minutes and {} seconds", hours_until_expiration, minutes_until_expiration, seconds_until_expiration);
+
+            let full_video_caption = format!("{}\n\n{} at {}\n\nWill expire in {}", caption_body, rejected_caption, formatted_rejected_at, countdown_caption);
             full_video_caption
         }
         "queued" => {
@@ -597,7 +614,7 @@ pub fn generate_full_video_caption(caption_type: &str, ui_definitions: &UIDefini
             let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
             let formatted_datetime = will_post_at.format("%H:%M %m/%d").to_string();
 
-            let mut countdown_caption = format!("({} hours, {} minutes and {} seconds from now)", hours_until_expiration, minutes_until_expiration, seconds_until_expiration);
+            let mut countdown_caption = format!("({} hours, {} minutes and {} seconds)", hours_until_expiration, minutes_until_expiration, seconds_until_expiration);
 
             let hours = hours_until_expiration.parse::<i32>().unwrap_or(0);
             let minutes = minutes_until_expiration.parse::<i32>().unwrap_or(0);
@@ -629,7 +646,7 @@ pub fn generate_full_video_caption(caption_type: &str, ui_definitions: &UIDefini
             let posted_caption = ui_definitions.labels.get("failed_caption").unwrap();
             let formatted_datetime = failed_at.format("%H:%M %m/%d").to_string();
             let full_video_caption = format!(
-                "{}\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
+                "{}\n\n{} at {}\n\nWill expire in {} hours, {} minutes and {} seconds",
                 caption_body, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
             );
             full_video_caption
@@ -652,7 +669,7 @@ pub fn generate_full_video_caption(caption_type: &str, ui_definitions: &UIDefini
             let posted_caption = ui_definitions.labels.get("posted_caption").unwrap();
             let formatted_datetime = datetime.format("%H:%M %m/%d").to_string();
             let full_video_caption = format!(
-                "{}\n\n{} @ {}\n\nWill expire in {} hours, {} minutes and {} seconds",
+                "{}\n\n{} at {}\n\nWill expire in {} hours, {} minutes and {} seconds",
                 caption_body, posted_caption, formatted_datetime, hours_until_expiration, minutes_until_expiration, seconds_until_expiration
             );
             full_video_caption
