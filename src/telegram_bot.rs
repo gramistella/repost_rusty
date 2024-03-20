@@ -451,6 +451,7 @@ impl InnerBotManager {
                 Ok((message_id, video_info.clone()))
             }
             Err(e) => {
+                tracing::warn!("Error editing message caption: {}", e);
                 if e.to_string().contains("message is not modified") {
                     let remove_from_queue_action = self.get_action_buttons(&["remove_from_queue"], message_id);
                     self.edit_message_caption_and_markup(CHAT_ID, message_id, full_video_caption, remove_from_queue_action).await?;

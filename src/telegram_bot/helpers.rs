@@ -121,9 +121,9 @@ impl InnerBotManager {
         }
 
         let mut navigation_bar_guard = self.nav_bar_mutex.lock().await;
-
-        if navigation_bar_guard.last_updated_at < chrono::Utc::now() - INTERFACE_UPDATE_INTERVAL || navigation_bar_guard.current_total_pages != total_pages {
-            navigation_bar_guard.last_updated_at = chrono::Utc::now();
+        let now = now_in_my_timezone(user_settings);
+        if navigation_bar_guard.last_updated_at < now - INTERFACE_UPDATE_INTERVAL || navigation_bar_guard.current_total_pages != total_pages {
+            navigation_bar_guard.last_updated_at = now;
 
             if navigation_bar_guard.message_id == MessageId(0) {
                 navigation_bar_guard.message_id = self.bot.send_message(CHAT_ID, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await.unwrap().id;
