@@ -17,12 +17,12 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use crate::database::{ContentInfo, Database, DatabaseTransaction, FailedContent, UserSettings, DEFAULT_FAILURE_EXPIRATION};
+use crate::database::{ContentInfo, Database, FailedContent, DEFAULT_FAILURE_EXPIRATION};
 use crate::telegram_bot::errors::handle_message_is_not_modified_error;
 use crate::telegram_bot::helpers::generate_full_video_caption;
 use crate::telegram_bot::state::State;
 use crate::utils::now_in_my_timezone;
-use crate::{CHAT_ID, REFRESH_RATE};
+use crate::{CHAT_ID, INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
 
 mod callbacks;
 mod commands;
@@ -221,7 +221,7 @@ impl InnerBotManager {
         }
 
         self.send_or_replace_navigation_bar().await;
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        tokio::time::sleep(REFRESH_RATE).await;
         Ok(())
     }
     #[tracing::instrument(skip(input_file))]
@@ -238,7 +238,7 @@ impl InnerBotManager {
                         hashtags: video_info.hashtags.clone(),
                         original_author: video_info.original_author.clone(),
                         original_shortcode: video_info.original_shortcode.clone(),
-                        last_updated_at: (now - REFRESH_RATE).to_rfc3339(),
+                        last_updated_at: (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339(),
                         failed_at: now.to_rfc3339(),
                         expired: false,
                     };
@@ -277,7 +277,7 @@ impl InnerBotManager {
                 Err(_) => {}
             };
             content.expired = true;
-        } else if now > last_updated_at + REFRESH_RATE {
+        } else if now > last_updated_at + INTERFACE_UPDATE_INTERVAL {
             video_info.status = "failed_shown".to_string();
 
             let full_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "failed", video_info);
@@ -397,7 +397,7 @@ impl InnerBotManager {
             let now = now_in_my_timezone(user_settings.clone());
 
             let last_updated_at = DateTime::parse_from_rfc3339(&rejected_content.last_updated_at).unwrap();
-            if last_updated_at < now - REFRESH_RATE {
+            if last_updated_at < now - INTERFACE_UPDATE_INTERVAL {
                 let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "rejected", video_info);
 
                 let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
@@ -466,18 +466,18 @@ impl InnerBotManager {
     }
 
     #[tracing::instrument]
-    async fn process_queued_shown(&mut self, message_id: MessageId, video_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+    async fn process_queued_shown(&mut self, message_id: MessageId, content_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
         let mut tx = self.database.begin_transaction().unwrap();
-        let mut queued_content = tx.get_queued_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+        let mut queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
 
         let user_settings = tx.load_user_settings().unwrap();
         let now = now_in_my_timezone(user_settings.clone());
 
         let last_updated_at = DateTime::parse_from_rfc3339(&queued_content.last_updated_at).unwrap();
 
-        let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "queued", video_info);
+        let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "queued", content_info);
 
-        if last_updated_at < now - REFRESH_RATE {
+        if last_updated_at < now - INTERFACE_UPDATE_INTERVAL {
             let remove_from_queue_action_text = self.ui_definitions.buttons.get("remove_from_queue").unwrap();
             let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
                 Ok(_) => {
@@ -489,12 +489,13 @@ impl InnerBotManager {
                         let _msg = self.bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([remove_action])).await?;
                     }
                 }
-                Err(_) => {
+                Err(e) => {
+                    tracing::warn!("Error editing message caption: {}", e);
                     let new_message = self.bot.send_video(CHAT_ID, InputFile::url(queued_content.url.clone().parse().unwrap())).caption(full_video_caption.clone()).await?;
 
                     let undo_action = [InlineKeyboardButton::callback(remove_from_queue_action_text, format!("remove_from_queue_{}", new_message.id))];
 
-                    tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
+                    tx.save_content_mapping(IndexMap::from([(new_message.id, content_info.clone())]))?;
 
                     if full_video_caption.contains("(Posting now...)") {
                         // We don't want to show the remove button if the video is being posted
@@ -504,16 +505,16 @@ impl InnerBotManager {
                 }
             };
 
-            if !tx.load_posted_content().unwrap().iter().any(|content| content.original_shortcode == video_info.original_shortcode) {
+            if !tx.load_posted_content().unwrap().iter().any(|content| content.original_shortcode == content_info.original_shortcode) {
                 queued_content.last_updated_at = now.to_rfc3339();
                 tx.save_content_queue(queued_content.clone())?;
             } else {
-                video_info.status = "posted_hidden".to_string();
+                content_info.status = "posted_hidden".to_string();
             }
         } else {
             //println!("No need to update the message");
         }
-        Ok((message_id, video_info.clone()))
+        Ok((message_id, content_info.clone()))
     }
     #[tracing::instrument(skip(input_file))]
     async fn process_posted_hidden(&mut self, mut message_id: MessageId, video_info: &mut ContentInfo, input_file: &InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
@@ -573,7 +574,7 @@ impl InnerBotManager {
             let now = now_in_my_timezone(user_settings.clone());
 
             let last_updated_at = DateTime::parse_from_rfc3339(&posted_content.last_updated_at).unwrap();
-            if last_updated_at < now - REFRESH_RATE {
+            if last_updated_at < now - INTERFACE_UPDATE_INTERVAL {
                 let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "posted", video_info);
                 let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
                     Ok(_) => {

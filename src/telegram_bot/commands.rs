@@ -74,7 +74,7 @@ pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database,
 }
 
 pub async fn settings(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
-    if let Some(mut state) = dialogue.get().await.unwrap() {
+    if let Some(state) = dialogue.get().await.unwrap() {
         if state != State::PageView {
             let _ = bot.delete_message(CHAT_ID, msg.id).await;
             return Ok(());

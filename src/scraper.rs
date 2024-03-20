@@ -17,7 +17,7 @@ use tokio::time::sleep;
 
 use crate::database::{Database, DatabaseTransaction, FailedContent, PostedContent, QueuedContent, UserSettings};
 use crate::utils::now_in_my_timezone;
-use crate::{CONTENT_EXPIRY, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
+use crate::{CONTENT_EXPIRY, INTERFACE_UPDATE_INTERVAL, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
 async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, String> {
     let mut file = File::open(path).await.expect("Unable to open credentials file");
@@ -299,7 +299,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
             let content_mapping = transaction.load_content_mapping().unwrap();
             let user_settings = transaction.load_user_settings().unwrap();
 
-            for (_message_id, mut content_info) in content_mapping {
+            for (_message_id, content_info) in content_mapping {
                 if content_info.status.contains("queued_") {
                     let queued_posts = transaction.load_content_queue().unwrap();
                     for mut queued_post in queued_posts {
@@ -378,8 +378,8 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
                 }
             }
 
-            // Don't remove this sleep, without it the code does not work and the bot becomes completely unresponsive
-            sleep(Duration::from_secs(1)).await;
+            // Don't remove this sleep, without it the bot becomes completely unresponsive
+            sleep(REFRESH_RATE).await;
         }
     });
     poster_loop
@@ -397,7 +397,7 @@ fn handle_failed_content(transaction: &mut DatabaseTransaction, user_settings: &
     transaction.save_content_mapping(index_map).unwrap();
 
     let now = now_in_my_timezone(user_settings.clone()).to_rfc3339();
-    let last_updated_at = (now_in_my_timezone(user_settings.clone()) - REFRESH_RATE).to_rfc3339();
+    let last_updated_at = (now_in_my_timezone(user_settings.clone()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     let failed_content = FailedContent {
         url: queued_post.url.clone(),
         caption: queued_post.caption.clone(),

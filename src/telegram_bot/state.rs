@@ -54,8 +54,6 @@ impl InnerBotManager {
     pub fn schema(&mut self) -> UpdateHandler<Box<dyn Error + Send + Sync + 'static>> {
         use dptree::case;
 
-        let bot_manager = self.clone();
-
         let command_handler = teloxide::filter_command::<Command, _>()
             .branch(case![Command::Help].endpoint(help))
             .branch(case![Command::Start].endpoint(start))

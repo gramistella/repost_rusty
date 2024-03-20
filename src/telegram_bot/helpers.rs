@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use chrono::{DateTime, Utc};
 use teloxide::adaptors::Throttle;
 use teloxide::payloads::EditMessageTextSetters;
@@ -7,12 +5,11 @@ use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::Requester;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
-use tokio::sync::Mutex;
 
 use crate::database::{ContentInfo, Database, DEFAULT_FAILURE_EXPIRATION};
-use crate::telegram_bot::{BotManager, InnerBotManager, NavigationBar, UIDefinitions, CHAT_ID};
+use crate::telegram_bot::{InnerBotManager, UIDefinitions, CHAT_ID};
 use crate::utils::now_in_my_timezone;
-use crate::REFRESH_RATE;
+use crate::INTERFACE_UPDATE_INTERVAL;
 
 pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyhow::Result<()> {
     let mut tx = database.begin_transaction().unwrap();
@@ -125,7 +122,7 @@ impl InnerBotManager {
 
         let mut navigation_bar_guard = self.nav_bar_mutex.lock().await;
 
-        if navigation_bar_guard.last_updated_at < chrono::Utc::now() - REFRESH_RATE || navigation_bar_guard.current_total_pages != total_pages {
+        if navigation_bar_guard.last_updated_at < chrono::Utc::now() - INTERFACE_UPDATE_INTERVAL || navigation_bar_guard.current_total_pages != total_pages {
             navigation_bar_guard.last_updated_at = chrono::Utc::now();
 
             if navigation_bar_guard.message_id == MessageId(0) {

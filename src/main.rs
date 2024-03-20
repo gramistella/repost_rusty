@@ -4,7 +4,6 @@ extern crate r2d2_sqlite;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use teloxide::prelude::ChatId;
@@ -23,9 +22,9 @@ mod telegram_bot;
 mod utils;
 
 const CHAT_ID: ChatId = ChatId(34957918);
-const REFRESH_RATE: Duration = Duration::from_secs(60);
+const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
+const REFRESH_RATE: Duration = Duration::from_secs(2);
 const CONTENT_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
-
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 90);
 const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
 
@@ -33,7 +32,7 @@ const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
 async fn main() -> anyhow::Result<()> {
     let (_file_guard, _stdout_guard) = init_logging();
 
-    let is_offline = true;
+    let is_offline = false;
 
     // Initialize the database
     let db = Database::new(is_offline)?;

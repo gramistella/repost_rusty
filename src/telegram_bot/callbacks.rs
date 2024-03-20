@@ -12,7 +12,7 @@ use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::helpers::{clear_sent_messages, generate_full_video_caption};
 use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
-use crate::{CHAT_ID, REFRESH_RATE};
+use crate::{CHAT_ID, INTERFACE_UPDATE_INTERVAL};
 
 #[tracing::instrument]
 pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>, q: CallbackQuery) -> HandlerResult {
@@ -51,7 +51,7 @@ pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, databas
         }
         "reject" => {
             dialogue.update(State::RejectedView).await.unwrap();
-            handle_rejected_view(bot, database, dialogue, q).await?;
+            handle_rejected_view(database, dialogue, q).await?;
         }
         "edit" => {
             dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
@@ -59,7 +59,7 @@ pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, databas
         }
         "undo" => {
             dialogue.update(State::PageView).await.unwrap();
-            handle_undo(bot, dialogue, database, ui_definitions, q).await?;
+            handle_undo(bot, database, ui_definitions, q).await?;
         }
         "remove_from_view" => {
             dialogue.update(State::PageView).await.unwrap();
@@ -72,7 +72,7 @@ pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, databas
 }
 #[tracing::instrument]
 pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_definitions: UIDefinitions, dialogue: BotDialogue, q: CallbackQuery) -> HandlerResult {
-    let chat_id = q.message.clone().unwrap().chat.id;
+    let _chat_id = q.message.clone().unwrap().chat.id;
 
     // Extract the message id from the callback data
     let (_action, message_id) = parse_callback_query(&q);
@@ -134,7 +134,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     Ok(())
 }
 #[tracing::instrument]
-pub async fn handle_rejected_view(bot: Throttle<Bot>, database: Database, dialogue: BotDialogue, q: CallbackQuery) -> HandlerResult {
+pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: CallbackQuery) -> HandlerResult {
     let _chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -149,7 +149,7 @@ pub async fn handle_rejected_view(bot: Throttle<Bot>, database: Database, dialog
     let now = now_in_my_timezone(tx.load_user_settings().unwrap());
 
     // Subtract the refresh rate from the current time so that the rejected content is shown immediately
-    let last_updated_at = now - REFRESH_RATE;
+    let last_updated_at = now - INTERFACE_UPDATE_INTERVAL;
 
     let rejected_content = RejectedContent {
         url: video_info.url.clone(),
@@ -173,7 +173,7 @@ pub async fn handle_rejected_view(bot: Throttle<Bot>, database: Database, dialog
     Ok(())
 }
 #[tracing::instrument]
-pub async fn handle_undo(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, q: CallbackQuery) -> HandlerResult {
+pub async fn handle_undo(bot: Throttle<Bot>, database: Database, ui_definitions: UIDefinitions, q: CallbackQuery) -> HandlerResult {
     let chat_id = q.message.clone().unwrap().chat.id;
 
     // Extract the message id from the callback data
@@ -242,13 +242,13 @@ pub async fn handle_video_action(bot: Throttle<Bot>, dialogue: BotDialogue, data
             handle_accepted_view(bot, database, ui_definitions, dialogue, q).await?;
         } else if action == "reject" {
             dialogue.update(State::RejectedView).await.unwrap();
-            handle_rejected_view(bot, database, dialogue, q).await?;
+            handle_rejected_view(database, dialogue, q).await?;
         } else if action == "edit" {
             dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
             handle_edit_view(bot, database, ui_definitions, dialogue, nav_bar_mutex, q).await?;
         } else if action == "undo" {
             dialogue.update(State::PageView).await.unwrap();
-            handle_undo(bot, dialogue, database, ui_definitions, q).await?;
+            handle_undo(bot, database, ui_definitions, q).await?;
         } else if action == "remove_from_view" {
             dialogue.update(State::PageView).await.unwrap();
             handle_remove_from_view(bot, dialogue, database, q).await?;
