@@ -7,9 +7,9 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Mes
 use teloxide::Bot;
 use tokio::sync::Mutex;
 
-use crate::database::{ContentInfo, Database, QueuedContent, RejectedContent};
+use crate::database::{ContentInfo, Database, RejectedContent};
 use crate::telegram_bot::commands::display_settings_message;
-use crate::telegram_bot::helpers::{clear_sent_messages, generate_full_video_caption};
+use crate::telegram_bot::helpers::{clear_sent_messages, create_queued_content, generate_full_video_caption, update_content_status_if_posted};
 use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
 use crate::{CHAT_ID, INTERFACE_UPDATE_INTERVAL};
@@ -82,15 +82,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     let user_settings = tx.load_user_settings().unwrap();
     let last_updated_at = now_in_my_timezone(user_settings);
     let will_post_at = tx.get_new_post_time().unwrap();
-    let new_queued_post = QueuedContent {
-        url: content_info.url.clone(),
-        caption: content_info.caption.clone(),
-        hashtags: content_info.hashtags.clone(),
-        original_author: content_info.original_author.clone(),
-        original_shortcode: content_info.original_shortcode.clone(),
-        last_updated_at: last_updated_at.to_rfc3339(),
-        will_post_at,
-    };
+    let new_queued_post = create_queued_content(&mut content_info, last_updated_at, will_post_at);
 
     tx.save_content_queue(new_queued_post).unwrap();
     content_info.status = "queued_shown".to_string();
@@ -99,7 +91,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     tx.save_content_mapping(index_map).unwrap();
 
     let mut tx = database.begin_transaction().unwrap();
-    let mut queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
+    let queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
 
     let user_settings = tx.load_user_settings().unwrap();
     let now = now_in_my_timezone(user_settings.clone());
@@ -122,17 +114,13 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
         }
     };
 
-    if !tx.load_posted_content().unwrap().iter().any(|content| content.original_shortcode == content_info.original_shortcode) {
-        queued_content.last_updated_at = now.to_rfc3339();
-        tx.save_content_queue(queued_content.clone())?;
-    } else {
-        content_info.status = "posted_hidden".to_string();
-    }
+    update_content_status_if_posted(&mut content_info, &mut tx, queued_content, now)?;
 
     dialogue.update(State::PageView).await.unwrap();
 
     Ok(())
 }
+
 #[tracing::instrument]
 pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: CallbackQuery) -> HandlerResult {
     let _chat_id = q.message.clone().unwrap().chat.id;
@@ -355,15 +343,7 @@ pub async fn handle_edit_view(bot: Throttle<Bot>, database: Database, ui_definit
         let user_settings = tx.load_user_settings().unwrap();
         let last_updated_at = now_in_my_timezone(user_settings);
         let will_post_at = tx.get_new_post_time().unwrap();
-        let new_queued_post = QueuedContent {
-            url: content_info.url.clone(),
-            caption: content_info.caption.clone(),
-            hashtags: content_info.hashtags.clone(),
-            original_author: content_info.original_author.clone(),
-            original_shortcode: content_info.original_shortcode.clone(),
-            last_updated_at: last_updated_at.to_rfc3339(),
-            will_post_at,
-        };
+        let new_queued_post = create_queued_content(&mut content_info, last_updated_at, will_post_at);
 
         tx.save_content_queue(new_queued_post).unwrap();
 

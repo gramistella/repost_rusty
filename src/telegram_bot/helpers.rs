@@ -1,3 +1,5 @@
+use std::error::Error;
+
 use chrono::{DateTime, Utc};
 use teloxide::adaptors::Throttle;
 use teloxide::payloads::EditMessageTextSetters;
@@ -6,7 +8,7 @@ use teloxide::prelude::Requester;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
 
-use crate::database::{ContentInfo, Database, DEFAULT_FAILURE_EXPIRATION};
+use crate::database::{ContentInfo, Database, DatabaseTransaction, QueuedContent, DEFAULT_FAILURE_EXPIRATION};
 use crate::telegram_bot::{InnerBotManager, UIDefinitions, CHAT_ID};
 use crate::utils::now_in_my_timezone;
 use crate::INTERFACE_UPDATE_INTERVAL;
@@ -134,7 +136,7 @@ impl InnerBotManager {
                         Ok(_) => {}
                         Err(e) => {
                             if e.to_string() != "message to delete not found" {
-                                tracing::warn!("Error deleting message: {}", e);
+                                //tracing::warn!("Error deleting message: {}", e);
                             } else {
                                 tracing::error!("ERROR in helpers.rs: \n{}", e.to_string());
                             }
@@ -259,4 +261,27 @@ fn countdown_until_expiration(database: Database, expiration_datetime: DateTime<
 
     //ex. 1 hour, 2 minutes and 3 seconds
     format!("{hours} {hour_txt}, {minutes} {minute_txt} and {seconds} {second_txt}")
+}
+
+pub fn update_content_status_if_posted(content_info: &mut ContentInfo, tx: &mut DatabaseTransaction, mut queued_content: QueuedContent, now: DateTime<Utc>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if !tx.load_posted_content().unwrap().iter().any(|content| content.original_shortcode == content_info.original_shortcode) {
+        queued_content.last_updated_at = now.to_rfc3339();
+        tx.save_content_queue(queued_content.clone())?;
+    } else {
+        content_info.status = "posted_hidden".to_string();
+    }
+    Ok(())
+}
+
+pub fn create_queued_content(content_info: &mut ContentInfo, last_updated_at: DateTime<Utc>, will_post_at: String) -> QueuedContent {
+    let new_queued_post = QueuedContent {
+        url: content_info.url.clone(),
+        caption: content_info.caption.clone(),
+        hashtags: content_info.hashtags.clone(),
+        original_author: content_info.original_author.clone(),
+        original_shortcode: content_info.original_shortcode.clone(),
+        last_updated_at: last_updated_at.to_rfc3339(),
+        will_post_at,
+    };
+    new_queued_post
 }
