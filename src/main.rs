@@ -4,6 +4,7 @@ extern crate r2d2_sqlite;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use teloxide::prelude::ChatId;
@@ -14,6 +15,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
 use crate::database::Database;
+use crate::telegram_bot::BotManager;
 
 mod database;
 mod scraper;
@@ -31,7 +33,7 @@ const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
 async fn main() -> anyhow::Result<()> {
     let (_file_guard, _stdout_guard) = init_logging();
 
-    let is_offline = false;
+    let is_offline = true;
 
     // Initialize the database
     let db = Database::new(is_offline)?;
@@ -50,7 +52,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Run the scraper and the bot concurrently
             let scraper = tokio::spawn(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone()));
-            let telegram_bot = tokio::spawn(telegram_bot::run_bot(rx, db.clone(), credentials.clone()));
+            let bot_manager = BotManager::new(db.clone(), credentials.clone());
+
+            let telegram_bot = tokio::spawn(async move { bot_manager.run_bot(rx).await });
 
             all_handles.push(scraper);
             all_handles.push(telegram_bot);

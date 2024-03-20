@@ -25,15 +25,15 @@ pub enum Command {
     Settings,
 }
 
-pub async fn help(bot: Bot, msg: Message) -> HandlerResult {
+pub async fn help(bot: Throttle<Bot>, msg: Message) -> HandlerResult {
     bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
     Ok(())
 }
 
-pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database) -> HandlerResult {
+pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, msg: Message) -> HandlerResult {
     if msg.chat.id == ChatId(34957918) {
         bot.send_message(msg.chat.id, format!("Welcome back, {}! 🦀", msg.chat.first_name().unwrap()).to_string()).await?;
-        clear_sent_messages(bot.clone(), database).await.unwrap();
+        clear_sent_messages(bot, database).await.unwrap();
         dialogue.update(State::PageView).await.unwrap();
     } else {
         bot.send_message(msg.chat.id, "You can't use this bot.".to_string()).await?;
@@ -42,7 +42,7 @@ pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, data
     Ok(())
 }
 
-pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database) -> HandlerResult {
+pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, msg: Message) -> HandlerResult {
     let _ = bot.delete_message(CHAT_ID, msg.id).await;
 
     if let Some(state) = dialogue.get().await.unwrap() {
@@ -74,7 +74,7 @@ pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, datab
 }
 
 pub async fn settings(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
-    if let Some(state) = dialogue.get().await.unwrap() {
+    if let Some(mut state) = dialogue.get().await.unwrap() {
         if state != State::PageView {
             let _ = bot.delete_message(CHAT_ID, msg.id).await;
             return Ok(());
@@ -87,7 +87,7 @@ pub async fn settings(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, d
     let _ = clear_sent_messages(bot.clone(), database.clone()).await;
     let _ = bot.delete_message(CHAT_ID, navigation_bar.message_id).await;
 
-    display_settings_message(bot, dialogue, database, ui_definitions).await?;
+    display_settings_message(bot.clone(), dialogue, database, ui_definitions).await?;
 
     Ok(())
 }

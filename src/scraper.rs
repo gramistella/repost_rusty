@@ -291,37 +291,15 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
 #[tracing::instrument(skip(is_offline, credentials, scraper, poster_loop_database))]
 fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: Arc<Mutex<InstagramScraper>>, poster_loop_database: Database) -> JoinHandle<anyhow::Result<()>> {
     let poster_loop = tokio::spawn(async move {
-        loop {
-            // Allow the scraper to login
-            sleep(Duration::from_secs(5)).await;
+        // Allow the scraper to login
+        sleep(Duration::from_secs(5)).await;
 
+        loop {
             let mut transaction = poster_loop_database.begin_transaction().unwrap();
             let content_mapping = transaction.load_content_mapping().unwrap();
             let user_settings = transaction.load_user_settings().unwrap();
 
-            for (message_id, mut content_info) in content_mapping {
-                if content_info.status.contains("accepted_") {
-                    let last_updated_at = now_in_my_timezone(user_settings.clone()) - REFRESH_RATE;
-                    let will_post_at = transaction.get_new_post_time(user_settings.clone()).unwrap();
-                    let new_queued_post = QueuedContent {
-                        url: content_info.url.clone(),
-                        caption: content_info.caption.clone(),
-                        hashtags: content_info.hashtags.clone(),
-                        original_author: content_info.original_author.clone(),
-                        original_shortcode: content_info.original_shortcode.clone(),
-                        last_updated_at: last_updated_at.to_rfc3339(),
-                        will_post_at,
-                    };
-
-                    transaction.save_content_queue(new_queued_post).unwrap();
-                    if content_info.status.contains("shown") {
-                        content_info.status = "queued_shown".to_string();
-                    } else {
-                        content_info.status = "queued_hidden".to_string();
-                    }
-                    let index_map = IndexMap::from([(message_id, content_info.clone())]);
-                    transaction.save_content_mapping(index_map).unwrap();
-                }
+            for (_message_id, mut content_info) in content_mapping {
                 if content_info.status.contains("queued_") {
                     let queued_posts = transaction.load_content_queue().unwrap();
                     for mut queued_post in queued_posts {
@@ -329,6 +307,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
                             if user_settings.can_post {
                                 let scraper_copy = Arc::clone(&scraper);
                                 let mut scraper_guard = scraper_copy.lock().await;
+
                                 if !is_offline {
                                     let full_caption;
                                     let spacer = "\n.\n.\n.\n.\n.\n.\n.\n";
@@ -385,7 +364,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
                                 transaction.save_posted_content(posted_content).unwrap();
                                 println!(" [+] Saved posted content: {}", queued_post.original_shortcode);
                             } else {
-                                let new_will_post_at = transaction.get_new_post_time(user_settings.clone()).unwrap();
+                                let new_will_post_at = transaction.get_new_post_time().unwrap();
                                 queued_post.will_post_at = new_will_post_at;
                                 transaction.save_content_queue(queued_post.clone()).unwrap();
 
@@ -399,6 +378,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
                 }
             }
 
+            // Don't remove this sleep, without it the code does not work and the bot becomes completely unresponsive
             sleep(Duration::from_secs(1)).await;
         }
     });

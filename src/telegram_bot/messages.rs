@@ -10,10 +10,10 @@ use crate::database::Database;
 use crate::telegram_bot::commands::display_settings_message;
 use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions};
 
-pub async fn receive_posting_interval(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_posting_interval(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(received_posting_interval) => {
-            if let State::ReceivePostingInterval { stored_messages_to_delete, original_message_id } = state {
+            if let State::ReceivePostingInterval { stored_messages_to_delete, original_message_id } = dialogue.get().await.unwrap().unwrap() {
                 bot.delete_message(msg.chat.id, original_message_id).await?;
 
                 for message_id in stored_messages_to_delete {
@@ -42,9 +42,8 @@ pub async fn receive_posting_interval(bot: Throttle<Bot>, dialogue: BotDialogue,
                         }
                     }
                 };
-                let mut tx = database.begin_transaction().unwrap();
                 tx.save_user_settings(user_settings).unwrap();
-                display_settings_message(bot.clone(), dialogue.clone(), database, ui_definitions).await?;
+                display_settings_message(bot, dialogue, database, ui_definitions).await?;
             }
         }
         None => {
@@ -55,10 +54,10 @@ pub async fn receive_posting_interval(bot: Throttle<Bot>, dialogue: BotDialogue,
     Ok(())
 }
 
-pub async fn receive_random_interval(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_random_interval(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(received_random_interval) => {
-            if let State::ReceiveRandomInterval { stored_messages_to_delete, original_message_id } = state {
+            if let State::ReceiveRandomInterval { stored_messages_to_delete, original_message_id } = dialogue.get().await.unwrap().unwrap() {
                 bot.delete_message(msg.chat.id, original_message_id).await?;
 
                 for message_id in stored_messages_to_delete {
@@ -86,9 +85,8 @@ pub async fn receive_random_interval(bot: Throttle<Bot>, dialogue: BotDialogue, 
                         }
                     }
                 };
-                let mut tx = database.begin_transaction().unwrap();
                 tx.save_user_settings(user_settings).unwrap();
-                display_settings_message(bot.clone(), dialogue.clone(), database, ui_definitions).await?;
+                display_settings_message(bot, dialogue, database, ui_definitions).await?;
             }
         }
         None => {
@@ -99,10 +97,10 @@ pub async fn receive_random_interval(bot: Throttle<Bot>, dialogue: BotDialogue, 
     Ok(())
 }
 
-pub async fn receive_rejected_content_lifespan(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_rejected_content_lifespan(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(received_random_interval) => {
-            if let State::ReceiveRejectedContentLifespan { stored_messages_to_delete, original_message_id } = state {
+            if let State::ReceiveRejectedContentLifespan { stored_messages_to_delete, original_message_id } = dialogue.get().await.unwrap().unwrap() {
                 bot.delete_message(msg.chat.id, original_message_id).await?;
 
                 for message_id in stored_messages_to_delete {
@@ -130,9 +128,9 @@ pub async fn receive_rejected_content_lifespan(bot: Throttle<Bot>, dialogue: Bot
                         }
                     }
                 };
-                let mut tx = database.begin_transaction().unwrap();
+
                 tx.save_user_settings(user_settings).unwrap();
-                display_settings_message(bot.clone(), dialogue.clone(), database, ui_definitions).await?;
+                display_settings_message(bot, dialogue, database, ui_definitions).await?;
             }
         }
         None => {
@@ -143,10 +141,10 @@ pub async fn receive_rejected_content_lifespan(bot: Throttle<Bot>, dialogue: Bot
     Ok(())
 }
 
-pub async fn receive_posted_content_lifespan(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_posted_content_lifespan(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(received_random_interval) => {
-            if let State::ReceivePostedContentLifespan { stored_messages_to_delete, original_message_id } = state {
+            if let State::ReceivePostedContentLifespan { stored_messages_to_delete, original_message_id } = dialogue.get().await.unwrap().unwrap() {
                 bot.delete_message(msg.chat.id, original_message_id).await?;
 
                 for message_id in stored_messages_to_delete {
@@ -174,9 +172,9 @@ pub async fn receive_posted_content_lifespan(bot: Throttle<Bot>, dialogue: BotDi
                         }
                     }
                 };
-                let mut tx = database.begin_transaction().unwrap();
+
                 tx.save_user_settings(user_settings).unwrap();
-                display_settings_message(bot.clone(), dialogue.clone(), database, ui_definitions).await?;
+                display_settings_message(bot, dialogue, database, ui_definitions).await?;
             }
         }
         None => {
@@ -187,10 +185,10 @@ pub async fn receive_posted_content_lifespan(bot: Throttle<Bot>, dialogue: BotDi
     Ok(())
 }
 
-pub async fn receive_caption(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_caption(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(caption) => {
-            if let State::ReceiveCaption { stored_messages_to_delete, original_message_id } = state {
+            if let State::ReceiveCaption { stored_messages_to_delete, original_message_id } = dialogue.get().await.unwrap().unwrap() {
                 for message_id in stored_messages_to_delete {
                     bot.delete_message(msg.chat.id, message_id).await?;
                 }
@@ -205,7 +203,6 @@ pub async fn receive_caption(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Mes
                 } else {
                     content_info.caption = caption;
                 }
-                let mut tx = database.begin_transaction().unwrap();
                 tx.save_content_mapping(IndexMap::from([(original_message_id, content_info.clone())]))?;
 
                 let go_back_action_text = ui_definitions.buttons.get("go_back").unwrap();
@@ -238,10 +235,10 @@ pub async fn receive_caption(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Mes
     Ok(())
 }
 
-pub async fn receive_hashtags(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, state: State, database: Database, ui_definitions: UIDefinitions) -> HandlerResult {
+pub async fn receive_hashtags(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {
         Some(hashtags) => {
-            if let State::ReceiveHashtags { stored_messages_to_delete, original_message_id } = state {
+            if let State::ReceiveHashtags { stored_messages_to_delete, original_message_id } = dialogue.get().await.unwrap().unwrap() {
                 for message_id in stored_messages_to_delete {
                     bot.delete_message(msg.chat.id, message_id).await?;
                 }
@@ -257,7 +254,6 @@ pub async fn receive_hashtags(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Me
                     video_info.hashtags = hashtags;
                 }
 
-                let mut tx = database.begin_transaction().unwrap();
                 tx.save_content_mapping(IndexMap::from([(original_message_id, video_info.clone())]))?;
 
                 let go_back_action_text = ui_definitions.buttons.get("go_back").unwrap();

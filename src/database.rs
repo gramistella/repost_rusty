@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Duration, FixedOffset, Timelike, Utc};
 use indexmap::IndexMap;
 use r2d2::{Pool, PooledConnection};
@@ -552,10 +554,13 @@ impl DatabaseTransaction {
             // Remove the post from the queued_posts vector
             queued_posts.remove(removed_post_index);
 
+            // Sort queued_posts by will_post_at
+            queued_posts.sort_by(|a, b| a.will_post_at.cmp(&b.will_post_at));
+
             // Recalculate will_post_at for remaining posts
             if removed_post_index <= queued_posts.len() {
                 for post in queued_posts.iter_mut().skip(removed_post_index) {
-                    let new_post_time = self.get_new_post_time(user_settings.clone()).unwrap();
+                    let new_post_time = self.get_new_post_time().unwrap();
                     post.will_post_at = new_post_time.clone();
                     post.last_updated_at = (now_in_my_timezone(user_settings.clone()) - REFRESH_RATE).to_rfc3339();
 
@@ -930,25 +935,94 @@ impl DatabaseTransaction {
         iter.next().transpose()
     }
 
-    pub fn get_new_post_time(&mut self, user_settings: UserSettings) -> Result<String, rusqlite::Error> {
+    pub fn get_new_post_time(&mut self) -> Result<String, rusqlite::Error> {
+        let user_settings = self.load_user_settings()?;
+
         let posted_content = self.load_posted_content()?;
         let queued_content = self.load_content_queue()?;
 
         let current_time = now_in_my_timezone(user_settings.clone());
 
         let mut post_times = Vec::new();
-
-        if posted_content.len() == 0 {
-            post_times.push(current_time);
-        } else {
-            post_times.push(DateTime::parse_from_rfc3339(&posted_content.clone().last().unwrap().posted_at).unwrap().with_timezone(&Utc));
+        for post in &posted_content {
+            let post_time = DateTime::parse_from_rfc3339(&post.posted_at).unwrap().with_timezone(&Utc);
+            post_times.push(post_time);
+        }
+        for post in &queued_content {
+            let post_time = DateTime::parse_from_rfc3339(&post.will_post_at).unwrap().with_timezone(&Utc);
+            post_times.push(post_time);
         }
 
-        for post in queued_content.clone() {
-            post_times.push(DateTime::parse_from_rfc3339(&post.will_post_at).unwrap().with_timezone(&Utc));
+        post_times.sort();
+
+        let posting_interval = Duration::try_seconds(user_settings.posting_interval * 60).unwrap();
+        // Filter out the post times that are before the current time
+        post_times = post_times.into_iter().filter(|&time| time >= current_time - posting_interval).collect();
+
+        let random_interval = user_settings.random_interval_variance * 60;
+        let mut rng = rand::thread_rng();
+        let random_variance = rng.gen_range(-random_interval..=random_interval);
+
+        let randomized_posting_interval = Duration::try_seconds(user_settings.posting_interval * 60 + random_variance).unwrap();
+
+        // Find the first gap in the post times
+        for windows in post_times.windows(2) {
+            let gap = windows[1] - windows[0];
+            if gap > posting_interval + Duration::try_seconds(random_interval).unwrap() {
+                let new_post_time = windows[0] + randomized_posting_interval;
+                tracing::info!("Gap found, new post time: {}", new_post_time.to_rfc3339());
+                return Ok(new_post_time.to_rfc3339());
+            }
         }
 
-        post_times.sort(); // Sort the combined times
+        // If no gap is found, we return the latest post time + posting interval
+        let new_post_time = match post_times.last() {
+            None => {
+                let new_post_time = current_time + Duration::try_seconds(60).unwrap();
+                tracing::info!("No recent posts found, posting in 1 minute: {}", new_post_time.to_rfc3339());
+                new_post_time
+            }
+            Some(&last_post_time) => {
+                let new_post_time = last_post_time + randomized_posting_interval;
+                tracing::info!("No gap found, new post time: {}", new_post_time.to_rfc3339());
+                new_post_time
+            }
+        };
+
+        Ok(new_post_time.to_rfc3339())
+    }
+
+    pub fn _get_new_post_time(&mut self, user_settings: UserSettings) -> Result<String, rusqlite::Error> {
+        let posted_content = self.load_posted_content()?;
+        let mut queued_content = self.load_content_queue()?;
+
+        let current_time = now_in_my_timezone(user_settings.clone());
+        let mut post_times = Vec::new();
+
+        if posted_content.is_empty() && queued_content.is_empty() {
+            return Ok((current_time + Duration::try_seconds(60).unwrap()).to_rfc3339());
+        }
+
+        if !posted_content.is_empty() {
+            let latest_posted_at = DateTime::parse_from_rfc3339(&posted_content.last().unwrap().posted_at).unwrap().with_timezone(&Utc);
+            if latest_posted_at > current_time - Duration::try_minutes(user_settings.posting_interval).unwrap() {
+                post_times.push(latest_posted_at);
+            } else {
+                post_times.push(current_time - Duration::try_minutes(user_settings.posting_interval).unwrap());
+            }
+        }
+
+        for post in &queued_content {
+            let post_time = DateTime::parse_from_rfc3339(&post.will_post_at).unwrap().with_timezone(&Utc);
+            if !post_times.contains(&post_time) {
+                post_times.push(post_time);
+            }
+        }
+
+        // Sort post times only if necessary
+        if post_times.len() > 1 {
+            post_times.sort();
+        }
 
         let posting_interval = Duration::try_seconds(user_settings.posting_interval * 60).unwrap();
         let random_interval = user_settings.random_interval_variance * 60;
@@ -958,37 +1032,39 @@ impl DatabaseTransaction {
         let mut gap_start = None;
         for windows in post_times.windows(2) {
             let gap = windows[1] - windows[0];
-            tracing::info!("Gap: {:?}", gap);
+            println!("Gap: {:?}, window 1 {}, window 0  {}", gap, windows[1].to_rfc3339(), windows[0].to_rfc3339());
             if gap > posting_interval + Duration::try_seconds(random_interval).unwrap() {
-                tracing::info!("Gap found: {:?}", gap);
-                gap_start = Some(windows[0]);
-                break;
+                // Here we check if the gap is not in the past
+                let gap_start_time = windows[0];
+                let gap_end_time = windows[1];
+                if gap_end_time > current_time {
+                    println!("Gap found: {:?}", gap);
+                    gap_start = Some(gap_start_time);
+                    break;
+                }
             }
         }
 
-        let mut new_post_time = if posted_content.len() == 0 && queued_content.len() == 0 {
-            // If both posted_content and queued_content are empty, schedule 60 seconds from now
-            now_in_my_timezone(user_settings.clone()) + Duration::try_seconds(60).unwrap()
-        } else if let Some(start) = gap_start {
-            let random_variance = rng.gen_range(-random_interval..=random_interval);
-            let random_variance_seconds = Duration::try_seconds(random_variance).unwrap();
-            start.with_timezone(&Utc) + posting_interval + random_variance_seconds
+        let new_post_time = if let Some(gap_start) = gap_start {
+            let random_variance = rng.gen_range(-(random_interval as i64)..=(random_interval as i64));
+            let random_variance_duration = Duration::try_seconds(random_variance.abs()).unwrap();
+            let new_post_time = gap_start + posting_interval + random_variance_duration;
+            println!("Gap found, new post time: {}", new_post_time.to_rfc3339());
+            new_post_time
         } else {
-            let latest_will_post_at = if queued_content.len() != 0 {
-                self.get_latest_time_from_db("SELECT will_post_at FROM content_queue ORDER BY will_post_at DESC LIMIT 1")?.unwrap()
-            } else {
-                self.get_latest_time_from_db("SELECT posted_at FROM posted_content ORDER BY posted_at DESC LIMIT 1")?.unwrap()
-            };
-            let random_variance = rng.gen_range(-random_interval..=random_interval);
-            let random_variance_seconds = Duration::try_seconds(random_variance).unwrap();
-            latest_will_post_at + posting_interval + random_variance_seconds
+            match post_times.iter().max() {
+                None => current_time + Duration::try_seconds(60).unwrap(),
+                Some(last_post) => {
+                    let random_variance = rng.gen_range(-(random_interval as i64)..=(random_interval as i64));
+                    let random_variance_duration = Duration::try_seconds(random_variance.abs()).unwrap();
+                    if random_variance >= 0 {
+                        *last_post + posting_interval + random_variance_duration
+                    } else {
+                        *last_post + posting_interval
+                    }
+                }
+            }
         };
-
-        // Check if the new post time is in the past, adjust if necessary
-        let current_time = now_in_my_timezone(user_settings);
-        if new_post_time < current_time {
-            new_post_time = current_time + Duration::try_seconds(60).unwrap();
-        }
 
         Ok(new_post_time.to_rfc3339())
     }
