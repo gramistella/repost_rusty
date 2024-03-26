@@ -14,6 +14,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use tracing::Instrument;
 
 use crate::database::{Database, DatabaseTransaction, FailedContent, PostedContent, QueuedContent, UserSettings};
 use crate::telegram_bot::state::ContentStatus;
@@ -46,7 +47,11 @@ pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database:
 
     let poster_loop = poster_loop(is_offline, credentials, Arc::clone(&scraper), database.clone());
 
-    let _ = tokio::try_join!(sender_loop, scraper_loop, poster_loop);
+    let sender_span = tracing::span!(tracing::Level::INFO, "sender");
+    let scraper_span = tracing::span!(tracing::Level::INFO, "scraper");
+    let poster_span = tracing::span!(tracing::Level::INFO, "poster");
+
+    let _ = tokio::try_join!(sender_loop.instrument(sender_span), scraper_loop.instrument(scraper_span), poster_loop.instrument(poster_span));
 }
 
 async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, username: String, password: String, cookie_store_path: String, scraper: Arc<Mutex<InstagramScraper>>) -> (JoinHandle<anyhow::Result<()>>, JoinHandle<anyhow::Result<()>>) {
@@ -97,9 +102,6 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
         println!("Sending offline data");
 
         scraper_loop = tokio::spawn(async move {
-            let span = tracing::span!(tracing::Level::INFO, "offline_scraper_loop");
-            let _enter = span.enter();
-
             let mut loop_iterations = 0;
             loop {
                 loop_iterations += 1;

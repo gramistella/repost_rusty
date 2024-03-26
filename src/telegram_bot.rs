@@ -17,10 +17,11 @@ use teloxide::{
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
+use tracing::Instrument;
 
 use crate::database::{ContentInfo, Database, FailedContent, DEFAULT_FAILURE_EXPIRATION};
 use crate::telegram_bot::errors::handle_message_is_not_modified_error;
-use crate::telegram_bot::helpers::{generate_full_video_caption, update_content_status_if_posted};
+use crate::telegram_bot::helpers::{generate_full_content_caption, update_content_status_if_posted};
 use crate::telegram_bot::state::{ContentStatus, State};
 use crate::utils::now_in_my_timezone;
 use crate::{CHAT_ID, INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
@@ -122,15 +123,15 @@ impl InnerBotManager {
 
     pub(crate) async fn run_bot(&mut self, rx: Receiver<(String, String, String, String)>) {
         let mut cloned_self = self.clone();
+        let receive_videos_span = tracing::span!(tracing::Level::INFO, "receive_videos");
+        let dispatcher_span = tracing::span!(tracing::Level::INFO, "dispatcher");
         tokio::select! {
-            _ = cloned_self.start_dispatcher() => {},
-            _ = self.receive_videos(rx) => {},
+            _ = cloned_self.start_dispatcher().instrument(dispatcher_span) => {},
+            _ = self.receive_videos(rx).instrument(receive_videos_span) => {},
         }
     }
 
     async fn start_dispatcher(&mut self) {
-        let span = tracing::span!(tracing::Level::INFO, "InnerBotManager::start_dispatcher");
-        let _enter = span.enter();
         let cloned_mutex = Arc::clone(&self.execution_mutex);
         let _ = cloned_mutex.lock().await;
         let mut dispatcher_builder = Dispatcher::builder(self.bot.clone(), self.schema())
@@ -143,9 +144,6 @@ impl InnerBotManager {
 
     //noinspection SpellCheckingInspection
     async fn receive_videos(&mut self, mut rx: Receiver<(String, String, String, String)>) {
-        let span = tracing::span!(tracing::Level::INFO, "receive_videos");
-        let _enter = span.enter();
-
         // Give a head start to the dispatcher
         sleep(Duration::from_secs(1)).await;
 
@@ -192,9 +190,10 @@ impl InnerBotManager {
 
                 //println!("Received URL: \n\"{}\"\ncaption: \n\"{}\"\n", received_url, received_caption);
             }
+            tracing::info!("Updating view...");
             let _success = match self.update_view().await {
                 Ok(..) => {
-                    tracing::info!("Updated view successfully")
+                    tracing::info!("Updated view successfully");
                 }
                 Err(e) => {
                     tracing::error!("Error updating view, {}", e);
@@ -204,7 +203,7 @@ impl InnerBotManager {
         }
     }
     async fn update_view(&mut self) -> HandlerResult {
-        let span = tracing::span!(tracing::Level::INFO, "InnerBotManager::update_view");
+        let span = tracing::span!(tracing::Level::INFO, "update_view");
         let _enter = span.enter();
 
         let mutex_clone = Arc::clone(&self.execution_mutex);
@@ -285,23 +284,24 @@ impl InnerBotManager {
         };
         let video_actions = self.get_action_buttons(&["accept", "reject", "edit"], sent_message_id);
         video_info.status = ContentStatus::Pending { shown: true };
-        let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "pending", video_info);
-        self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "pending", video_info);
+        self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_content_caption, video_actions).await?;
         Ok((sent_message_id, video_info.clone()))
     }
 
     async fn process_failed(&mut self, message_id: MessageId, content_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "failed", content_info);
+
         if content_info.status == (ContentStatus::Failed { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_failed_shown");
             let _enter = span.enter();
 
             let mut tx = self.database.begin_transaction().unwrap();
             let mut content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
-            // Parse last_updated_at at into a DateTime
+
             let last_updated_at = DateTime::parse_from_rfc3339(&content.last_updated_at).unwrap();
             let will_expire_at = DateTime::parse_from_rfc3339(&content.failed_at).unwrap().checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
             let now = now_in_my_timezone(tx.load_user_settings()?);
-            // Check
 
             if content.expired {
                 return Ok((message_id, content_info.clone()));
@@ -317,9 +317,8 @@ impl InnerBotManager {
             } else if now > last_updated_at + INTERFACE_UPDATE_INTERVAL {
                 content_info.status = ContentStatus::Failed { shown: true };
 
-                let full_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "failed", content_info);
                 let video_actions = self.get_action_buttons(&["remove_from_view"], message_id);
-                self.edit_message_caption_and_markup(CHAT_ID, message_id, full_caption, video_actions).await?;
+                self.edit_message_caption_and_markup(CHAT_ID, message_id, full_content_caption, video_actions).await?;
 
                 content.last_updated_at = now.to_rfc3339();
             }
@@ -332,10 +331,8 @@ impl InnerBotManager {
             let sent_message_id = self.send_video_and_get_id(input_file).await?;
             let video_actions = self.get_action_buttons(&["remove_from_view"], sent_message_id);
             content_info.status = ContentStatus::Failed { shown: true };
-            //let full_video_caption = format!("{}\n\n{}\n\n", full_video_caption, ui_definitions.labels.get("failed_caption").unwrap());
 
-            let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "failed", content_info);
-            self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
+            self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_content_caption, video_actions).await?;
             Ok((sent_message_id, content_info.clone()))
         }
     }
@@ -352,38 +349,41 @@ impl InnerBotManager {
             let sent_message_id = self.send_video_and_get_id(input_file).await?;
             let video_actions = self.get_action_buttons(&["accept", "reject", "edit"], sent_message_id);
             content_info.status = ContentStatus::Pending { shown: true };
-            let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "pending", content_info);
-            self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
+            let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "pending", content_info);
+            self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_content_caption, video_actions).await?;
             Ok((sent_message_id, content_info.clone()))
         }
     }
 
     async fn process_rejected(&mut self, mut message_id: MessageId, content_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+        let mut tx = self.database.begin_transaction().unwrap();
+
+        let user_settings = tx.load_user_settings()?;
+        let now = now_in_my_timezone(user_settings.clone());
+
+        let mut rejected_content = tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
+        let rejected_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
+
+        let expiry_duration = chrono::Duration::try_seconds(user_settings.rejected_content_lifespan * 60).unwrap();
+        let will_expire_at = rejected_at.checked_add_signed(expiry_duration).unwrap();
+
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "rejected", content_info);
+
         if content_info.status == (ContentStatus::Rejected { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_rejected_shown");
             let _enter = span.enter();
 
-            let mut tx = self.database.begin_transaction().unwrap();
-            let mut rejected_content = tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
-            let datetime = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
             //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
 
-            let will_expire_at = datetime.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
-
-            let user_settings = tx.load_user_settings().unwrap();
-            if will_expire_at < now_in_my_timezone(user_settings.clone()) {
+            if will_expire_at < now {
                 content_info.status = ContentStatus::RemovedFromView;
                 self.bot.delete_message(CHAT_ID, message_id).await?;
                 //tx.remove_content_info_with_shortcode(rejected_content.original_shortcode.clone())?;
                 rejected_content.expired = true;
             } else {
-                let now = now_in_my_timezone(user_settings.clone());
-
                 let last_updated_at = DateTime::parse_from_rfc3339(&rejected_content.last_updated_at).unwrap();
                 if last_updated_at < now - INTERFACE_UPDATE_INTERVAL {
-                    let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "rejected", content_info);
-
-                    let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
+                    let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_content_caption.clone()).await {
                         Ok(_) => {
                             let undo_action_text = self.ui_definitions.buttons.get("undo").unwrap();
                             let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
@@ -396,18 +396,18 @@ impl InnerBotManager {
                         }
                         Err(e) => {
                             println!("Error: {}", e);
-                            let new_message = self.bot.send_video(CHAT_ID, InputFile::url(rejected_content.url.clone().parse().unwrap())).caption(full_video_caption).await?;
+                            let new_message = self.bot.send_video(CHAT_ID, InputFile::url(rejected_content.url.clone().parse().unwrap())).caption(full_content_caption).await?;
 
                             let undo_action_text = self.ui_definitions.buttons.get("undo").unwrap();
                             let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
-                            let undo_action = [
+                            let buttons = [
                                 InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", new_message.id)),
                                 InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id)),
                             ];
 
                             tx.save_content_mapping(IndexMap::from([(new_message.id, content_info.clone())]))?;
 
-                            let _msg = self.bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+                            let _msg = self.bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([buttons])).await?;
                         }
                     };
                     rejected_content.last_updated_at = now.to_rfc3339();
@@ -420,21 +420,13 @@ impl InnerBotManager {
             let span = tracing::span!(tracing::Level::INFO, "process_rejected_hidden");
             let _enter = span.enter();
 
-            let mut tx = self.database.begin_transaction().unwrap();
             content_info.status = ContentStatus::Rejected { shown: true };
 
-            let user_settings = tx.load_user_settings()?;
-            let expiry_duration = Duration::from_secs((user_settings.rejected_content_lifespan * 60) as u64);
-            let now = now_in_my_timezone(user_settings.clone());
-
-            let mut content = tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
-            let rejected_at = DateTime::parse_from_rfc3339(&content.rejected_at)?;
-
-            if content.expired {
+            if rejected_content.expired {
                 return Ok((message_id, content_info.clone()));
             }
 
-            if now > rejected_at + expiry_duration {
+            if now > will_expire_at {
                 content_info.status = ContentStatus::RemovedFromView;
                 match self.bot.delete_message(CHAT_ID, message_id).await {
                     Ok(_) => {
@@ -446,14 +438,13 @@ impl InnerBotManager {
                         // println!(" process_rejected_hidden - Error deleting rejected message with ID: {}: {}", message_id, e);
                     }
                 }
-                content.expired = true;
-                tx.save_rejected_content(content.clone())?;
+                rejected_content.expired = true;
+                tx.save_rejected_content(rejected_content.clone())?;
                 //println!("Permanently removed post from video_info: {}", content.url);
             } else {
                 content_info.status = ContentStatus::Rejected { shown: true };
 
-                let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "rejected", content_info);
-                let new_message = self.bot.send_video(CHAT_ID, InputFile::url(content.url.clone().parse().unwrap())).caption(full_video_caption).await?;
+                let new_message = self.bot.send_video(CHAT_ID, InputFile::url(rejected_content.url.clone().parse().unwrap())).caption(full_content_caption).await?;
 
                 let undo_action_text = self.ui_definitions.buttons.get("undo").unwrap();
                 let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
@@ -472,6 +463,15 @@ impl InnerBotManager {
     }
 
     async fn process_queued(&mut self, message_id: MessageId, content_info: &mut ContentInfo, input_file: &InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "queued", content_info);
+
+        let include_buttons;
+        if full_content_caption.contains("(Posting now...)") {
+            include_buttons = false;
+        } else {
+            include_buttons = true;
+        }
+
         if content_info.status == (ContentStatus::Queued { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_queued_shown");
             let _enter = span.enter();
@@ -484,14 +484,12 @@ impl InnerBotManager {
 
             let last_updated_at = DateTime::parse_from_rfc3339(&queued_content.last_updated_at).unwrap();
 
-            let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "queued", content_info);
-
             if last_updated_at < now - INTERFACE_UPDATE_INTERVAL {
                 let remove_from_queue_action_text = self.ui_definitions.buttons.get("remove_from_queue").unwrap();
-                let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
+                let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_content_caption.clone()).await {
                     Ok(_) => {
                         let remove_action = [InlineKeyboardButton::callback(remove_from_queue_action_text, format!("remove_from_queue_{}", message_id))];
-                        if full_video_caption.contains("(Posting now...)") {
+                        if full_content_caption.contains("(Posting now...)") {
                             // We don't want to show the remove button if the video is being posted
                         } else {
                             let _msg = self.bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([remove_action])).await?;
@@ -508,12 +506,10 @@ impl InnerBotManager {
                             tracing::warn!("Error sending request: {}", e);
                         } else {
                             tracing::warn!("Error editing message caption: {}", e);
-                            let new_message = self.bot.send_video(CHAT_ID, InputFile::url(queued_content.url.clone().parse().unwrap())).caption(full_video_caption.clone()).await?;
+                            let new_message = self.bot.send_video(CHAT_ID, InputFile::url(queued_content.url.clone().parse().unwrap())).caption(full_content_caption.clone()).await?;
                             let undo_action = [InlineKeyboardButton::callback(remove_from_queue_action_text, format!("remove_from_queue_{}", new_message.id))];
                             tx.save_content_mapping(IndexMap::from([(new_message.id, content_info.clone())]))?;
-                            if full_video_caption.contains("(Posting now...)") {
-                                // We don't want to show the remove button if the video is being posted
-                            } else {
+                            if include_buttons {
                                 let _msg = self.bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
                             }
                         }
@@ -530,41 +526,46 @@ impl InnerBotManager {
 
             content_info.status = ContentStatus::Queued { shown: true };
 
-            let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "queued", content_info);
-
             let sent_message_id = self.send_video_and_get_id(input_file.clone()).await?;
             let remove_from_queue_action = self.get_action_buttons(&["remove_from_queue"], sent_message_id);
-            self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_video_caption, remove_from_queue_action).await?;
+
+            if include_buttons {
+                self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_content_caption, remove_from_queue_action).await?;
+            }
+
             Ok((sent_message_id, content_info.clone()))
         }
     }
 
     async fn process_posted(&mut self, mut message_id: MessageId, video_info: &mut ContentInfo, input_file: &InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "posted", video_info);
+        let mut tx = self.database.begin_transaction().unwrap();
+
+        let mut posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+
+        let user_settings = tx.load_user_settings().unwrap();
+        let now = now_in_my_timezone(user_settings.clone());
+
         if video_info.status == (ContentStatus::Posted { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_posted_shown");
             let _enter = span.enter();
 
             //println!("process_posted_shown - Message ID: {}", message_id);
-            let mut tx = self.database.begin_transaction().unwrap();
-            let mut posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+
             let posted_at = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
             //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
 
             let will_expire_at = posted_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
+            let last_updated_at = DateTime::parse_from_rfc3339(&posted_content.last_updated_at).unwrap();
 
-            let user_settings = tx.load_user_settings().unwrap();
-            if will_expire_at < now_in_my_timezone(user_settings.clone()) {
+            if will_expire_at < now {
                 video_info.status = ContentStatus::RemovedFromView;
                 self.bot.delete_message(CHAT_ID, message_id).await?;
                 posted_content.expired = true;
                 // println!("Posted content has expired");
             } else {
-                let now = now_in_my_timezone(user_settings.clone());
-
-                let last_updated_at = DateTime::parse_from_rfc3339(&posted_content.last_updated_at).unwrap();
                 if last_updated_at < now - INTERFACE_UPDATE_INTERVAL {
-                    let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "posted", video_info);
-                    let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
+                    let _ = match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_content_caption.clone()).await {
                         Ok(_) => {
                             let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
                             let remove_action = [InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", message_id))];
@@ -572,7 +573,7 @@ impl InnerBotManager {
                             let _msg = self.bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([remove_action])).await?;
                         }
                         Err(_) => {
-                            let new_message = self.bot.send_video(CHAT_ID, InputFile::url(posted_content.url.clone().parse().unwrap())).caption(full_video_caption).await?;
+                            let new_message = self.bot.send_video(CHAT_ID, InputFile::url(posted_content.url.clone().parse().unwrap())).caption(full_content_caption).await?;
 
                             let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
                             let undo_action = [InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id))];
@@ -594,16 +595,10 @@ impl InnerBotManager {
             let span = tracing::span!(tracing::Level::INFO, "process_posted_hidden");
             let _enter = span.enter();
             //println!("process_posted_hidden - Message ID: {}", message_id);
-            let mut tx = self.database.begin_transaction().unwrap();
+
             video_info.status = ContentStatus::Posted { shown: true };
 
-            let mut posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
-
-            let user_settings = tx.load_user_settings().unwrap();
-            let now = now_in_my_timezone(user_settings.clone());
-
-            let full_video_caption = generate_full_video_caption(self.database.clone(), self.ui_definitions.clone(), "posted", video_info);
-            match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
+            match self.bot.edit_message_caption(CHAT_ID, message_id).caption(full_content_caption.clone()).await {
                 // If the message is already sent and changes status we can edit the caption
                 Ok(_) => {
                     let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
@@ -617,7 +612,7 @@ impl InnerBotManager {
                 // If the message is not sent, we need to send it and save the new message ID
                 Err(_e) => {
                     if _e.to_string().contains("message to edit not found") {
-                        let new_message = self.bot.send_video(CHAT_ID, input_file.to_owned()).caption(full_video_caption.clone()).await.unwrap();
+                        let new_message = self.bot.send_video(CHAT_ID, input_file.to_owned()).caption(full_content_caption.clone()).await.unwrap();
 
                         let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
                         let undo_action = [InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id))];
@@ -673,7 +668,7 @@ impl InnerBotManager {
 
 impl BotManager {
     pub fn new(database: Database, credentials: HashMap<String, String>) -> Self {
-        let span = tracing::span!(tracing::Level::INFO, "BotManager::new");
+        let span = tracing::span!(tracing::Level::INFO, "BotManager:new");
         let _enter = span.enter();
         let inner = InnerBotManager::new(database, credentials);
         let inner = Arc::new(Mutex::new(inner));
@@ -681,9 +676,8 @@ impl BotManager {
     }
 
     pub async fn run_bot(&self, rx: Receiver<(String, String, String, String)>) {
-        let span = tracing::span!(tracing::Level::INFO, "BotManager::run_bot");
-        let _enter = span.enter();
+        let span = tracing::span!(tracing::Level::INFO, "BotManager:");
         let mut inner = self.inner.lock().await;
-        inner.run_bot(rx).await;
+        inner.run_bot(rx).instrument(span).await;
     }
 }

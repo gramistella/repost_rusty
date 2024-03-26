@@ -23,7 +23,7 @@ mod utils;
 
 const CHAT_ID: ChatId = ChatId(34957918);
 const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
-const REFRESH_RATE: Duration = Duration::from_secs(2);
+const REFRESH_RATE: Duration = Duration::from_millis(500);
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 90);
 const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
 
@@ -31,7 +31,7 @@ const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
 async fn main() -> anyhow::Result<()> {
     let (_file_guard, _stdout_guard) = init_logging();
 
-    let is_offline = false;
+    let is_offline = true;
 
     // Initialize the database
     let db = Database::new(is_offline)?;

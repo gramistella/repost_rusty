@@ -15,6 +15,9 @@ use crate::utils::now_in_my_timezone;
 use crate::INTERFACE_UPDATE_INTERVAL;
 
 pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyhow::Result<()> {
+    let span = tracing::span!(tracing::Level::INFO, "clear_sent_messages");
+    let _enter = span.enter();
+
     let mut tx = database.begin_transaction().unwrap();
     let mut content_mapping = tx.load_content_mapping().unwrap();
     for (message_id, video_info) in &mut content_mapping {
@@ -156,7 +159,7 @@ impl InnerBotManager {
     }
 }
 
-pub fn generate_full_video_caption(database: Database, ui_definitions: UIDefinitions, caption_type: &str, video_info: &ContentInfo) -> String {
+pub fn generate_full_content_caption(database: Database, ui_definitions: UIDefinitions, caption_type: &str, video_info: &ContentInfo) -> String {
     let span = tracing::span!(tracing::Level::INFO, "generate_full_video_caption");
     let _enter = span.enter();
     let caption_body = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);

@@ -9,14 +9,16 @@ use tokio::sync::Mutex;
 
 use crate::database::{ContentInfo, Database, RejectedContent};
 use crate::telegram_bot::commands::display_settings_message;
-use crate::telegram_bot::helpers::{clear_sent_messages, create_queued_content, generate_full_video_caption, update_content_status_if_posted};
+use crate::telegram_bot::helpers::{clear_sent_messages, create_queued_content, generate_full_content_caption, update_content_status_if_posted};
 use crate::telegram_bot::state::ContentStatus;
 use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
 use crate::{CHAT_ID, INTERFACE_UPDATE_INTERVAL};
 
-#[tracing::instrument]
 pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>, q: CallbackQuery) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_page_view");
+    let _enter = span.enter();
+
     let _mutex_guard = execution_mutex.lock().await;
 
     let chat_id = q.message.clone().unwrap().chat.id;
@@ -71,8 +73,11 @@ pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, databas
 
     Ok(())
 }
-#[tracing::instrument]
+
 pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_definitions: UIDefinitions, dialogue: BotDialogue, q: CallbackQuery) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_accepted_view");
+    let _enter = span.enter();
+
     let _chat_id = q.message.clone().unwrap().chat.id;
 
     // Extract the message id from the callback data
@@ -97,7 +102,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     let user_settings = tx.load_user_settings().unwrap();
     let now = now_in_my_timezone(user_settings.clone());
 
-    let full_video_caption = generate_full_video_caption(database, ui_definitions.clone(), "queued", &content_info);
+    let full_video_caption = generate_full_content_caption(database, ui_definitions.clone(), "queued", &content_info);
 
     let remove_from_queue_action_text = ui_definitions.buttons.get("remove_from_queue").unwrap();
     let _ = match bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
@@ -123,8 +128,10 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     Ok(())
 }
 
-#[tracing::instrument]
 pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: CallbackQuery) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_rejected_view");
+    let _enter = span.enter();
+
     let _chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -162,8 +169,10 @@ pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: 
 
     Ok(())
 }
-#[tracing::instrument]
+
 pub async fn handle_undo(bot: Throttle<Bot>, database: Database, ui_definitions: UIDefinitions, q: CallbackQuery) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_undo");
+    let _enter = span.enter();
     let chat_id = q.message.clone().unwrap().chat.id;
 
     // Extract the message id from the callback data
@@ -176,7 +185,7 @@ pub async fn handle_undo(bot: Throttle<Bot>, database: Database, ui_definitions:
 
     tx.save_content_mapping(content_mapping).unwrap();
 
-    let full_video_caption = generate_full_video_caption(database.clone(), ui_definitions.clone(), "pending", &video_info);
+    let full_video_caption = generate_full_content_caption(database.clone(), ui_definitions.clone(), "pending", &video_info);
     bot.edit_message_caption(chat_id, message_id).caption(full_video_caption).await?;
 
     let accept_action_text = ui_definitions.buttons.get("accept").unwrap();
@@ -204,8 +213,11 @@ pub async fn handle_undo(bot: Throttle<Bot>, database: Database, ui_definitions:
 
     Ok(())
 }
-#[tracing::instrument]
+
 pub async fn handle_remove_from_view(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, q: CallbackQuery) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_remove_from_view");
+    let _enter = span.enter();
+
     let chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -220,8 +232,11 @@ pub async fn handle_remove_from_view(bot: Throttle<Bot>, dialogue: BotDialogue, 
 
     Ok(())
 }
-#[tracing::instrument]
+
 pub async fn handle_video_action(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, q: CallbackQuery, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_video_action");
+    let _enter = span.enter();
+
     if let Some(_data) = &q.data {
         let (action, _message_id) = parse_callback_query(&q);
 
@@ -250,8 +265,11 @@ pub async fn handle_video_action(bot: Throttle<Bot>, dialogue: BotDialogue, data
 
     Ok(())
 }
-#[tracing::instrument]
+
 pub async fn handle_settings(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, q: CallbackQuery, ui_definitions: UIDefinitions) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_settings");
+    let _enter = span.enter();
+
     let (action, message_id) = parse_callback_query(&q);
 
     if action == "go_back" {
@@ -319,8 +337,10 @@ pub async fn handle_settings(bot: Throttle<Bot>, dialogue: BotDialogue, database
     Ok(())
 }
 
-#[tracing::instrument]
 pub async fn handle_edit_view(bot: Throttle<Bot>, database: Database, ui_definitions: UIDefinitions, dialogue: BotDialogue, nav_bar_mutex: Arc<Mutex<NavigationBar>>, q: CallbackQuery) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_edit_view");
+    let _enter = span.enter();
+
     let chat_id = q.message.clone().unwrap().chat.id;
 
     let nav_bar_guard = nav_bar_mutex.lock().await;
@@ -421,8 +441,10 @@ pub async fn handle_edit_view(bot: Throttle<Bot>, database: Database, ui_definit
 
     Ok(())
 }
-#[tracing::instrument]
 async fn retrieve_state_stored_messages(dialogue: BotDialogue) -> Vec<MessageId> {
+    let span = tracing::span!(tracing::Level::INFO, "retrieve_state_stored_messages");
+    let _enter = span.enter();
+
     let mut messages_to_delete = Vec::new();
     if let State::EditView { stored_messages_to_delete } = dialogue.get().await.unwrap().unwrap() {
         for message_id in stored_messages_to_delete {
@@ -431,8 +453,11 @@ async fn retrieve_state_stored_messages(dialogue: BotDialogue) -> Vec<MessageId>
     }
     messages_to_delete
 }
-#[tracing::instrument]
+
 pub async fn handle_remove_from_queue(bot: Throttle<Bot>, database: Database, ui_definitions: UIDefinitions, q: CallbackQuery) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "handle_remove_from_queue");
+    let _enter = span.enter();
+
     let chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
@@ -447,7 +472,7 @@ pub async fn handle_remove_from_queue(bot: Throttle<Bot>, database: Database, ui
 
     tx.save_content_mapping(content_mapping).unwrap();
 
-    let full_video_caption = generate_full_video_caption(database.clone(), ui_definitions.clone(), "pending", &video_info);
+    let full_video_caption = generate_full_content_caption(database.clone(), ui_definitions.clone(), "pending", &video_info);
     bot.edit_message_caption(chat_id, message_id).caption(full_video_caption).await?;
 
     let accept_action_text = ui_definitions.buttons.get("accept").unwrap();
@@ -465,8 +490,10 @@ pub async fn handle_remove_from_queue(bot: Throttle<Bot>, database: Database, ui
     Ok(())
 }
 
-#[tracing::instrument]
 pub fn parse_callback_query(q: &CallbackQuery) -> (String, MessageId) {
+    let span = tracing::span!(tracing::Level::INFO, "parse_callback_query");
+    let _enter = span.enter();
+
     // Extract the message id from the callback data
     let data_parts: Vec<&str> = q.data.as_ref().unwrap().split('_').collect();
 
