@@ -35,7 +35,7 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
         }
 
         if video_info.status == (ContentStatus::Rejected { shown: true }) {
-            video_info.status = ContentStatus::Pending { shown: false };
+            video_info.status = ContentStatus::Rejected { shown: false };
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     tracing::info!("Deleted rejected message with ID: {}", message_id);
