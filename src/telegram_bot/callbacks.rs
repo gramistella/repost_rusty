@@ -13,6 +13,7 @@ use crate::telegram_bot::helpers::{clear_sent_messages, create_queued_content, g
 use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
 use crate::{CHAT_ID, INTERFACE_UPDATE_INTERVAL};
+use crate::telegram_bot::state::ContentStatus;
 
 #[tracing::instrument]
 pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>, q: CallbackQuery) -> HandlerResult {
@@ -85,7 +86,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     let new_queued_post = create_queued_content(&mut content_info, last_updated_at, will_post_at);
 
     tx.save_content_queue(new_queued_post).unwrap();
-    content_info.status = "queued_shown".to_string();
+    content_info.status = ContentStatus::Queued {shown: true};
 
     let index_map = IndexMap::from([(message_id, content_info.clone())]);
     tx.save_content_mapping(index_map).unwrap();
@@ -104,7 +105,8 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
             let remove_action = [InlineKeyboardButton::callback(remove_from_queue_action_text, format!("remove_from_queue_{}", message_id))];
             let _msg = bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([remove_action])).await?;
         }
-        Err(_) => {
+        Err(e) => {
+            tracing::warn!("Error editing message caption: {}", e);
             let new_message = bot.send_video(CHAT_ID, InputFile::url(queued_content.url.clone().parse().unwrap())).caption(full_video_caption.clone()).await?;
 
             let undo_action = [InlineKeyboardButton::callback(remove_from_queue_action_text, format!("remove_from_queue_{}", new_message.id))];
@@ -130,7 +132,7 @@ pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: 
     let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
     //println!("original message id {}, action {}", message_id, action);
 
-    video_info.status = "rejected_shown".to_string();
+    video_info.status = ContentStatus::Rejected {shown: true};
     let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info.clone())]);
     tx.save_content_mapping(content_mapping).unwrap();
 
@@ -169,7 +171,7 @@ pub async fn handle_undo(bot: Throttle<Bot>, database: Database, ui_definitions:
     let mut tx = database.begin_transaction().unwrap();
     let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
-    video_info.status = "pending_shown".to_string();
+    video_info.status = ContentStatus::Pending {shown: true};
     let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info.clone())]);
 
     tx.save_content_mapping(content_mapping).unwrap();
@@ -337,7 +339,7 @@ pub async fn handle_edit_view(bot: Throttle<Bot>, database: Database, ui_definit
         let mut tx = database.begin_transaction().unwrap();
         let mut content_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
-        content_info.status = "queued_hidden".to_string();
+        content_info.status = ContentStatus::Queued { shown: false};
         tx.save_content_mapping(IndexMap::from([(message_id, content_info.clone())])).unwrap();
 
         let user_settings = tx.load_user_settings().unwrap();
@@ -440,7 +442,7 @@ pub async fn handle_remove_from_queue(bot: Throttle<Bot>, database: Database, ui
 
     tx.remove_post_from_queue_with_shortcode(video_info.original_shortcode.clone()).unwrap();
 
-    video_info.status = "pending_shown".to_string();
+    video_info.status = ContentStatus::Pending {shown: true}; 
     let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info.clone())]);
 
     tx.save_content_mapping(content_mapping).unwrap();

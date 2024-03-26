@@ -5,10 +5,12 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rand::Rng;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use teloxide::types::MessageId;
 
 use crate::utils::now_in_my_timezone;
 use crate::INTERFACE_UPDATE_INTERVAL;
+use crate::telegram_bot::state::ContentStatus;
 
 #[derive(Clone, Debug)]
 pub struct UserSettings {
@@ -72,7 +74,7 @@ pub struct FailedContent {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ContentInfo {
     pub url: String,
-    pub status: String,
+    pub status: ContentStatus,
     pub caption: String,
     pub hashtags: String,
     pub original_author: String,
@@ -88,9 +90,23 @@ const DEV_DB: &str = "db/dev.db";
 
 pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 
-#[derive(Debug)]
 pub(crate) struct Database {
     pool: Pool<SqliteConnectionManager>,
+}
+
+impl fmt::Debug for Database {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // This would have been nice, but it doesn't work
+        // let pool = f.debug_struct("Pool")
+        //    .field("state", &self.pool.state());
+        //    //.field("config", &self.pool.config()) // These fields don't need to be printed
+        //    //.field("manager", &self.pool.manager()) // These fields don't need to be printed
+
+        f.debug_struct("Database")
+            //.field("bot", &redacted_bot_debug_string) // Use the redacted string
+            .field("pool_state", &self.pool.state())
+            .finish()
+    }
 }
 
 impl Clone for Database {
@@ -146,7 +162,7 @@ impl Database {
                 let default_random_interval = 30;
                 let default_removed_content_lifespan = 120;
                 let default_posted_content_lifespan = 120;
-                let default_page_size = 10;
+                let default_page_size = 8;
                 let query = format!(
                     "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
                     default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
@@ -385,13 +401,14 @@ impl DatabaseTransaction {
             } else {
                 new_value.page_num = (total_records / page_size + 1) as i32;
             }
-
+            
+            let status_string = new_value.status.to_string();
             tx.execute(
                 "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     new_key.0,
                     new_value.url,
-                    new_value.status,
+                    status_string,
                     new_value.caption,
                     new_value.hashtags,
                     new_value.original_author,
@@ -479,7 +496,8 @@ impl DatabaseTransaction {
             let url_last_updated_at: String = row.get(8)?;
             let page_num: i32 = row.get(9)?;
             let encountered_errors: i32 = row.get(10)?;
-
+            
+            let status: ContentStatus = status.parse().unwrap();
             let content_info = ContentInfo {
                 url,
                 status,
@@ -575,7 +593,11 @@ impl DatabaseTransaction {
                     self.save_content_queue(new_post)?;
 
                     let (message_id, mut content_info) = self.get_content_info_by_shortcode(post.original_shortcode.clone()).unwrap();
-                    content_info.status = "queued_hidden".to_string();
+                    if content_info.status.to_string().contains("shown") {
+                        content_info.status = ContentStatus::Queued { shown: true };
+                    } else {
+                        content_info.status = ContentStatus::Queued { shown: false };
+                    }
                     self.save_content_mapping(IndexMap::from([(message_id, content_info)]))?;
                 }
             }
@@ -752,10 +774,34 @@ impl DatabaseTransaction {
     ///
     /// Will automatically remove the content from the content_queue
     pub fn save_posted_content(&mut self, posted_content: PostedContent) -> Result<()> {
+        let queued_content = match self.get_queued_content_by_shortcode(posted_content.original_shortcode.clone()) {
+            None => None,
+            Some(post) => Some(post),
+        };
+
+        let mut removed = false;
+
+        if let Some(queued_content) = queued_content {
+            let user_settings = self.load_user_settings().unwrap();
+            let posting_interval = Duration::try_seconds(user_settings.posting_interval * 60).unwrap();
+            if DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap() < now_in_my_timezone(user_settings) - posting_interval {
+                // If so, we remove the post from the queue using this function, since it also recalculates the will_post_at for the remaining posts
+                // And will avoid content being posted all at once
+                self.remove_post_from_queue_with_shortcode(posted_content.original_shortcode.clone())?;
+                removed = true;
+            }
+        }
+
+        // Check if the post was supposed to be posted in the past, more than the posting interval ago
+
         let tx = self.conn.transaction()?;
 
-        // Firstly we remove the posted_content from the content_queue
-        tx.execute("DELETE FROM content_queue WHERE original_shortcode = ?1", params![posted_content.original_shortcode])?;
+        // Otherwise we remove the post from the queue with the tx to avoid recalculating the will_post_at of the other posts
+        // This is what the "normal" behavior should be, the above will only happen if the bot was offline for a long time
+        if !removed {
+            // Firstly we remove the posted_content from the content_queue
+            tx.execute("DELETE FROM content_queue WHERE original_shortcode = ?1", params![posted_content.original_shortcode])?;
+        }
 
         // We remove the posted_content if it is already there
         tx.execute("DELETE FROM posted_content WHERE original_shortcode = ?1", params![posted_content.original_shortcode])?;

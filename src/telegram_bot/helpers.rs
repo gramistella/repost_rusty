@@ -12,14 +12,15 @@ use crate::database::{ContentInfo, Database, DatabaseTransaction, QueuedContent,
 use crate::telegram_bot::{InnerBotManager, UIDefinitions, CHAT_ID};
 use crate::utils::now_in_my_timezone;
 use crate::INTERFACE_UPDATE_INTERVAL;
+use crate::telegram_bot::state::ContentStatus;
 
 pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyhow::Result<()> {
     let mut tx = database.begin_transaction().unwrap();
     let mut content_mapping = tx.load_content_mapping().unwrap();
     for (message_id, video_info) in &mut content_mapping {
-        tracing::info!("Clearing message with ID: {}, status {}", message_id, video_info.status);
-        if video_info.status == "pending_shown" {
-            video_info.status = "pending_hidden".to_string();
+        tracing::info!("Clearing message with ID: {}, status {}", message_id, video_info.status.to_string());
+        if video_info.status == (ContentStatus::Pending { shown: true }){
+            video_info.status = ContentStatus::Pending { shown: false };
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     tracing::info!("Deleted pending message with ID: {}", message_id);
@@ -29,21 +30,9 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
                 }
             }
         }
-
-        if video_info.status == "accepted_shown" {
-            video_info.status = "accepted_hidden".to_string();
-            match bot.delete_message(CHAT_ID, *message_id).await {
-                Ok(_) => {
-                    tracing::info!("Deleted accepted message with ID: {}", message_id);
-                }
-                Err(e) => {
-                    tracing::warn!("Error deleting accepted message with ID: {}: {}", message_id, e);
-                }
-            }
-        }
-
-        if video_info.status == "rejected_shown" {
-            video_info.status = "rejected_hidden".to_string();
+        
+        if video_info.status == (ContentStatus::Rejected { shown: true }) {
+            video_info.status = ContentStatus::Pending { shown: false };
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     tracing::info!("Deleted rejected message with ID: {}", message_id);
@@ -54,8 +43,8 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
             }
         }
 
-        if video_info.status == "posted_shown" {
-            video_info.status = "posted_hidden".to_string();
+        if video_info.status == (ContentStatus::Posted { shown: true }) {
+            video_info.status = ContentStatus::Posted { shown: false };
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     tracing::info!("Deleted posted message with ID: {}", message_id);
@@ -66,8 +55,8 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
             }
         }
 
-        if video_info.status == "queued_shown" {
-            video_info.status = "queued_hidden".to_string();
+        if video_info.status == (ContentStatus::Queued { shown: true }) {
+            video_info.status = ContentStatus::Queued { shown: false };
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     tracing::info!("Deleted queued message with ID: {}", message_id);
@@ -78,8 +67,8 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
             }
         }
 
-        if video_info.status == "failed_shown" {
-            video_info.status = "failed_hidden".to_string();
+        if video_info.status == (ContentStatus::Failed { shown: true }) {
+            video_info.status = ContentStatus::Failed { shown: false };
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
                     tracing::info!("Deleted failed message with ID: {}", message_id);
@@ -103,7 +92,7 @@ impl InnerBotManager {
         let user_settings = tx.load_user_settings().unwrap();
         let current_page = user_settings.current_page;
         let total_pages = tx.get_total_pages().unwrap();
-        let navigation_string = format!("Page {} of {}", current_page, total_pages);
+        let mut navigation_string = format!("Page {} of {}", current_page, total_pages);
 
         let mut navigation_actions = Vec::new();
 
@@ -123,6 +112,9 @@ impl InnerBotManager {
         }
 
         let mut navigation_bar_guard = self.nav_bar_mutex.lock().await;
+        if navigation_bar_guard.halted {
+            navigation_string = format!("⚠️  {}", navigation_string);
+        }
         let now = now_in_my_timezone(user_settings);
         if navigation_bar_guard.last_updated_at < now - INTERFACE_UPDATE_INTERVAL || navigation_bar_guard.current_total_pages != total_pages {
             navigation_bar_guard.last_updated_at = now;
@@ -164,8 +156,9 @@ impl InnerBotManager {
     }
 }
 
-#[tracing::instrument]
 pub fn generate_full_video_caption(database: Database, ui_definitions: UIDefinitions, caption_type: &str, video_info: &ContentInfo) -> String {
+    let span = tracing::span!(tracing::Level::INFO, "generate_full_video_caption");
+    let _enter = span.enter();
     let caption_body = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
     let mut tx = database.begin_transaction().unwrap();
     match caption_type {
@@ -268,7 +261,7 @@ pub fn update_content_status_if_posted(content_info: &mut ContentInfo, tx: &mut 
         queued_content.last_updated_at = now.to_rfc3339();
         tx.save_content_queue(queued_content.clone())?;
     } else {
-        content_info.status = "posted_hidden".to_string();
+        content_info.status = ContentStatus::Posted { shown: false };
     }
     Ok(())
 }

@@ -17,7 +17,8 @@ use tokio::time::sleep;
 
 use crate::database::{Database, DatabaseTransaction, FailedContent, PostedContent, QueuedContent, UserSettings};
 use crate::utils::now_in_my_timezone;
-use crate::{CONTENT_EXPIRY, INTERFACE_UPDATE_INTERVAL, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
+use crate::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
+use crate::telegram_bot::state::ContentStatus;
 
 async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, String> {
     let mut file = File::open(path).await.expect("Unable to open credentials file");
@@ -27,27 +28,61 @@ async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, 
     accounts.get(username).unwrap().clone()
 }
 
-#[tracing::instrument(skip(tx, database, is_offline, credentials))]
-pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) {
-    //let mut unique_post_ids = HashSet::new();
+async fn read_hashtag_mapping(path: &str) -> HashMap<String, String> {
+    let mut file = File::open(path).await.expect("Unable to open credentials file");
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).await.expect("Unable to read the credentials file");
+    let hashtags: HashMap<String, String> = serde_yaml::from_str(&contents).expect("Error parsing credentials file");
+    hashtags
+}
 
+pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) {
     let username = credentials.get("username").unwrap().clone();
     let password = credentials.get("password").unwrap().clone();
-
+    
     let cookie_store_path = format!("cookies/cookies_{}.json", username);
     let scraper = Arc::new(Mutex::new(InstagramScraper::with_cookie_store(&cookie_store_path)));
-    let scraper_loop = scraper_loop(tx, database.clone(), is_offline, username, password, cookie_store_path, Arc::clone(&scraper)).await;
+    let (sender_loop, scraper_loop) = scraper_loop(tx, database.clone(), is_offline, username, password, cookie_store_path, Arc::clone(&scraper)).await;
 
     let poster_loop = poster_loop(is_offline, credentials, Arc::clone(&scraper), database.clone());
 
-    let _ = tokio::try_join!(scraper_loop, poster_loop);
+    let _ = tokio::try_join!(sender_loop, scraper_loop, poster_loop);
 }
 
-#[tracing::instrument(skip(tx, database, is_offline, username, password, cookie_store_path, scraper))]
-async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, username: String, password: String, cookie_store_path: String, scraper: Arc<Mutex<InstagramScraper>>) -> JoinHandle<anyhow::Result<()>> {
+async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, username: String, password: String, cookie_store_path: String, scraper: Arc<Mutex<InstagramScraper>>) -> (JoinHandle<anyhow::Result<()>>, JoinHandle<anyhow::Result<()>>) {
+    let span = tracing::span!(tracing::Level::INFO, "outer_scraper_loop");
+    let _enter = span.enter();
     let scraper_loop: JoinHandle<anyhow::Result<()>>;
     let accounts_to_scrape: HashMap<String, String> = read_accounts_to_scrape("config/accounts_to_scrape.yaml", username.as_str()).await;
+    let hashtag_mapping: HashMap<String, String> = read_hashtag_mapping("config/hashtags.yaml").await;
 
+    // Create a shared variable for the latest scraped content
+    let latest_content_mutex = Arc::new(Mutex::new(None));
+
+    // Create a clone of the shared variable for the separate task
+    let latest_content = Arc::clone(&latest_content_mutex);
+
+    // Create a separate task that sends the URL through the channel
+    let sender_latest_content = Arc::clone(&latest_content);
+
+    let sender_loop = tokio::spawn(async move {
+        loop {
+            let content_tuple = {
+                let lock = sender_latest_content.lock().await;
+                lock.clone()
+            };
+
+            if let Some((url, caption, author, shortcode)) = content_tuple {
+                tx.send((url, caption, author, shortcode)).await.unwrap();
+            } else {
+                tx.send(("".to_string(), "".to_string(), "".to_string(), "ignore".to_string())).await.unwrap();
+            }
+
+            tokio::time::sleep(REFRESH_RATE).await;
+        }
+    });
+
+    let scraper_loop_latest_content = Arc::clone(&latest_content);
     if is_offline {
         let testing_urls = vec![
             "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/427593823_409517391528628_721852697655626393_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=104&_nc_ohc=9pssChekERcAX_XayYY&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAXS0ConI008uTXkgc-woujGN6BchRo_ofWZkPVrg1JfQ&oe=65D574C7&_nc_sid=2999b8",
@@ -62,6 +97,9 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
         println!("Sending offline data");
 
         scraper_loop = tokio::spawn(async move {
+            let span = tracing::span!(tracing::Level::INFO, "offline_scraper_loop");
+            let _enter = span.enter();
+
             let mut loop_iterations = 0;
             loop {
                 loop_iterations += 1;
@@ -74,73 +112,36 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                     } else {
                         caption_string = format!("Video {}, loop {} #meme", inner_loop_iterations, loop_iterations);
                     }
-                    tx.send((url.to_string(), caption_string, "local".to_string(), format!("shortcode{}", inner_loop_iterations))).await.unwrap();
-                    sleep(Duration::from_secs(3)).await;
+
+                    let mut latest_content_guard = scraper_loop_latest_content.lock().await;
+                    *latest_content_guard = Some((url.to_string(), caption_string.clone(), "local".to_string(), format!("shortcode{}", inner_loop_iterations)));
+                    sleep(Duration::from_secs(10)).await;
                 }
             }
         });
     } else {
         let scraper_loop_database = database.clone();
+        let mut is_restricted = false;
+
         scraper_loop = tokio::spawn(async move {
             let mut rng = StdRng::from_entropy();
 
-            // Create a shared variable for the latest URL
-            let latest_url = Arc::new(Mutex::new(None));
+            let span = tracing::span!(tracing::Level::INFO, "online_scraper_loop");
+            let _enter = span.enter();
 
-            // Create a clone of the shared variable for the separate task
-            let latest_url_for_task = Arc::clone(&latest_url);
-
-            // Create a separate task that sends the URL through the channel
-            tokio::spawn(async move {
-                loop {
-                    let url = {
-                        let lock = latest_url_for_task.lock().await;
-                        lock.clone()
-                    };
-
-                    if let Some((url, caption, author, shortcode)) = url {
-                        tx.send((url, caption, author, shortcode)).await.unwrap();
-                    } else {
-                        tx.send(("".to_string(), "".to_string(), "".to_string(), "C4EXJ4NpQz3".to_string())).await.unwrap();
-                    }
-
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                }
-            });
-
-            {
-                let mut scraper_guard = scraper.lock().await;
-
-                scraper_guard.authenticate_with_login(username.clone(), password);
-
-                println!("Logging in {}...", username.clone());
-                match scraper_guard.login().await {
-                    Ok(_) => {
-                        println!("Logged in {} successfully", username);
-                    }
-                    Err(e) => {
-                        println!("Login failed: {}", e);
-                        return Err(anyhow::anyhow!("Login failed"));
-                    }
-                }
-
-                save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
-            }
+            login_scraper(username, password, &cookie_store_path, &scraper).await;
 
             println!("Fetching user info...");
             let mut accounts_being_scraped = Vec::new();
 
-            for (profile, _hashtags) in &accounts_to_scrape {
-                {
-                    let mut scraper_guard = scraper.lock().await;
-                    let user = scraper_guard.scrape_userinfo(&profile).await.unwrap();
-                    accounts_being_scraped.push(user);
-                    println!("Fetched user info for {}", profile);
-                }
-                let sleep_duration = 20;
-                randomized_sleep(sleep_duration).await;
+            fetch_user_info(&scraper, &mut is_restricted, &accounts_to_scrape, &mut accounts_being_scraped, Arc::clone(&scraper_loop_latest_content)).await;
+            
+            // Since this is not within the loop, we need to handle it separately
+            while is_restricted {
+                should_continue_due_to_restriction(&scraper_loop_latest_content, is_restricted).await;
+                fetch_user_info(&scraper, &mut is_restricted, &accounts_to_scrape, &mut accounts_being_scraped, Arc::clone(&scraper_loop_latest_content)).await;
             }
-
+            
             let inner_scraper_loop_database = scraper_loop_database.clone();
             loop {
                 let mut transaction = inner_scraper_loop_database.begin_transaction().unwrap();
@@ -150,22 +151,9 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                 // get user info
 
                 let mut posts: HashMap<User, Vec<Post>> = HashMap::new();
-                let mut accounts_scraped = 0;
-                let accounts_being_scraped_len = accounts_being_scraped.len();
+                retrieve_posts(&scraper, &mut is_restricted, &accounts_being_scraped, &mut posts).await;
 
-                for user in accounts_being_scraped.iter() {
-                    accounts_scraped += 1;
-                    println!("{}/{} Retrieving posts from user {}", accounts_scraped, accounts_being_scraped_len, user.username);
-
-                    // get posts
-                    {
-                        let mut scraper_guard = scraper.lock().await;
-                        let scraped_posts = scraper_guard.scrape_posts(&user.id, 5).await.unwrap();
-                        posts.insert(user.clone(), scraped_posts);
-                    }
-
-                    randomized_sleep(30).await;
-                }
+                if should_continue_due_to_restriction(&scraper_loop_latest_content, is_restricted).await { continue; }
 
                 let mut flattened_posts: Vec<(User, Post)> = Vec::new();
                 for (user, user_posts) in &posts {
@@ -187,26 +175,43 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                         if transaction.does_content_exist_with_shortcode(post.shortcode.clone()) == false {
                             println!("{}/{} Scraping content: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
                             let mut scraper_guard = scraper.lock().await;
-                            let (url, caption) = scraper_guard.download_reel(&post.shortcode).await.unwrap();
+                            let (url, caption) = match scraper_guard.download_reel(&post.shortcode).await {
+                                Ok((url, caption)) => {
+                                    is_restricted = false;
+                                    (url, caption)
+                                }
+                                Err(e) => {
+                                    println!("Error while downloading reel, {}", e);
+                                    is_restricted = true;
+                                    let mut lock = scraper_loop_latest_content.lock().await;
+                                    *lock = Some(("url".to_string(), "caption".to_string(), author.username.clone(), "halted".to_string()));
+                                    break;
+                                }
+                            };
 
                             // Check if the caption contains any hashtags
-                            let mut hashtags = caption.split_whitespace().filter(|s| s.starts_with('#')).collect::<Vec<&str>>().join(" ");
+                            let hashtags = caption.split_whitespace().filter(|s| s.starts_with('#')).collect::<Vec<&str>>().join(" ");
                             let selected_hashtags;
                             if hashtags.len() > 0 {
                                 selected_hashtags = hashtags;
                             } else {
-                                hashtags = accounts_to_scrape.get(&author.username.clone()).unwrap().clone();
+                                let hashtag_type = accounts_to_scrape.get(&author.username.clone()).unwrap().clone();
+                                let specific_hashtags = hashtag_mapping.get(&hashtag_type).unwrap().clone();
+                                let general_hashtags = hashtag_mapping.get("general").unwrap().clone();
+
                                 // Convert hashtag string from "#hastag, #hashtag2" to vec, and then pick 3 random hashtags
                                 // Split the string into a vector and trim each element
-                                let mut hashtags: Vec<&str> = hashtags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                                let specific_hashtags: Vec<&str> = specific_hashtags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                                let general_hashtags: Vec<&str> = general_hashtags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
 
-                                // Shuffle the vector and select the first three elements
+                                // Select one random general hashtag
+                                let random_general_hashtag = general_hashtags.choose(&mut rng).unwrap().to_string();
 
-                                hashtags.shuffle(&mut rng);
-                                let random_hashtags = &hashtags[0..3.min(hashtags.len())];
+                                // Select three random specific hashtags
+                                let random_specific_hashtags: Vec<&str> = specific_hashtags.choose_multiple(&mut rng, 3).map(|s| *s).collect();
 
                                 // Join the selected hashtags into a single string
-                                selected_hashtags = random_hashtags.join(" ");
+                                selected_hashtags = format!("{} {} {} {}", random_general_hashtag, random_specific_hashtags.get(0).unwrap(), random_specific_hashtags.get(1).unwrap(), random_specific_hashtags.get(2).unwrap());
                             }
 
                             // Remove the hashtags from the caption
@@ -216,7 +221,7 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                             // Use a scoped block to immediately drop the lock
                             {
                                 // Store the new URL in the shared variable
-                                let mut lock = latest_url.lock().await;
+                                let mut lock = latest_content_mutex.lock().await;
                                 //println!("Storing URL: {}", url);
                                 *lock = Some((url, caption, author.username.clone(), post.shortcode.clone()));
                             }
@@ -229,7 +234,9 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                             let existing_rejected_shortcodes: Vec<String> = transaction.load_rejected_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
 
                             match existing_content_shortcodes.iter().position(|x| x == &post.shortcode) {
-                                Some(index) => index,
+                                Some(_) => {
+                                    println!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                },
                                 None => {
                                     // Check if the shortcode is in the posted, failed or rejected content
                                     if existing_posted_shortcodes.contains(&post.shortcode) {
@@ -243,33 +250,8 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                                         tracing::error!(error_message);
                                         panic!("{}", error_message);
                                     }
-                                    continue;
                                 }
                             };
-
-                            // get existing content_info with shortcode
-                            let (message_id, mut content_info) = match transaction.get_content_info_by_shortcode(post.shortcode.clone()) {
-                                Some(content) => content,
-                                None => {
-                                    let error_message = format!("{}/{} Content not found in current mapping: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                                    tracing::error!(error_message);
-                                    panic!("{}", error_message);
-                                }
-                            };
-
-                            let url_last_updated_at = DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap();
-                            let now = now_in_my_timezone(transaction.load_user_settings().unwrap());
-                            if now > url_last_updated_at + CONTENT_EXPIRY {
-                                println!("{}/{} Content already scraped, but it is outdated and will need an updated url: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                                let mut scraper_guard = scraper.lock().await;
-                                let (url, _caption) = scraper_guard.download_reel(&post.shortcode).await.unwrap();
-                                content_info.url = url;
-                                content_info.url_last_updated_at = now.to_rfc3339();
-                                transaction.save_content_mapping(IndexMap::from([(message_id, content_info.clone())])).unwrap();
-                                save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
-                            } else {
-                                println!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                            }
                         }
                     } else {
                         println!("{}/{} Content is not a video: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
@@ -277,19 +259,106 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
                     randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;
                 }
 
-                refresh_outdated_urls(cookie_store_path.clone(), Arc::clone(&scraper), transaction).await;
-
                 // Wait for a while before the next iteration
                 println!("Starting long sleep ({} minutes)", SCRAPER_LOOP_SLEEP_LEN.as_secs() / 60);
                 randomized_sleep(SCRAPER_LOOP_SLEEP_LEN.as_secs()).await;
             }
         });
     }
-    scraper_loop
+    (sender_loop, scraper_loop)
 }
 
-#[tracing::instrument(skip(is_offline, credentials, scraper, poster_loop_database))]
+async fn should_continue_due_to_restriction(scraper_loop_latest_content: &Arc<Mutex<Option<(String, String, String, String)>>>, is_restricted: bool) -> bool {
+    if is_restricted {
+        println!("Account awaits manual intervention, sleeping for 30 min");
+        {
+            let mut lock = scraper_loop_latest_content.lock().await;
+            *lock = Some(("url".to_string(), "caption".to_string(), "author".to_string(), "halted".to_string()));
+        }
+        randomized_sleep(60 * 30).await;
+        return true;
+    }
+    false
+}
+
+async fn retrieve_posts(scraper: &Arc<Mutex<InstagramScraper>>, is_restricted: &mut bool, accounts_being_scraped: &Vec<User>, posts: &mut HashMap<User, Vec<Post>>) {
+    let mut accounts_scraped = 0;
+    let accounts_being_scraped_len = accounts_being_scraped.len();
+    for user in accounts_being_scraped.iter() {
+        accounts_scraped += 1;
+        println!("{}/{} Retrieving posts from user {}", accounts_scraped, accounts_being_scraped_len, user.username);
+
+        // get posts
+        {
+            let mut scraper_guard = scraper.lock().await;
+            match scraper_guard.scrape_posts(&user.id, 5).await {
+                Ok(scraped_posts) => {
+                    *is_restricted = false;
+                    posts.insert(user.clone(), scraped_posts);
+                }
+                Err(e) => {
+                    println!("Error scraping posts: {}", e);
+                    *is_restricted = true;
+                    break;
+                }
+            };
+        }
+
+        let sleep_duration = 30;
+        randomized_sleep(sleep_duration).await;
+    }
+}
+
+async fn fetch_user_info(scraper: &Arc<Mutex<InstagramScraper>>, is_restricted: &mut bool, accounts_to_scrape: &HashMap<String, String>, accounts_being_scraped: &mut Vec<User>, scraper_loop_latest_content: Arc<Mutex<Option<(String, String, String, String)>>>) {
+    let mut accounts_scraped = 0;
+    let accounts_to_scrape_len = accounts_to_scrape.len();
+    for (profile, _hashtags) in accounts_to_scrape {
+        {
+            accounts_scraped += 1;
+            let mut scraper_guard = scraper.lock().await;
+            let result = scraper_guard.scrape_userinfo(&profile).await;
+            match result {
+                Ok(user) => {
+                    accounts_being_scraped.push(user);
+                    println!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile);
+                    *is_restricted = false;
+                }
+                Err(e) => {
+                    println!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e);
+                    let mut lock = scraper_loop_latest_content.lock().await;
+                    *lock = Some(("url".to_string(), "caption".to_string(), "author".to_string(), "halted".to_string()));
+                    *is_restricted = true;
+                    break;
+                }
+            };
+        }
+        let sleep_duration = 30;
+        randomized_sleep(sleep_duration).await;
+    }
+}
+
+async fn login_scraper(username: String, password: String, cookie_store_path: &String, scraper: &Arc<Mutex<InstagramScraper>>) {
+    let mut scraper_guard = scraper.lock().await;
+
+    scraper_guard.authenticate_with_login(username.clone(), password);
+
+    println!("Logging in {}...", username.clone());
+    let result = scraper_guard.login().await;
+    match result {
+        Ok(_) => {
+            println!("Logged in {} successfully", username);
+        }
+        Err(e) => {
+            println!("Login failed: {}", e);
+        }
+    };
+
+    save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
+}
+
 fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: Arc<Mutex<InstagramScraper>>, poster_loop_database: Database) -> JoinHandle<anyhow::Result<()>> {
+    let span = tracing::span!(tracing::Level::INFO, "poster_loop");
+    let _enter = span.enter();
     let poster_loop = tokio::spawn(async move {
         // Allow the scraper to login
         sleep(Duration::from_secs(5)).await;
@@ -300,7 +369,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
             let user_settings = transaction.load_user_settings().unwrap();
 
             for (_message_id, content_info) in content_mapping {
-                if content_info.status.contains("queued_") {
+                if content_info.status.to_string().contains("queued_") {
                     let queued_posts = transaction.load_content_queue().unwrap();
                     for mut queued_post in queued_posts {
                         if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(user_settings.clone()) {
@@ -323,11 +392,27 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
 
                                     let user_id = credentials.get("instagram_business_account_id").unwrap();
                                     let access_token = credentials.get("fb_access_token").unwrap();
+                                    
+                                    
+                                    let (_message_id, content_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
+                                    
+                                    if DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap() < now_in_my_timezone(user_settings.clone()) - Duration::from_secs(60 * 60 * 12) {
+                                        println!(" [+] Updating content url before posting: {}", queued_post.original_shortcode);
+                                        match scraper_guard.download_reel(&queued_post.original_shortcode).await {
+                                            Ok((url, _caption)) => {
+                                                queued_post.url = url;
+                                            }
+                                            Err(err) => {
+                                                println!(" [!] ERROR: couldn't update reel url!\nError: {}\n{}", err.to_string(), queued_post.original_shortcode);
+                                            }
+                                        }
+                                    }
+
                                     println!(" [+] Uploading content to instagram: {}", queued_post.original_shortcode);
 
                                     match scraper_guard.upload_reel(user_id, access_token, &queued_post.url, &full_caption).await {
                                         Ok(_) => {
-                                            println!(" [+] Uploaded content successfully: {}", queued_post.original_shortcode);
+                                            println!(" [+] Published content successfully: {}", queued_post.original_shortcode);
                                         }
                                         Err(err) => {
                                             println!(" [!] ERROR: couldn't upload content to instagram!\nError: {}\n{}", err.to_string(), queued_post.url);
@@ -346,7 +431,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
                                 }
 
                                 let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-                                video_info.status = "posted_hidden".to_string();
+                                video_info.status = ContentStatus::Posted { shown: false };
                                 let index_map = IndexMap::from([(message_id, video_info.clone())]);
                                 transaction.save_content_mapping(index_map).unwrap();
 
@@ -369,7 +454,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
                                 transaction.save_content_queue(queued_post.clone()).unwrap();
 
                                 let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-                                video_info.status = "queued_hidden".to_string();
+                                video_info.status = ContentStatus::Queued { shown: false };
                                 let index_map = IndexMap::from([(message_id, video_info.clone())]);
                                 transaction.save_content_mapping(index_map).unwrap();
                             }
@@ -386,11 +471,14 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
 }
 
 fn handle_failed_content(transaction: &mut DatabaseTransaction, user_settings: &UserSettings, queued_post: &mut QueuedContent) {
+    let span = tracing::span!(tracing::Level::INFO, "handle_failed_content");
+    let _enter = span.enter();
+
     let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-    if video_info.status.contains("shown") {
-        video_info.status = "failed_shown".to_string();
+    if video_info.status.to_string().contains("shown") {
+        video_info.status = ContentStatus::Failed { shown: true };
     } else {
-        video_info.status = "failed_hidden".to_string();
+        video_info.status = ContentStatus::Failed { shown: false };
     }
 
     let index_map = IndexMap::from([(message_id, video_info.clone())]);
@@ -412,51 +500,9 @@ fn handle_failed_content(transaction: &mut DatabaseTransaction, user_settings: &
     transaction.save_failed_content(failed_content.clone()).unwrap();
 }
 
-#[tracing::instrument(skip(cookie_store_path, cloned_scraper, transaction))]
-async fn refresh_outdated_urls(cookie_store_path: String, cloned_scraper: Arc<Mutex<InstagramScraper>>, mut transaction: DatabaseTransaction) {
-    let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().values().map(|content_info| content_info.original_shortcode.clone()).collect();
-
-    // Iterate over the remaining shortcodes and update them
-    for shortcode in existing_content_shortcodes {
-        let (message_id, mut content_info) = match transaction.get_content_info_by_shortcode(shortcode.clone()) {
-            Some(content) => content,
-            None => {
-                tracing::warn!("Content not found in current mapping when iterating over existing shortcodes, maybe it was removed?: {}", shortcode);
-                continue;
-            }
-        };
-        let url_last_updated_at = DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap();
-        let now = now_in_my_timezone(transaction.load_user_settings().unwrap());
-        if now > url_last_updated_at + CONTENT_EXPIRY {
-            println!(" [@] Content is outdated, will update url: {}", shortcode);
-            {
-                // Use a scoped block to drop the lock while waiting
-                let mut scraper_guard = cloned_scraper.lock().await;
-
-                let (url, _caption) = scraper_guard.download_reel(&shortcode).await.unwrap();
-                content_info.url = url;
-                content_info.url_last_updated_at = now.to_rfc3339();
-                transaction.save_content_mapping(IndexMap::from([(message_id, content_info.clone())])).unwrap();
-
-                // Search for the shortcode in the queued content and update it
-                let queued_posts = transaction.load_content_queue().unwrap();
-                for mut queued_post in queued_posts {
-                    if queued_post.original_shortcode == shortcode {
-                        queued_post.url = content_info.url.clone();
-                        transaction.save_content_queue(queued_post.clone()).unwrap();
-                    }
-                }
-                save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
-            }
-            randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;
-        } else {
-            //println!(" [@] Content is already up-to-date: {}", shortcode);
-        }
-    }
-}
-
-#[tracing::instrument(skip(cookie_store_path, scraper_guard))]
 fn save_cookie_store_to_json(cookie_store_path: String, scraper_guard: &mut MutexGuard<InstagramScraper>) {
+    let span = tracing::span!(tracing::Level::INFO, "save_cookie_store_to_json");
+    let _enter = span.enter();
     let mut writer = std::fs::File::create(cookie_store_path).map(std::io::BufWriter::new).unwrap();
 
     let cookie_store = Arc::clone(&scraper_guard.session.cookie_store);
@@ -464,10 +510,14 @@ fn save_cookie_store_to_json(cookie_store_path: String, scraper_guard: &mut Mute
 }
 
 /// Randomized sleep function, will randomize the sleep duration by up to 20% of the original duration
-#[tracing::instrument]
 async fn randomized_sleep(original_duration: u64) {
+    let span = tracing::span!(tracing::Level::INFO, "randomized_sleep");
     let mut rng = StdRng::from_rng(OsRng).unwrap();
     let variance: u64 = rng.gen_range(0..=1); // generates a number between 0 and 1
     let sleep_duration = original_duration + (original_duration * variance / 5); // add up to 20% of the original sleep duration
+    span.in_scope(|| {
+        tracing::info!("Sleeping for {} seconds", sleep_duration);
+    });
+
     sleep(Duration::from_secs(sleep_duration)).await;
 }

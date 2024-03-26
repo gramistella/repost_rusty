@@ -22,9 +22,8 @@ mod telegram_bot;
 mod utils;
 
 const CHAT_ID: ChatId = ChatId(34957918);
-const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
+const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
 const REFRESH_RATE: Duration = Duration::from_secs(2);
-const CONTENT_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 90);
 const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
 
@@ -44,6 +43,8 @@ async fn main() -> anyhow::Result<()> {
 
     for (username, credentials) in &all_credentials {
         if credentials.get("enabled").expect("No enabled field in credentials") == "true" {
+            let span = tracing::span!(tracing::Level::INFO, "main", username = username.as_str());
+            let _enter = span.enter();
             tracing::info!("Starting bot for user: {}", username);
 
             // Create a new channel
@@ -81,7 +82,7 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
         .with_filter(LevelFilter::INFO);
 
     let (non_blocking, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
-    let layer2 = tracing_subscriber::fmt::Layer::default()
+    let layer2 = tracing_subscriber::fmt::Layer::new()
         .compact()
         .with_file(true)
         .with_line_number(true)
