@@ -75,7 +75,6 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
         .compact()
         .with_file(true)
         .with_line_number(true)
-        .with_thread_ids(true)
         .with_target(false)
         .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
         .with_writer(non_blocking)

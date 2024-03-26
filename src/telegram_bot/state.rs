@@ -1,8 +1,9 @@
 use std::error::Error;
 use std::fmt;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use serde::de::Visitor;
+use std::str::FromStr;
 
+use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::dispatching::{dialogue, UpdateFilterExt, UpdateHandler};
 use teloxide::prelude::*;
@@ -90,44 +91,22 @@ impl InnerBotManager {
 pub enum ContentStatus {
     Waiting,
     RemovedFromView,
-    Pending {
-        shown: bool,
-    },
-    Posted {
-        shown: bool,
-    },
-    Queued {
-        shown: bool,
-    },
-    Rejected {
-        shown: bool,
-    },
-    Failed {
-        shown: bool,
-    },
+    Pending { shown: bool },
+    Posted { shown: bool },
+    Queued { shown: bool },
+    Rejected { shown: bool },
+    Failed { shown: bool },
 }
 
 impl Serialize for ContentStatus {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
+    where
+        S: Serializer,
     {
-        let s = match self {
-            ContentStatus::Waiting => "waiting".to_string(),
-            ContentStatus::Pending { shown } => if *shown { "pending_shown".to_string() } else { "pending_hidden".to_string() },
-            ContentStatus::Posted { shown } => if *shown { "posted_shown".to_string() } else { "posted_hidden".to_string() },
-            ContentStatus::Queued { shown } => if *shown { "queued_shown".to_string() } else { "queued_hidden".to_string() },
-            ContentStatus::Rejected { shown } => if *shown { "rejected_shown".to_string() } else { "rejected_hidden".to_string() },
-            ContentStatus::Failed { shown } => if *shown { "failed_shown".to_string() } else { "failed_hidden".to_string() },
-            _ => {
-                panic!("ContentStatus::to_string() called on an invalid variant {:#?}", self);
-            }
-        };
-        serializer.serialize_str(&s)
+        let status = get_status_string(self.clone());
+        serializer.serialize_str(&status)
     }
 }
-
-use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub struct ContentStatusParseError;
@@ -161,17 +140,7 @@ impl FromStr for ContentStatus {
 }
 impl ContentStatus {
     pub fn to_string(&self) -> String {
-        match self {
-            ContentStatus::Waiting => "waiting".to_string(),
-            ContentStatus::Pending { shown } => if *shown { "pending_shown".to_string() } else { "pending_hidden".to_string() },
-            ContentStatus::Posted { shown } => if *shown { "posted_shown".to_string() } else { "posted_hidden".to_string() },
-            ContentStatus::Queued { shown } => if *shown { "queued_shown".to_string() } else { "queued_hidden".to_string() },
-            ContentStatus::Rejected { shown } => if *shown { "rejected_shown".to_string() } else { "rejected_hidden".to_string() },
-            ContentStatus::Failed { shown } => if *shown { "failed_shown".to_string() } else { "failed_hidden".to_string() },
-            _ => {
-                panic!("ContentStatus::to_string() called on an invalid variant {:#?}", self);
-            }
-        }
+        get_status_string(self.clone())
     }
 }
 
@@ -185,8 +154,8 @@ impl<'de> Visitor<'de> for ContentStatusVisitor {
     }
 
     fn visit_str<E>(self, value: &str) -> Result<ContentStatus, E>
-        where
-            E: de::Error,
+    where
+        E: de::Error,
     {
         match value {
             "waiting" => Ok(ContentStatus::Waiting),
@@ -200,16 +169,63 @@ impl<'de> Visitor<'de> for ContentStatusVisitor {
             "rejected_hidden" => Ok(ContentStatus::Rejected { shown: false }),
             "failed_shown" => Ok(ContentStatus::Failed { shown: true }),
             "failed_hidden" => Ok(ContentStatus::Failed { shown: false }),
-            _ => Err(de::Error::unknown_variant(value, &["waiting", "pending_shown", "pending_hidden", "posted_shown", "posted_hidden", "queued_shown", "queued_hidden", "rejected_shown", "rejected_hidden", "failed_shown", "failed_hidden"])),
+            _ => Err(de::Error::unknown_variant(
+                value,
+                &["waiting", "pending_shown", "pending_hidden", "posted_shown", "posted_hidden", "queued_shown", "queued_hidden", "rejected_shown", "rejected_hidden", "failed_shown", "failed_hidden"],
+            )),
         }
     }
 }
 
 impl<'de> Deserialize<'de> for ContentStatus {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
+    where
+        D: Deserializer<'de>,
     {
         deserializer.deserialize_str(ContentStatusVisitor)
+    }
+}
+
+fn get_status_string(content_status: ContentStatus) -> String {
+    match content_status {
+        ContentStatus::Waiting => "waiting".to_string(),
+        ContentStatus::Pending { shown } => {
+            if shown {
+                "pending_shown".to_string()
+            } else {
+                "pending_hidden".to_string()
+            }
+        }
+        ContentStatus::Posted { shown } => {
+            if shown {
+                "posted_shown".to_string()
+            } else {
+                "posted_hidden".to_string()
+            }
+        }
+        ContentStatus::Queued { shown } => {
+            if shown {
+                "queued_shown".to_string()
+            } else {
+                "queued_hidden".to_string()
+            }
+        }
+        ContentStatus::Rejected { shown } => {
+            if shown {
+                "rejected_shown".to_string()
+            } else {
+                "rejected_hidden".to_string()
+            }
+        }
+        ContentStatus::Failed { shown } => {
+            if shown {
+                "failed_shown".to_string()
+            } else {
+                "failed_hidden".to_string()
+            }
+        }
+        _ => {
+            panic!("ContentStatus::to_string() called on an invalid variant {:#?}", content_status);
+        }
     }
 }

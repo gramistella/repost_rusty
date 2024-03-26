@@ -9,17 +9,17 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
 
 use crate::database::{ContentInfo, Database, DatabaseTransaction, QueuedContent, DEFAULT_FAILURE_EXPIRATION};
+use crate::telegram_bot::state::ContentStatus;
 use crate::telegram_bot::{InnerBotManager, UIDefinitions, CHAT_ID};
 use crate::utils::now_in_my_timezone;
 use crate::INTERFACE_UPDATE_INTERVAL;
-use crate::telegram_bot::state::ContentStatus;
 
 pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyhow::Result<()> {
     let mut tx = database.begin_transaction().unwrap();
     let mut content_mapping = tx.load_content_mapping().unwrap();
     for (message_id, video_info) in &mut content_mapping {
         tracing::info!("Clearing message with ID: {}, status {}", message_id, video_info.status.to_string());
-        if video_info.status == (ContentStatus::Pending { shown: true }){
+        if video_info.status == (ContentStatus::Pending { shown: true }) {
             video_info.status = ContentStatus::Pending { shown: false };
             match bot.delete_message(CHAT_ID, *message_id).await {
                 Ok(_) => {
@@ -30,7 +30,7 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
                 }
             }
         }
-        
+
         if video_info.status == (ContentStatus::Rejected { shown: true }) {
             video_info.status = ContentStatus::Pending { shown: false };
             match bot.delete_message(CHAT_ID, *message_id).await {

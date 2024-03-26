@@ -16,9 +16,9 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use crate::database::{Database, DatabaseTransaction, FailedContent, PostedContent, QueuedContent, UserSettings};
+use crate::telegram_bot::state::ContentStatus;
 use crate::utils::now_in_my_timezone;
 use crate::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
-use crate::telegram_bot::state::ContentStatus;
 
 async fn read_accounts_to_scrape(path: &str, username: &str) -> HashMap<String, String> {
     let mut file = File::open(path).await.expect("Unable to open credentials file");
@@ -39,7 +39,7 @@ async fn read_hashtag_mapping(path: &str) -> HashMap<String, String> {
 pub async fn run_scraper(tx: Sender<(String, String, String, String)>, database: Database, is_offline: bool, credentials: HashMap<String, String>) {
     let username = credentials.get("username").unwrap().clone();
     let password = credentials.get("password").unwrap().clone();
-    
+
     let cookie_store_path = format!("cookies/cookies_{}.json", username);
     let scraper = Arc::new(Mutex::new(InstagramScraper::with_cookie_store(&cookie_store_path)));
     let (sender_loop, scraper_loop) = scraper_loop(tx, database.clone(), is_offline, username, password, cookie_store_path, Arc::clone(&scraper)).await;
@@ -124,8 +124,6 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
         let mut is_restricted = false;
 
         scraper_loop = tokio::spawn(async move {
-            let mut rng = StdRng::from_entropy();
-
             let span = tracing::span!(tracing::Level::INFO, "online_scraper_loop");
             let _enter = span.enter();
 
@@ -135,129 +133,26 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
             let mut accounts_being_scraped = Vec::new();
 
             fetch_user_info(&scraper, &mut is_restricted, &accounts_to_scrape, &mut accounts_being_scraped, Arc::clone(&scraper_loop_latest_content)).await;
-            
+
             // Since this is not within the loop, we need to handle it separately
             while is_restricted {
                 should_continue_due_to_restriction(&scraper_loop_latest_content, is_restricted).await;
                 fetch_user_info(&scraper, &mut is_restricted, &accounts_to_scrape, &mut accounts_being_scraped, Arc::clone(&scraper_loop_latest_content)).await;
             }
-            
+
             let inner_scraper_loop_database = scraper_loop_database.clone();
             loop {
-                let mut transaction = inner_scraper_loop_database.begin_transaction().unwrap();
-
-                //let random_profiles: Vec<_> = accounts_being_scraped.choose_multiple(&mut rng, 3).collect();
-                //println!("Running scraper loop, selected users {}, {}, {}", random_profiles[0].username, random_profiles[1].username, random_profiles[2].username);
-                // get user info
+                let transaction = inner_scraper_loop_database.begin_transaction().unwrap();
 
                 let mut posts: HashMap<User, Vec<Post>> = HashMap::new();
                 retrieve_posts(&scraper, &mut is_restricted, &accounts_being_scraped, &mut posts).await;
 
-                if should_continue_due_to_restriction(&scraper_loop_latest_content, is_restricted).await { continue; }
-
-                let mut flattened_posts: Vec<(User, Post)> = Vec::new();
-                for (user, user_posts) in &posts {
-                    for post in user_posts {
-                        flattened_posts.push((user.clone(), post.clone()));
-                    }
+                if should_continue_due_to_restriction(&scraper_loop_latest_content, is_restricted).await {
+                    continue;
                 }
 
-                flattened_posts.shuffle(&mut rng);
-
-                let mut flattened_posts_processed = 0;
-                let flattened_posts_len = flattened_posts.len();
-
-                for (author, post) in flattened_posts {
-                    flattened_posts_processed += 1;
-
-                    // Send the URL through the channel
-                    if post.is_video {
-                        if transaction.does_content_exist_with_shortcode(post.shortcode.clone()) == false {
-                            println!("{}/{} Scraping content: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                            let mut scraper_guard = scraper.lock().await;
-                            let (url, caption) = match scraper_guard.download_reel(&post.shortcode).await {
-                                Ok((url, caption)) => {
-                                    is_restricted = false;
-                                    (url, caption)
-                                }
-                                Err(e) => {
-                                    println!("Error while downloading reel, {}", e);
-                                    is_restricted = true;
-                                    let mut lock = scraper_loop_latest_content.lock().await;
-                                    *lock = Some(("url".to_string(), "caption".to_string(), author.username.clone(), "halted".to_string()));
-                                    break;
-                                }
-                            };
-
-                            // Check if the caption contains any hashtags
-                            let hashtags = caption.split_whitespace().filter(|s| s.starts_with('#')).collect::<Vec<&str>>().join(" ");
-                            let selected_hashtags;
-                            if hashtags.len() > 0 {
-                                selected_hashtags = hashtags;
-                            } else {
-                                let hashtag_type = accounts_to_scrape.get(&author.username.clone()).unwrap().clone();
-                                let specific_hashtags = hashtag_mapping.get(&hashtag_type).unwrap().clone();
-                                let general_hashtags = hashtag_mapping.get("general").unwrap().clone();
-
-                                // Convert hashtag string from "#hastag, #hashtag2" to vec, and then pick 3 random hashtags
-                                // Split the string into a vector and trim each element
-                                let specific_hashtags: Vec<&str> = specific_hashtags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-                                let general_hashtags: Vec<&str> = general_hashtags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-
-                                // Select one random general hashtag
-                                let random_general_hashtag = general_hashtags.choose(&mut rng).unwrap().to_string();
-
-                                // Select three random specific hashtags
-                                let random_specific_hashtags: Vec<&str> = specific_hashtags.choose_multiple(&mut rng, 3).map(|s| *s).collect();
-
-                                // Join the selected hashtags into a single string
-                                selected_hashtags = format!("{} {} {} {}", random_general_hashtag, random_specific_hashtags.get(0).unwrap(), random_specific_hashtags.get(1).unwrap(), random_specific_hashtags.get(2).unwrap());
-                            }
-
-                            // Remove the hashtags from the caption
-                            let caption = caption.split_whitespace().filter(|s| !s.starts_with('#')).collect::<Vec<&str>>().join(" ");
-                            // Rebuild the caption
-                            let caption = format!("{} {}", caption, selected_hashtags);
-                            // Use a scoped block to immediately drop the lock
-                            {
-                                // Store the new URL in the shared variable
-                                let mut lock = latest_content_mutex.lock().await;
-                                //println!("Storing URL: {}", url);
-                                *lock = Some((url, caption, author.username.clone(), post.shortcode.clone()));
-                            }
-
-                            save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
-                        } else {
-                            let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().values().map(|content_info| content_info.original_shortcode.clone()).collect();
-                            let existing_posted_shortcodes: Vec<String> = transaction.load_posted_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-                            let existing_failed_shortcodes: Vec<String> = transaction.load_failed_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-                            let existing_rejected_shortcodes: Vec<String> = transaction.load_rejected_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-
-                            match existing_content_shortcodes.iter().position(|x| x == &post.shortcode) {
-                                Some(_) => {
-                                    println!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                                },
-                                None => {
-                                    // Check if the shortcode is in the posted, failed or rejected content
-                                    if existing_posted_shortcodes.contains(&post.shortcode) {
-                                        println!("{}/{} Content already posted: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                                    } else if existing_failed_shortcodes.contains(&post.shortcode) {
-                                        println!("{}/{} Content already failed: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                                    } else if existing_rejected_shortcodes.contains(&post.shortcode) {
-                                        println!("{}/{} Content already rejected: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                                    } else {
-                                        let error_message = format!("{}/{} Content not found in any mapping: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                                        tracing::error!(error_message);
-                                        panic!("{}", error_message);
-                                    }
-                                }
-                            };
-                        }
-                    } else {
-                        println!("{}/{} Content is not a video: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
-                    }
-                    randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;
-                }
+                // Scrape the posts
+                scrape_posts(&cookie_store_path, &scraper, &accounts_to_scrape, &hashtag_mapping, &latest_content_mutex, &scraper_loop_latest_content, &mut is_restricted, transaction, &mut posts).await;
 
                 // Wait for a while before the next iteration
                 println!("Starting long sleep ({} minutes)", SCRAPER_LOOP_SLEEP_LEN.as_secs() / 60);
@@ -268,6 +163,132 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
     (sender_loop, scraper_loop)
 }
 
+async fn scrape_posts(
+    cookie_store_path: &String,
+    scraper: &Arc<Mutex<InstagramScraper>>,
+    accounts_to_scrape: &HashMap<String, String>,
+    hashtag_mapping: &HashMap<String, String>,
+    latest_content_mutex: &Arc<Mutex<Option<(String, String, String, String)>>>,
+    scraper_loop_latest_content: &Arc<Mutex<Option<(String, String, String, String)>>>,
+    is_restricted: &mut bool,
+    mut transaction: DatabaseTransaction,
+    posts: &mut HashMap<User, Vec<Post>>,
+) {
+    let mut rng = StdRng::from_entropy();
+
+    println!("Scraping posts...");
+
+    let mut flattened_posts: Vec<(User, Post)> = Vec::new();
+    for (user, user_posts) in posts {
+        for post in user_posts {
+            flattened_posts.push((user.clone(), post.clone()));
+        }
+    }
+
+    flattened_posts.shuffle(&mut rng);
+
+    let mut flattened_posts_processed = 0;
+    let flattened_posts_len = flattened_posts.len();
+
+    for (author, post) in flattened_posts {
+        flattened_posts_processed += 1;
+
+        // Send the URL through the channel
+        if post.is_video {
+            if transaction.does_content_exist_with_shortcode(post.shortcode.clone()) == false {
+                println!("{}/{} Scraping content: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                let mut scraper_guard = scraper.lock().await;
+                let (url, caption) = match scraper_guard.download_reel(&post.shortcode).await {
+                    Ok((url, caption)) => {
+                        *is_restricted = false;
+                        (url, caption)
+                    }
+                    Err(e) => {
+                        println!("Error while downloading reel | {}", e);
+                        *is_restricted = true;
+                        let mut lock = scraper_loop_latest_content.lock().await;
+                        *lock = Some(("url".to_string(), "caption".to_string(), author.username.clone(), "halted".to_string()));
+                        break;
+                    }
+                };
+
+                // Check if the caption contains any hashtags
+                let hashtags = caption.split_whitespace().filter(|s| s.starts_with('#')).collect::<Vec<&str>>().join(" ");
+                let selected_hashtags;
+                if hashtags.len() > 0 {
+                    selected_hashtags = hashtags;
+                } else {
+                    let hashtag_type = accounts_to_scrape.get(&author.username.clone()).unwrap().clone();
+                    let specific_hashtags = hashtag_mapping.get(&hashtag_type).unwrap().clone();
+                    let general_hashtags = hashtag_mapping.get("general").unwrap().clone();
+
+                    // Convert hashtag string from "#hastag, #hashtag2" to vec, and then pick 3 random hashtags
+                    // Split the string into a vector and trim each element
+                    fn split_hashtags(hashtags: &str) -> Vec<&str> {
+                        hashtags.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+                    }
+
+                    let specific_hashtags = split_hashtags(&specific_hashtags);
+                    let general_hashtags = split_hashtags(&general_hashtags);
+
+                    // Select one random general hashtag
+                    let random_general_hashtag = general_hashtags.choose(&mut rng).unwrap().to_string();
+
+                    // Select three random specific hashtags
+                    let random_specific_hashtags: Vec<&str> = specific_hashtags.choose_multiple(&mut rng, 3).map(|s| *s).collect();
+
+                    // Join the selected hashtags into a single string
+                    selected_hashtags = format!("{} {} {} {}", random_general_hashtag, random_specific_hashtags.get(0).unwrap(), random_specific_hashtags.get(1).unwrap(), random_specific_hashtags.get(2).unwrap());
+                }
+
+                // Remove the hashtags from the caption
+                let caption = caption.split_whitespace().filter(|s| !s.starts_with('#')).collect::<Vec<&str>>().join(" ");
+                // Rebuild the caption
+                let caption = format!("{} {}", caption, selected_hashtags);
+                // Use a scoped block to immediately drop the lock
+                {
+                    // Store the new URL in the shared variable
+                    let mut lock = latest_content_mutex.lock().await;
+                    //println!("Storing URL: {}", url);
+                    *lock = Some((url, caption, author.username.clone(), post.shortcode.clone()));
+                }
+
+                save_cookie_store_to_json(cookie_store_path.clone(), &mut scraper_guard);
+            } else {
+                let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().values().map(|content_info| content_info.original_shortcode.clone()).collect();
+                let existing_posted_shortcodes: Vec<String> = transaction.load_posted_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                let existing_failed_shortcodes: Vec<String> = transaction.load_failed_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                let existing_rejected_shortcodes: Vec<String> = transaction.load_rejected_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+
+                match existing_content_shortcodes.iter().position(|x| x == &post.shortcode) {
+                    Some(_) => {
+                        println!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                    }
+                    None => {
+                        // Check if the shortcode is in the posted, failed or rejected content
+                        if existing_posted_shortcodes.contains(&post.shortcode) {
+                            println!("{}/{} Content already posted: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                        } else if existing_failed_shortcodes.contains(&post.shortcode) {
+                            println!("{}/{} Content already failed: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                        } else if existing_rejected_shortcodes.contains(&post.shortcode) {
+                            println!("{}/{} Content already rejected: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                        } else {
+                            let error_message = format!("{}/{} Content not found in any mapping: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                            tracing::error!(error_message);
+                            panic!("{}", error_message);
+                        }
+                    }
+                };
+            }
+        } else {
+            println!("{}/{} Content is not a video: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+        }
+        randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;
+    }
+}
+
+/// This function checks if the account is restricted and sleeps for 30 minutes if it is.
+/// It updates the latest content shortcode to indicate that the scraper has been halted.
 async fn should_continue_due_to_restriction(scraper_loop_latest_content: &Arc<Mutex<Option<(String, String, String, String)>>>, is_restricted: bool) -> bool {
     if is_restricted {
         println!("Account awaits manual intervention, sleeping for 30 min");
@@ -284,6 +305,7 @@ async fn should_continue_due_to_restriction(scraper_loop_latest_content: &Arc<Mu
 async fn retrieve_posts(scraper: &Arc<Mutex<InstagramScraper>>, is_restricted: &mut bool, accounts_being_scraped: &Vec<User>, posts: &mut HashMap<User, Vec<Post>>) {
     let mut accounts_scraped = 0;
     let accounts_being_scraped_len = accounts_being_scraped.len();
+    println!("Retrieving posts...");
     for user in accounts_being_scraped.iter() {
         accounts_scraped += 1;
         println!("{}/{} Retrieving posts from user {}", accounts_scraped, accounts_being_scraped_len, user.username);
@@ -392,10 +414,9 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
 
                                     let user_id = credentials.get("instagram_business_account_id").unwrap();
                                     let access_token = credentials.get("fb_access_token").unwrap();
-                                    
-                                    
+
                                     let (_message_id, content_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-                                    
+
                                     if DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap() < now_in_my_timezone(user_settings.clone()) - Duration::from_secs(60 * 60 * 12) {
                                         println!(" [+] Updating content url before posting: {}", queued_post.original_shortcode);
                                         match scraper_guard.download_reel(&queued_post.original_shortcode).await {

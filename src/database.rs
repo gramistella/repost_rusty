@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Duration, Timelike, Utc};
 use indexmap::IndexMap;
 use r2d2::{Pool, PooledConnection};
@@ -5,12 +7,11 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rand::Rng;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
-use std::fmt;
 use teloxide::types::MessageId;
 
+use crate::telegram_bot::state::ContentStatus;
 use crate::utils::now_in_my_timezone;
 use crate::INTERFACE_UPDATE_INTERVAL;
-use crate::telegram_bot::state::ContentStatus;
 
 #[derive(Clone, Debug)]
 pub struct UserSettings {
@@ -401,7 +402,7 @@ impl DatabaseTransaction {
             } else {
                 new_value.page_num = (total_records / page_size + 1) as i32;
             }
-            
+
             let status_string = new_value.status.to_string();
             tx.execute(
                 "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -496,7 +497,7 @@ impl DatabaseTransaction {
             let url_last_updated_at: String = row.get(8)?;
             let page_num: i32 = row.get(9)?;
             let encountered_errors: i32 = row.get(10)?;
-            
+
             let status: ContentStatus = status.parse().unwrap();
             let content_info = ContentInfo {
                 url,

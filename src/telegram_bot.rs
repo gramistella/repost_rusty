@@ -141,6 +141,7 @@ impl InnerBotManager {
         dispatcher_future.await;
     }
 
+    //noinspection SpellCheckingInspection
     async fn receive_videos(&mut self, mut rx: Receiver<(String, String, String, String)>) {
         let span = tracing::span!(tracing::Level::INFO, "receive_videos");
         let _enter = span.enter();
@@ -224,15 +225,14 @@ impl InnerBotManager {
                     continue;
                 }
                 let result = match content_info.status {
-                    ContentStatus::Waiting  => self.process_waiting(&mut content_info, input_file).await,
-                    ContentStatus::Pending {..} => self.process_pending(message_id, &mut content_info, input_file).await,
-                    ContentStatus::Posted {..} => self.process_posted(message_id, &mut content_info, &input_file).await,
-                    ContentStatus::Queued {..} => self.process_queued(message_id, &mut content_info, &input_file).await,
-                    ContentStatus::Rejected {..} => self.process_rejected(message_id, &mut content_info).await,
-                    ContentStatus::Failed {..} => self.process_failed(message_id, &mut content_info, input_file).await,
+                    ContentStatus::Waiting => self.process_waiting(&mut content_info, input_file).await,
+                    ContentStatus::Pending { .. } => self.process_pending(message_id, &mut content_info, input_file).await,
+                    ContentStatus::Posted { .. } => self.process_posted(message_id, &mut content_info, &input_file).await,
+                    ContentStatus::Queued { .. } => self.process_queued(message_id, &mut content_info, &input_file).await,
+                    ContentStatus::Rejected { .. } => self.process_rejected(message_id, &mut content_info).await,
+                    ContentStatus::Failed { .. } => self.process_failed(message_id, &mut content_info, input_file).await,
                     ContentStatus::RemovedFromView => Ok((message_id, content_info.clone())),
                 };
-                
 
                 match result {
                     Ok((message_id, video_info)) => {
@@ -291,7 +291,6 @@ impl InnerBotManager {
     }
 
     async fn process_failed(&mut self, message_id: MessageId, content_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        
         if content_info.status == (ContentStatus::Failed { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_failed_shown");
             let _enter = span.enter();
@@ -339,11 +338,9 @@ impl InnerBotManager {
             self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
             Ok((sent_message_id, content_info.clone()))
         }
-        
     }
-  
+
     async fn process_pending(&mut self, message_id: MessageId, content_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        
         if content_info.status == (ContentStatus::Pending { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_pending_shown");
             let _enter = span.enter();
@@ -359,12 +356,10 @@ impl InnerBotManager {
             self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_video_caption, video_actions).await?;
             Ok((sent_message_id, content_info.clone()))
         }
-        
     }
-    
+
     async fn process_rejected(&mut self, mut message_id: MessageId, content_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        
-        if content_info.status == (ContentStatus::Rejected { shown: true}) {
+        if content_info.status == (ContentStatus::Rejected { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_rejected_shown");
             let _enter = span.enter();
 
@@ -477,7 +472,6 @@ impl InnerBotManager {
     }
 
     async fn process_queued(&mut self, message_id: MessageId, content_info: &mut ContentInfo, input_file: &InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        
         if content_info.status == (ContentStatus::Queued { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_queued_shown");
             let _enter = span.enter();
@@ -544,10 +538,9 @@ impl InnerBotManager {
             Ok((sent_message_id, content_info.clone()))
         }
     }
-    
+
     async fn process_posted(&mut self, mut message_id: MessageId, video_info: &mut ContentInfo, input_file: &InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        
-        if video_info.status == (ContentStatus::Posted {shown: true}) {
+        if video_info.status == (ContentStatus::Posted { shown: true }) {
             let span = tracing::span!(tracing::Level::INFO, "process_posted_shown");
             let _enter = span.enter();
 
