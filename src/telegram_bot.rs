@@ -148,7 +148,7 @@ impl InnerBotManager {
         sleep(Duration::from_secs(1)).await;
 
         loop {
-            let mut tx = self.database.begin_transaction().unwrap();
+            let mut tx = self.database.begin_transaction().await.unwrap();
             if let Some((received_url, received_caption, original_author, original_shortcode)) = rx.recv().await {
                 //println!("Received URL: \n\"{}\"\nshortcode: \n\"{}\"\n", received_url, original_shortcode);
 
@@ -170,6 +170,7 @@ impl InnerBotManager {
                     let user_settings = tx.load_user_settings().unwrap();
 
                     let video = ContentInfo {
+                        username: user_settings.username.clone(),
                         url: received_url.clone(),
                         status: ContentStatus::Waiting,
                         caption,
@@ -209,13 +210,16 @@ impl InnerBotManager {
         let mutex_clone = Arc::clone(&self.execution_mutex);
         let _mutex_guard = mutex_clone.lock().await;
 
-        let dialogue_state = self.dialogue.get().await.unwrap().unwrap_or_else(|| State::PageView);
+        let dialogue_state = match self.dialogue.get().await.unwrap() {
+            Some(state) => state,
+            None => return Ok(()),
+        };
 
         if dialogue_state != State::PageView {
             return Ok(());
         }
 
-        let mut tx = self.database.begin_transaction().unwrap();
+        let mut tx = self.database.begin_transaction().await.unwrap();
         if let Ok(content_mapping) = tx.load_page() {
             for (message_id, mut content_info) in content_mapping {
                 let input_file = InputFile::url(content_info.url.parse().unwrap());
@@ -258,13 +262,14 @@ impl InnerBotManager {
         let span = tracing::span!(tracing::Level::INFO, "process_waiting");
         let _enter = span.enter();
 
-        let mut tx = self.database.begin_transaction().unwrap();
+        let mut tx = self.database.begin_transaction().await.unwrap();
         let sent_message_id = match self.send_video_and_get_id(input_file).await {
             Ok(id) => id,
             Err(e) => {
                 if e.to_string().contains("wrong file identifier/HTTP URL specified") || e.to_string().contains("failed to get HTTP URL content") {
                     let now = now_in_my_timezone(tx.load_user_settings()?);
                     let failed_content = FailedContent {
+                        username: video_info.username.clone(),
                         url: video_info.url.clone(),
                         caption: video_info.caption.clone(),
                         hashtags: video_info.hashtags.clone(),
@@ -284,19 +289,22 @@ impl InnerBotManager {
         };
         let video_actions = self.get_action_buttons(&["accept", "reject", "edit"], sent_message_id);
         video_info.status = ContentStatus::Pending { shown: true };
-        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "pending", video_info);
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "pending", video_info).await;
         self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_content_caption, video_actions).await?;
         Ok((sent_message_id, video_info.clone()))
     }
 
     async fn process_failed(&mut self, message_id: MessageId, content_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "failed", content_info);
+        let span = tracing::span!(tracing::Level::INFO, "process_failed");
+        let _enter = span.enter();
+
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "failed", content_info).await;
 
         if content_info.status == (ContentStatus::Failed { shown: true }) {
-            let span = tracing::span!(tracing::Level::INFO, "process_failed_shown");
+            let span = tracing::span!(tracing::Level::INFO, "shown");
             let _enter = span.enter();
 
-            let mut tx = self.database.begin_transaction().unwrap();
+            let mut tx = self.database.begin_transaction().await.unwrap();
             let mut content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
 
             let last_updated_at = DateTime::parse_from_rfc3339(&content.last_updated_at).unwrap();
@@ -325,7 +333,7 @@ impl InnerBotManager {
             tx.update_failed_content(content.clone())?;
             Ok((message_id, content_info.clone()))
         } else {
-            let span = tracing::span!(tracing::Level::INFO, "process_failed_hidden");
+            let span = tracing::span!(tracing::Level::INFO, "hidden");
             let _enter = span.enter();
 
             let sent_message_id = self.send_video_and_get_id(input_file).await?;
@@ -338,25 +346,30 @@ impl InnerBotManager {
     }
 
     async fn process_pending(&mut self, message_id: MessageId, content_info: &mut ContentInfo, input_file: InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
+        let span = tracing::span!(tracing::Level::INFO, "process_pending");
+        let _enter = span.enter();
+
         if content_info.status == (ContentStatus::Pending { shown: true }) {
-            let span = tracing::span!(tracing::Level::INFO, "process_pending_shown");
+            let span = tracing::span!(tracing::Level::INFO, "shown");
             let _enter = span.enter();
             return Ok((message_id, content_info.clone()));
         } else {
-            let span = tracing::span!(tracing::Level::INFO, "process_pending_hidden");
+            let span = tracing::span!(tracing::Level::INFO, "hidden");
             let _enter = span.enter();
 
             let sent_message_id = self.send_video_and_get_id(input_file).await?;
             let video_actions = self.get_action_buttons(&["accept", "reject", "edit"], sent_message_id);
             content_info.status = ContentStatus::Pending { shown: true };
-            let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "pending", content_info);
+            let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "pending", content_info).await;
             self.edit_message_caption_and_markup(CHAT_ID, sent_message_id, full_content_caption, video_actions).await?;
             Ok((sent_message_id, content_info.clone()))
         }
     }
 
     async fn process_rejected(&mut self, mut message_id: MessageId, content_info: &mut ContentInfo) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        let mut tx = self.database.begin_transaction().unwrap();
+        let span = tracing::span!(tracing::Level::INFO, "process_rejected");
+        let _enter = span.enter();
+        let mut tx = self.database.begin_transaction().await.unwrap();
 
         let user_settings = tx.load_user_settings()?;
         let now = now_in_my_timezone(user_settings.clone());
@@ -367,10 +380,10 @@ impl InnerBotManager {
         let expiry_duration = chrono::Duration::try_seconds(user_settings.rejected_content_lifespan * 60).unwrap();
         let will_expire_at = rejected_at.checked_add_signed(expiry_duration).unwrap();
 
-        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "rejected", content_info);
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "rejected", content_info).await;
 
         if content_info.status == (ContentStatus::Rejected { shown: true }) {
-            let span = tracing::span!(tracing::Level::INFO, "process_rejected_shown");
+            let span = tracing::span!(tracing::Level::INFO, "shown");
             let _enter = span.enter();
 
             //let formatted_datetime = datetime.format("%m-%d %H:%M").to_string();
@@ -417,7 +430,7 @@ impl InnerBotManager {
 
             Ok((message_id, content_info.clone()))
         } else {
-            let span = tracing::span!(tracing::Level::INFO, "process_rejected_hidden");
+            let span = tracing::span!(tracing::Level::INFO, "hidden");
             let _enter = span.enter();
 
             content_info.status = ContentStatus::Rejected { shown: true };
@@ -463,7 +476,10 @@ impl InnerBotManager {
     }
 
     async fn process_queued(&mut self, message_id: MessageId, content_info: &mut ContentInfo, input_file: &InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "queued", content_info);
+        let span = tracing::span!(tracing::Level::INFO, "process_queued");
+        let _enter = span.enter();
+
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "queued", content_info).await;
 
         let include_buttons;
         if full_content_caption.contains("(Posting now...)") {
@@ -473,10 +489,10 @@ impl InnerBotManager {
         }
 
         if content_info.status == (ContentStatus::Queued { shown: true }) {
-            let span = tracing::span!(tracing::Level::INFO, "process_queued_shown");
+            let span = tracing::span!(tracing::Level::INFO, "shown");
             let _enter = span.enter();
 
-            let mut tx = self.database.begin_transaction().unwrap();
+            let mut tx = self.database.begin_transaction().await.unwrap();
             let queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
 
             let user_settings = tx.load_user_settings().unwrap();
@@ -521,7 +537,7 @@ impl InnerBotManager {
             }
             Ok((message_id, content_info.clone()))
         } else {
-            let span = tracing::span!(tracing::Level::INFO, "process_queued_hidden");
+            let span = tracing::span!(tracing::Level::INFO, "hidden");
             let _enter = span.enter();
 
             content_info.status = ContentStatus::Queued { shown: true };
@@ -538,8 +554,11 @@ impl InnerBotManager {
     }
 
     async fn process_posted(&mut self, mut message_id: MessageId, video_info: &mut ContentInfo, input_file: &InputFile) -> Result<(MessageId, ContentInfo), Box<dyn Error + Send + Sync>> {
-        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "posted", video_info);
-        let mut tx = self.database.begin_transaction().unwrap();
+        let span = tracing::span!(tracing::Level::INFO, "process_posted");
+        let _enter = span.enter();
+
+        let full_content_caption = generate_full_content_caption(self.database.clone(), self.ui_definitions.clone(), "posted", video_info).await;
+        let mut tx = self.database.begin_transaction().await.unwrap();
 
         let mut posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
 
@@ -547,7 +566,7 @@ impl InnerBotManager {
         let now = now_in_my_timezone(user_settings.clone());
 
         if video_info.status == (ContentStatus::Posted { shown: true }) {
-            let span = tracing::span!(tracing::Level::INFO, "process_posted_shown");
+            let span = tracing::span!(tracing::Level::INFO, "shown");
             let _enter = span.enter();
 
             //println!("process_posted_shown - Message ID: {}", message_id);
@@ -592,7 +611,7 @@ impl InnerBotManager {
 
             Ok((message_id, video_info.clone()))
         } else {
-            let span = tracing::span!(tracing::Level::INFO, "process_posted_hidden");
+            let span = tracing::span!(tracing::Level::INFO, "hidden");
             let _enter = span.enter();
             //println!("process_posted_hidden - Message ID: {}", message_id);
 
@@ -675,8 +694,8 @@ impl BotManager {
         Self { inner }
     }
 
-    pub async fn run_bot(&self, rx: Receiver<(String, String, String, String)>) {
-        let span = tracing::span!(tracing::Level::INFO, "BotManager:");
+    pub async fn run_bot(&self, rx: Receiver<(String, String, String, String)>, username: String) {
+        let span = tracing::span!(tracing::Level::INFO, "BotManager:", username);
         let mut inner = self.inner.lock().await;
         inner.run_bot(rx).instrument(span).await;
     }

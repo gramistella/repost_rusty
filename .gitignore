@@ -6,3 +6,5 @@
 /config/hashtags.yaml
 /cookies
 /logs
+cargo-flamegraph.stacks
+flamegraph.svg

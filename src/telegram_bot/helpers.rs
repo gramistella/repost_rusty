@@ -9,7 +9,7 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
 
 use crate::database::{ContentInfo, Database, DatabaseTransaction, QueuedContent, DEFAULT_FAILURE_EXPIRATION};
-use crate::telegram_bot::state::ContentStatus;
+use crate::telegram_bot::state::{ContentStatus, State};
 use crate::telegram_bot::{InnerBotManager, UIDefinitions, CHAT_ID};
 use crate::utils::now_in_my_timezone;
 use crate::INTERFACE_UPDATE_INTERVAL;
@@ -18,7 +18,7 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
     let span = tracing::span!(tracing::Level::INFO, "clear_sent_messages");
     let _enter = span.enter();
 
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let mut content_mapping = tx.load_content_mapping().unwrap();
     for (message_id, video_info) in &mut content_mapping {
         tracing::info!("Clearing message with ID: {}, status {}", message_id, video_info.status.to_string());
@@ -91,7 +91,11 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
 
 impl InnerBotManager {
     pub async fn send_or_replace_navigation_bar(&mut self) {
-        let mut tx = self.database.begin_transaction().unwrap();
+        if self.dialogue.get().await.unwrap() != Some(State::PageView) {
+            return;
+        }
+
+        let mut tx = self.database.begin_transaction().await.unwrap();
         let user_settings = tx.load_user_settings().unwrap();
         let current_page = user_settings.current_page;
         let total_pages = tx.get_total_pages().unwrap();
@@ -159,11 +163,11 @@ impl InnerBotManager {
     }
 }
 
-pub fn generate_full_content_caption(database: Database, ui_definitions: UIDefinitions, caption_type: &str, video_info: &ContentInfo) -> String {
+pub async fn generate_full_content_caption(database: Database, ui_definitions: UIDefinitions, caption_type: &str, video_info: &ContentInfo) -> String {
     let span = tracing::span!(tracing::Level::INFO, "generate_full_video_caption");
     let _enter = span.enter();
     let caption_body = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     match caption_type {
         "accepted" => {
             let accepted_caption = ui_definitions.labels.get("accepted_caption").unwrap();
@@ -177,7 +181,7 @@ pub fn generate_full_content_caption(database: Database, ui_definitions: UIDefin
             let formatted_rejected_at = rejected_at.format("%H:%M %m/%d").to_string();
             let will_expire_at = rejected_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
 
-            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc));
+            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
 
             let full_video_caption = format!("{}\n\n{} at {}\n\nWill expire in {}", caption_body, rejected_caption, formatted_rejected_at, countdown_caption);
             full_video_caption
@@ -188,7 +192,7 @@ pub fn generate_full_content_caption(database: Database, ui_definitions: UIDefin
             let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
             let formatted_will_post_at = will_post_at.format("%H:%M %m/%d").to_string();
 
-            let mut countdown_caption = countdown_until_expiration(database, will_post_at.with_timezone(&Utc));
+            let mut countdown_caption = countdown_until_expiration(database, will_post_at.with_timezone(&Utc)).await;
 
             if countdown_caption.contains("0 hours, 0 minutes and 0 seconds") {
                 countdown_caption = "Posting now...".to_string();
@@ -210,7 +214,7 @@ pub fn generate_full_content_caption(database: Database, ui_definitions: UIDefin
             let will_expire_at = failed_at.checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
             let formatted_failed_at = failed_at.format("%H:%M %m/%d").to_string();
 
-            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc));
+            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
 
             let full_video_caption = format!("{}\n\n{} at {}\n\nWill expire in {}", caption_body, failed_caption, formatted_failed_at, countdown_caption);
             full_video_caption
@@ -225,7 +229,7 @@ pub fn generate_full_content_caption(database: Database, ui_definitions: UIDefin
             let formatted_posted_at = posted_at.format("%H:%M %m/%d").to_string();
             let will_expire_at = posted_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
 
-            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc));
+            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
 
             let full_video_caption = format!("{}\n\n{} at {}\n\nWill expire in {}", caption_body, posted_caption, formatted_posted_at, countdown_caption);
             full_video_caption
@@ -236,8 +240,8 @@ pub fn generate_full_content_caption(database: Database, ui_definitions: UIDefin
     }
 }
 
-fn countdown_until_expiration(database: Database, expiration_datetime: DateTime<Utc>) -> String {
-    let user_settings = database.begin_transaction().unwrap().load_user_settings().unwrap();
+async fn countdown_until_expiration(database: Database, expiration_datetime: DateTime<Utc>) -> String {
+    let user_settings = database.begin_transaction().await.unwrap().load_user_settings().unwrap();
     let now = now_in_my_timezone(user_settings);
     let duration_until_expiration = expiration_datetime.signed_duration_since(now);
 
@@ -271,6 +275,7 @@ pub fn update_content_status_if_posted(content_info: &mut ContentInfo, tx: &mut 
 
 pub fn create_queued_content(content_info: &mut ContentInfo, last_updated_at: DateTime<Utc>, will_post_at: String) -> QueuedContent {
     let new_queued_post = QueuedContent {
+        username: content_info.username.clone(),
         url: content_info.url.clone(),
         caption: content_info.caption.clone(),
         hashtags: content_info.hashtags.clone(),

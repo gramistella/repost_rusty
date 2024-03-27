@@ -23,7 +23,7 @@ pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, databas
 
     let chat_id = q.message.clone().unwrap().chat.id;
     let action = q.data.clone().unwrap();
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
 
     match action.as_str() {
         "next_page" => {
@@ -82,7 +82,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
 
     // Extract the message id from the callback data
     let (_action, message_id) = parse_callback_query(&q);
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let mut content_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
     let user_settings = tx.load_user_settings().unwrap();
@@ -96,13 +96,13 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     let index_map = IndexMap::from([(message_id, content_info.clone())]);
     tx.save_content_mapping(index_map).unwrap();
 
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
 
     let user_settings = tx.load_user_settings().unwrap();
     let now = now_in_my_timezone(user_settings.clone());
 
-    let full_video_caption = generate_full_content_caption(database, ui_definitions.clone(), "queued", &content_info);
+    let full_video_caption = generate_full_content_caption(database, ui_definitions.clone(), "queued", &content_info).await;
 
     let remove_from_queue_action_text = ui_definitions.buttons.get("remove_from_queue").unwrap();
     let _ = match bot.edit_message_caption(CHAT_ID, message_id).caption(full_video_caption.clone()).await {
@@ -135,7 +135,7 @@ pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: 
     let _chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
     //println!("original message id {}, action {}", message_id, action);
 
@@ -149,6 +149,7 @@ pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: 
     let last_updated_at = now - INTERFACE_UPDATE_INTERVAL;
 
     let rejected_content = RejectedContent {
+        username: video_info.username.clone(),
         url: video_info.url.clone(),
         caption: video_info.caption.clone(),
         hashtags: video_info.hashtags.clone(),
@@ -177,7 +178,7 @@ pub async fn handle_undo(bot: Throttle<Bot>, database: Database, ui_definitions:
 
     // Extract the message id from the callback data
     let (_action, message_id) = parse_callback_query(&q);
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
     video_info.status = ContentStatus::Pending { shown: true };
@@ -185,7 +186,7 @@ pub async fn handle_undo(bot: Throttle<Bot>, database: Database, ui_definitions:
 
     tx.save_content_mapping(content_mapping).unwrap();
 
-    let full_video_caption = generate_full_content_caption(database.clone(), ui_definitions.clone(), "pending", &video_info);
+    let full_video_caption = generate_full_content_caption(database.clone(), ui_definitions.clone(), "pending", &video_info).await;
     bot.edit_message_caption(chat_id, message_id).caption(full_video_caption).await?;
 
     let accept_action_text = ui_definitions.buttons.get("accept").unwrap();
@@ -201,11 +202,11 @@ pub async fn handle_undo(bot: Throttle<Bot>, database: Database, ui_definitions:
     let _edited_markup = bot.edit_message_reply_markup(chat_id, message_id).reply_markup(InlineKeyboardMarkup::new([video_actions])).await?;
 
     // Check if it is a rejected video
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let rejected_content = tx.load_rejected_content().unwrap();
     for content in rejected_content {
         if content.url == video_info.url {
-            let mut tx = database.begin_transaction().unwrap();
+            let mut tx = database.begin_transaction().await.unwrap();
             tx.remove_rejected_content_with_shortcode(video_info.original_shortcode.clone()).unwrap();
         }
     }
@@ -221,7 +222,7 @@ pub async fn handle_remove_from_view(bot: Throttle<Bot>, dialogue: BotDialogue, 
     let chat_id = q.message.clone().unwrap().chat.id;
 
     let (_action, message_id) = parse_callback_query(&q);
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
     tx.remove_content_info_with_shortcode(video_info.original_shortcode).unwrap();
@@ -277,18 +278,18 @@ pub async fn handle_settings(bot: Throttle<Bot>, dialogue: BotDialogue, database
         dialogue.update(State::PageView).await.unwrap();
     } else if action == "turn_on" {
         bot.delete_message(q.message.clone().unwrap().chat.id, message_id).await?;
-        let mut tx = database.begin_transaction().unwrap();
+        let mut tx = database.begin_transaction().await.unwrap();
         let mut user_settings = tx.load_user_settings().unwrap();
 
         user_settings.can_post = true;
 
-        let mut tx = database.begin_transaction().unwrap();
+        let mut tx = database.begin_transaction().await.unwrap();
         tx.save_user_settings(user_settings).unwrap();
 
         display_settings_message(bot.clone(), dialogue, database.clone(), ui_definitions).await?;
     } else if action == "turn_off" {
         bot.delete_message(q.message.clone().unwrap().chat.id, message_id).await?;
-        let mut tx = database.begin_transaction().unwrap();
+        let mut tx = database.begin_transaction().await.unwrap();
         let mut user_settings = tx.load_user_settings().unwrap();
         user_settings.can_post = false;
         tx.save_user_settings(user_settings).unwrap();
@@ -356,7 +357,7 @@ pub async fn handle_edit_view(bot: Throttle<Bot>, database: Database, ui_definit
     } else if action == "accept" {
         //println!("accept - message id: {}", message_id);
         // Clear the sent messages, from message_id to the latest message
-        let mut tx = database.begin_transaction().unwrap();
+        let mut tx = database.begin_transaction().await.unwrap();
         let mut content_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
         content_info.status = ContentStatus::Queued { shown: false };
@@ -385,7 +386,7 @@ pub async fn handle_edit_view(bot: Throttle<Bot>, database: Database, ui_definit
                 }
             }
         }
-        let mut tx = database.begin_transaction().unwrap();
+        let mut tx = database.begin_transaction().await.unwrap();
         let video = tx.get_content_info_by_message_id(message_id).unwrap();
         clear_sent_messages(bot.clone(), database.clone()).await.unwrap();
 
@@ -462,7 +463,7 @@ pub async fn handle_remove_from_queue(bot: Throttle<Bot>, database: Database, ui
 
     let (_action, message_id) = parse_callback_query(&q);
 
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
     tx.remove_post_from_queue_with_shortcode(video_info.original_shortcode.clone()).unwrap();
@@ -472,7 +473,7 @@ pub async fn handle_remove_from_queue(bot: Throttle<Bot>, database: Database, ui
 
     tx.save_content_mapping(content_mapping).unwrap();
 
-    let full_video_caption = generate_full_content_caption(database.clone(), ui_definitions.clone(), "pending", &video_info);
+    let full_video_caption = generate_full_content_caption(database.clone(), ui_definitions.clone(), "pending", &video_info).await;
     bot.edit_message_caption(chat_id, message_id).caption(full_video_caption).await?;
 
     let accept_action_text = ui_definitions.buttons.get("accept").unwrap();

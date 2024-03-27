@@ -4,6 +4,7 @@ extern crate r2d2_sqlite;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 
 use teloxide::prelude::ChatId;
@@ -24,8 +25,8 @@ mod utils;
 const CHAT_ID: ChatId = ChatId(34957918);
 const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
 const REFRESH_RATE: Duration = Duration::from_millis(500);
-const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 90);
-const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 5);
+const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 120);
+const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 10);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -34,27 +35,39 @@ async fn main() -> anyhow::Result<()> {
     let is_offline = true;
 
     // Initialize the database
-    let db = Database::new(is_offline)?;
-    db.begin_transaction()?.reorder_pages()?;
 
     let all_credentials = read_credentials("config/credentials.yaml");
 
     let mut all_handles = Vec::new();
 
-    for (username, credentials) in &all_credentials {
+    for (username, credentials) in all_credentials {
         if credentials.get("enabled").expect("No enabled field in credentials") == "true" {
             let span = tracing::span!(tracing::Level::INFO, "main", username = username.as_str());
             let _enter = span.enter();
             tracing::info!("Starting bot for user: {}", username);
 
+            let db = Database::new(username.clone(), is_offline)?;
+            match db.begin_transaction().await?.reorder_pages() {
+                Ok(_) => (),
+                Err(e) => {
+                    tracing::error!("Error reordering pages: {:?}", e);
+                }
+            }
+
             // Create a new channel
             let (tx, rx) = mpsc::channel(100);
 
-            // Run the scraper and the bot concurrently
-            let scraper = tokio::spawn(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone()));
             let bot_manager = BotManager::new(db.clone(), credentials.clone());
 
-            let telegram_bot = tokio::spawn(async move { bot_manager.run_bot(rx).await });
+            // Create a single runtime for both threads
+            let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+
+            // Run the scraper and the bot concurrently
+            let rt_clone = Arc::clone(&rt);
+            let scraper = std::thread::spawn(move || rt_clone.block_on(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone())));
+
+            let rt_clone = Arc::clone(&rt);
+            let telegram_bot = std::thread::spawn(move || rt_clone.block_on(async move { bot_manager.run_bot(rx, username).await }));
 
             all_handles.push(scraper);
             all_handles.push(telegram_bot);
@@ -62,7 +75,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Wait for both tasks to complete
-    let _ = futures::future::join_all(all_handles).await;
+    for handle in all_handles {
+        handle.join().expect("Thread panicked");
+    }
 
     Ok(())
 }
@@ -89,7 +104,7 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
         .with_target(false)
         .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
         .with_writer(non_blocking)
-        .with_filter(LevelFilter::WARN);
+        .with_filter(LevelFilter::INFO);
 
     Registry::default().with(file_layer).with(layer2).init();
 

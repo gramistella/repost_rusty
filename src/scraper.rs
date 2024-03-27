@@ -144,7 +144,7 @@ async fn scraper_loop(tx: Sender<(String, String, String, String)>, database: Da
 
             let inner_scraper_loop_database = scraper_loop_database.clone();
             loop {
-                let transaction = inner_scraper_loop_database.begin_transaction().unwrap();
+                let transaction = inner_scraper_loop_database.begin_transaction().await.unwrap();
 
                 let mut posts: HashMap<User, Vec<Post>> = HashMap::new();
                 retrieve_posts(&scraper, &mut is_restricted, &accounts_being_scraped, &mut posts).await;
@@ -388,7 +388,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
         sleep(Duration::from_secs(5)).await;
 
         loop {
-            let mut transaction = poster_loop_database.begin_transaction().unwrap();
+            let mut transaction = poster_loop_database.begin_transaction().await.unwrap();
             let content_mapping = transaction.load_content_mapping().unwrap();
             let user_settings = transaction.load_user_settings().unwrap();
 
@@ -459,6 +459,7 @@ fn poster_loop(is_offline: bool, credentials: HashMap<String, String>, scraper: 
                                 transaction.save_content_mapping(index_map).unwrap();
 
                                 let posted_content = PostedContent {
+                                    username: queued_post.username.clone(),
                                     url: queued_post.url.clone(),
                                     caption: queued_post.caption.clone(),
                                     hashtags: queued_post.hashtags.clone(),
@@ -510,6 +511,7 @@ fn handle_failed_content(transaction: &mut DatabaseTransaction, user_settings: &
     let now = now_in_my_timezone(user_settings.clone()).to_rfc3339();
     let last_updated_at = (now_in_my_timezone(user_settings.clone()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     let failed_content = FailedContent {
+        username: queued_post.username.clone(),
         url: queued_post.url.clone(),
         caption: queued_post.caption.clone(),
         hashtags: queued_post.hashtags.clone(),

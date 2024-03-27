@@ -23,7 +23,7 @@ pub async fn receive_posting_interval(bot: Throttle<Bot>, dialogue: BotDialogue,
                 // Delete user response
                 bot.delete_message(msg.chat.id, msg.id).await?;
 
-                let mut tx = database.begin_transaction().unwrap();
+                let mut tx = database.begin_transaction().await.unwrap();
                 let mut user_settings = tx.load_user_settings().unwrap();
 
                 match received_posting_interval.parse::<i64>() {
@@ -67,7 +67,7 @@ pub async fn receive_random_interval(bot: Throttle<Bot>, dialogue: BotDialogue, 
                 // Delete user response
                 bot.delete_message(msg.chat.id, msg.id).await?;
 
-                let mut tx = database.begin_transaction().unwrap();
+                let mut tx = database.begin_transaction().await.unwrap();
                 let mut user_settings = tx.load_user_settings().unwrap();
                 match received_random_interval.parse::<i64>() {
                     Ok(_) => {
@@ -110,7 +110,7 @@ pub async fn receive_rejected_content_lifespan(bot: Throttle<Bot>, dialogue: Bot
                 // Delete user response
                 bot.delete_message(msg.chat.id, msg.id).await?;
 
-                let mut tx = database.begin_transaction().unwrap();
+                let mut tx = database.begin_transaction().await.unwrap();
                 let mut user_settings = tx.load_user_settings().unwrap();
                 match received_random_interval.parse::<i64>() {
                     Ok(_) => {
@@ -154,7 +154,7 @@ pub async fn receive_posted_content_lifespan(bot: Throttle<Bot>, dialogue: BotDi
                 // Delete user response
                 bot.delete_message(msg.chat.id, msg.id).await?;
 
-                let mut tx = database.begin_transaction().unwrap();
+                let mut tx = database.begin_transaction().await.unwrap();
                 let mut user_settings = tx.load_user_settings().unwrap();
                 match received_random_interval.parse::<i64>() {
                     Ok(_) => {
@@ -196,7 +196,7 @@ pub async fn receive_caption(bot: Throttle<Bot>, dialogue: BotDialogue, database
                 // Delete user response
                 bot.delete_message(msg.chat.id, msg.id).await?;
 
-                let mut tx = database.begin_transaction().unwrap();
+                let mut tx = database.begin_transaction().await.unwrap();
                 let mut content_info = tx.get_content_info_by_message_id(original_message_id).unwrap();
                 if caption.starts_with("!") {
                     content_info.caption = "".to_string();
@@ -246,7 +246,7 @@ pub async fn receive_hashtags(bot: Throttle<Bot>, dialogue: BotDialogue, databas
                 // Delete user response
                 bot.delete_message(msg.chat.id, msg.id).await?;
 
-                let mut tx = database.begin_transaction().unwrap();
+                let mut tx = database.begin_transaction().await.unwrap();
                 let mut video_info = tx.get_content_info_by_message_id(original_message_id).unwrap();
                 if hashtags.starts_with("!") {
                     video_info.hashtags = "".to_string();

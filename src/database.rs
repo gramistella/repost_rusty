@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Timelike, Utc};
 use indexmap::IndexMap;
@@ -8,6 +9,7 @@ use rand::Rng;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
 use teloxide::types::MessageId;
+use tokio::sync::Mutex;
 
 use crate::telegram_bot::state::ContentStatus;
 use crate::utils::now_in_my_timezone;
@@ -15,6 +17,7 @@ use crate::INTERFACE_UPDATE_INTERVAL;
 
 #[derive(Clone, Debug)]
 pub struct UserSettings {
+    pub username: String,
     pub can_post: bool,
     pub posting_interval: i64,
     pub random_interval_variance: i64,
@@ -27,6 +30,7 @@ pub struct UserSettings {
 
 #[derive(Clone, PartialEq)]
 pub struct QueuedContent {
+    pub username: String,
     pub url: String,
     pub caption: String,
     pub hashtags: String,
@@ -38,6 +42,7 @@ pub struct QueuedContent {
 
 #[derive(Clone)]
 pub struct PostedContent {
+    pub username: String,
     pub url: String,
     pub caption: String,
     pub hashtags: String,
@@ -50,6 +55,7 @@ pub struct PostedContent {
 
 #[derive(Clone)]
 pub struct RejectedContent {
+    pub username: String,
     pub url: String,
     pub caption: String,
     pub hashtags: String,
@@ -62,6 +68,7 @@ pub struct RejectedContent {
 
 #[derive(Clone)]
 pub struct FailedContent {
+    pub username: String,
     pub url: String,
     pub caption: String,
     pub hashtags: String,
@@ -74,6 +81,7 @@ pub struct FailedContent {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct ContentInfo {
+    pub username: String,
     pub url: String,
     pub status: ContentStatus,
     pub caption: String,
@@ -92,7 +100,8 @@ const DEV_DB: &str = "db/dev.db";
 pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 
 pub(crate) struct Database {
-    pool: Pool<SqliteConnectionManager>,
+    pool: Arc<Mutex<Pool<SqliteConnectionManager>>>,
+    username: String,
 }
 
 impl fmt::Debug for Database {
@@ -105,19 +114,22 @@ impl fmt::Debug for Database {
 
         f.debug_struct("Database")
             //.field("bot", &redacted_bot_debug_string) // Use the redacted string
-            .field("pool_state", &self.pool.state())
+            //.field("pool_state", &self.pool.state())
             .finish()
     }
 }
 
 impl Clone for Database {
     fn clone(&self) -> Self {
-        Database { pool: self.pool.clone() }
+        Database {
+            pool: self.pool.clone(),
+            username: self.username.clone(),
+        }
     }
 }
 
 impl Database {
-    pub fn new(is_offline: bool) -> Result<Self> {
+    pub fn new(username: String, is_offline: bool) -> Result<Self> {
         let manager = if is_offline { SqliteConnectionManager::file(DEV_DB) } else { SqliteConnectionManager::file(PROD_DB) };
 
         let pool = Pool::new(manager).unwrap();
@@ -126,6 +138,7 @@ impl Database {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS user_settings (
+            username TEXT PRIMARY KEY,
             can_post INTEGER NOT NULL,
             posting_interval INTEGER NOT NULL,
             random_interval_variance INTEGER NOT NULL,
@@ -141,7 +154,7 @@ impl Database {
         let default_timezone_offset = 1;
         let default_current_page = 1;
 
-        let user_settings_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_settings)", [], |row| row.get(0)).unwrap_or(false);
+        let user_settings_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_settings WHERE username = ?1)", params![username], |row| row.get(0)).unwrap_or(false);
 
         if !user_settings_exists {
             if is_offline {
@@ -153,8 +166,8 @@ impl Database {
                 let default_page_size = 4;
 
                 let query = format!(
-                    "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
-                    default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
+                    "INSERT INTO user_settings (username, can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ('{}', {}, {}, {}, {}, {}, {}, {}, {})",
+                    username, default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
                 );
                 conn.execute(&query, [])?;
             } else {
@@ -165,7 +178,7 @@ impl Database {
                 let default_posted_content_lifespan = 120;
                 let default_page_size = 8;
                 let query = format!(
-                    "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ({}, {}, {}, {}, {}, {}, {}, {})",
+                    "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ('{}', {}, {}, {}, {}, {}, {}, {})",
                     default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
                 );
                 conn.execute(&query, [])?;
@@ -175,6 +188,7 @@ impl Database {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS content_info (
             message_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
             url TEXT NOT NULL,
             status TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -191,6 +205,7 @@ impl Database {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS content_queue (
+            username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
             hashtags TEXT NOT NULL,
@@ -204,6 +219,7 @@ impl Database {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS posted_content (
+            username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
             hashtags TEXT NOT NULL,
@@ -218,6 +234,7 @@ impl Database {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS rejected_content (
+            username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
             hashtags TEXT NOT NULL,
@@ -232,6 +249,7 @@ impl Database {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS failed_content (
+            username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
             hashtags TEXT NOT NULL,
@@ -244,17 +262,21 @@ impl Database {
             [],
         )?;
 
-        Ok(Database { pool })
+        let pool = Arc::new(Mutex::new(pool));
+
+        Ok(Database { pool, username })
     }
-    pub fn begin_transaction(&self) -> Result<DatabaseTransaction> {
-        let conn = self.pool.get().unwrap();
-        Ok(DatabaseTransaction { conn })
+    pub async fn begin_transaction(&self) -> Result<DatabaseTransaction> {
+        let pool_guard = self.pool.lock().await;
+        let conn = pool_guard.get().unwrap();
+        Ok(DatabaseTransaction { conn, username: self.username.clone() })
     }
 }
 
 #[derive(Debug)]
 pub struct DatabaseTransaction {
     conn: PooledConnection<SqliteConnectionManager>,
+    username: String,
 }
 
 impl DatabaseTransaction {
@@ -270,8 +292,8 @@ impl DatabaseTransaction {
         let tx = self.conn.transaction()?;
 
         tx.query_row(
-            "SELECT can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size FROM user_settings",
-            [],
+            "SELECT can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size FROM user_settings WHERE username = ?1",
+            [self.username.clone()],
             |row| {
                 can_post = Some(row.get(0)?);
                 posting_interval = Some(row.get(1)?);
@@ -286,6 +308,7 @@ impl DatabaseTransaction {
         )?;
 
         let user_settings = UserSettings {
+            username: self.username.clone(),
             can_post: can_post.unwrap(),
             posting_interval: posting_interval.unwrap(),
             random_interval_variance: random_interval_variance.unwrap(),
@@ -303,12 +326,13 @@ impl DatabaseTransaction {
         let tx = self.conn.transaction()?;
 
         // Remove all the user settings
-        tx.execute("DELETE FROM user_settings", [])?;
+        tx.execute("DELETE FROM user_settings WHERE username = ?1", [self.username.clone()])?;
 
         // Update user settings
         tx.execute(
-            "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO user_settings (username, can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,?9)",
             params![
+                user_settings.username,
                 user_settings.can_post as i64,
                 user_settings.posting_interval,
                 user_settings.random_interval_variance,
@@ -348,7 +372,7 @@ impl DatabaseTransaction {
         let tx = self.conn.transaction()?;
 
         // Remove the content info with the given shortcode
-        tx.execute("DELETE FROM content_info WHERE original_shortcode = ?1", params![shortcode])?;
+        tx.execute("DELETE FROM content_info WHERE original_shortcode = ?1 AND username = ?2", params![shortcode, self.username])?;
 
         tx.commit()?;
 
@@ -378,13 +402,17 @@ impl DatabaseTransaction {
     }
 
     pub fn get_max_records_in_content_info(&self) -> Result<i64> {
-        let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM content_info", params![], |row| row.get(0))?;
+        let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM content_info WHERE username = ?1", params![self.username], |row| row.get(0))?;
         Ok(count)
     }
     pub fn get_total_pages(&mut self) -> Result<i32> {
         Ok((self.get_max_records_in_content_info().unwrap() as i32 - 1) / self.load_user_settings().unwrap().page_size + 1)
     }
+
     pub fn save_content_mapping(&mut self, video_mapping: IndexMap<MessageId, ContentInfo>) -> Result<()> {
+        let span = tracing::span!(tracing::Level::INFO, "save_content_mapping");
+        let _enter = span.enter();
+
         let existing_mapping = self.load_content_mapping()?;
         let user_settings = self.load_user_settings()?;
         let page_size = user_settings.page_size as i64;
@@ -398,15 +426,16 @@ impl DatabaseTransaction {
         for (new_key, mut new_value) in video_mapping {
             if let Some(existing_value) = existing_mapping.iter().find(|(_k, v)| v.original_shortcode == new_value.original_shortcode) {
                 new_value.page_num = existing_value.1.page_num;
-                tx.execute("DELETE FROM content_info WHERE original_shortcode = ?1", params![existing_value.1.original_shortcode])?;
+                tx.execute("DELETE FROM content_info WHERE original_shortcode = ?1 AND username = ?2", params![existing_value.1.original_shortcode, self.username])?;
             } else {
                 new_value.page_num = (total_records / page_size + 1) as i32;
             }
 
             let status_string = new_value.status.to_string();
             tx.execute(
-                "INSERT INTO content_info (message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO content_info (username, message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
+                    self.username,
                     new_key.0,
                     new_value.url,
                     status_string,
@@ -445,7 +474,7 @@ impl DatabaseTransaction {
             let correct_page_num = ((index as f64 - 1.0) / page_size as f64 + 1.0).floor() as i32;
             if info.page_num != correct_page_num {
                 info.page_num = correct_page_num;
-                tx.execute("UPDATE content_info SET page_num = ?1 WHERE original_shortcode = ?2", params![correct_page_num, info.original_shortcode])?;
+                tx.execute("UPDATE content_info SET page_num = ?1 WHERE original_shortcode = ?2 AND username = ?3", params![correct_page_num, info.original_shortcode, self.username])?;
             }
             video_mapping.insert(message_id, info);
         }
@@ -484,22 +513,24 @@ impl DatabaseTransaction {
 
     pub fn load_content_mapping(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let tx = self.conn.transaction()?;
-        let mut stmt = tx.prepare("SELECT message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors FROM content_info ORDER BY page_num, message_id")?;
-        let content_info_iter = stmt.query_map([], |row| {
-            let message_id: i32 = row.get(0)?;
-            let url: String = row.get(1)?;
-            let status: String = row.get(2)?;
-            let caption: String = row.get(3)?;
-            let hashtags: String = row.get(4)?;
-            let original_author: String = row.get(5)?;
-            let original_shortcode: String = row.get(6)?;
-            let last_updated_at: String = row.get(7)?;
-            let url_last_updated_at: String = row.get(8)?;
-            let page_num: i32 = row.get(9)?;
-            let encountered_errors: i32 = row.get(10)?;
+        let mut stmt = tx.prepare("SELECT username, message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors FROM content_info WHERE username = ?1 ORDER BY page_num, message_id")?;
+        let content_info_iter = stmt.query_map([self.username.clone()], |row| {
+            let username: String = row.get(0)?;
+            let message_id: i32 = row.get(1)?;
+            let url: String = row.get(2)?;
+            let status: String = row.get(3)?;
+            let caption: String = row.get(4)?;
+            let hashtags: String = row.get(5)?;
+            let original_author: String = row.get(6)?;
+            let original_shortcode: String = row.get(7)?;
+            let last_updated_at: String = row.get(8)?;
+            let url_last_updated_at: String = row.get(9)?;
+            let page_num: i32 = row.get(10)?;
+            let encountered_errors: i32 = row.get(11)?;
 
             let status: ContentStatus = status.parse().unwrap();
             let content_info = ContentInfo {
+                username,
                 url,
                 status,
                 caption,
@@ -526,9 +557,9 @@ impl DatabaseTransaction {
 
     pub fn get_temp_message_id(&mut self, user_settings: UserSettings) -> i32 {
         let tx = self.conn.transaction().unwrap();
-        let mut stmt = tx.prepare("SELECT message_id FROM content_info").unwrap();
+        let mut stmt = tx.prepare("SELECT message_id FROM content_info WHERE username = ?1").unwrap();
         let message_id_iter = stmt
-            .query_map([], |row| {
+            .query_map([self.username.clone()], |row| {
                 let message_id: i32 = row.get(0).unwrap();
                 Ok(message_id)
             })
@@ -554,16 +585,20 @@ impl DatabaseTransaction {
         let tx = self.conn.transaction()?;
 
         // Get the rowid of the row with the matching URL
-        let rowid: i64 = tx.query_row("SELECT rowid FROM content_queue WHERE original_shortcode = ?1", params![shortcode], |row| row.get(0))?;
+        let rowid: i64 = tx.query_row("SELECT rowid FROM content_queue WHERE original_shortcode = ?1 AND username = ?2", params![shortcode, self.username], |row| row.get(0))?;
 
         // Create a temporary table with rowids of all rows that should be deleted
-        tx.execute("CREATE TEMPORARY TABLE to_delete AS SELECT rowid FROM content_queue WHERE rowid >= ?1", params![rowid])?;
+        let temp_table_name = format!("to_delete_{}", self.username);
+        let sql = format!("CREATE TEMPORARY TABLE {} AS SELECT rowid FROM content_queue WHERE rowid >= ?1 AND username = ?2", temp_table_name);
+        tx.execute(&sql, params![rowid, self.username])?;
 
         // Delete all rows from the original table where the rowid is in the temporary table
-        tx.execute("DELETE FROM content_queue WHERE rowid IN (SELECT rowid FROM to_delete)", [])?;
+        let sql = format!("DELETE FROM content_queue WHERE rowid IN (SELECT rowid FROM {}) AND username = ?1", temp_table_name);
+        tx.execute(&sql, params![self.username])?;
 
         // Drop the temporary table
-        tx.execute("DROP TABLE to_delete", [])?;
+        let sql = format!("DROP TABLE {}", temp_table_name);
+        tx.execute(&sql, [])?;
 
         tx.commit()?;
 
@@ -582,6 +617,7 @@ impl DatabaseTransaction {
                     post.last_updated_at = (now_in_my_timezone(user_settings.clone()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
 
                     let new_post = QueuedContent {
+                        username: post.username.clone(),
                         url: post.url.clone(),
                         caption: post.caption.clone(),
                         hashtags: post.hashtags.clone(),
@@ -609,11 +645,20 @@ impl DatabaseTransaction {
     pub fn save_content_queue(&mut self, queued_post: QueuedContent) -> Result<()> {
         let tx = self.conn.transaction()?;
 
-        tx.execute("DELETE FROM content_queue WHERE original_shortcode = ?1", params![queued_post.original_shortcode])?;
+        tx.execute("DELETE FROM content_queue WHERE original_shortcode = ?1 AND username = ?2", params![queued_post.original_shortcode, self.username])?;
 
         tx.execute(
-            "INSERT INTO content_queue (url, caption, hashtags, original_author, original_shortcode, last_updated_at, will_post_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![queued_post.url, queued_post.caption, queued_post.hashtags, queued_post.original_author, queued_post.original_shortcode, queued_post.last_updated_at, queued_post.will_post_at],
+            "INSERT INTO content_queue (username, url, caption, hashtags, original_author, original_shortcode, last_updated_at, will_post_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                queued_post.username,
+                queued_post.url,
+                queued_post.caption,
+                queued_post.hashtags,
+                queued_post.original_author,
+                queued_post.original_shortcode,
+                queued_post.last_updated_at,
+                queued_post.will_post_at
+            ],
         )?;
 
         tx.commit()?;
@@ -624,8 +669,8 @@ impl DatabaseTransaction {
     pub fn load_content_queue(&mut self) -> Result<Vec<QueuedContent>> {
         let tx = self.conn.transaction()?;
 
-        let mut queued_videos_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, will_post_at FROM content_queue")?;
-        let video_queue_iter = queued_videos_stmt.query_map([], |row| {
+        let mut queued_videos_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, will_post_at FROM content_queue WHERE username = ?1")?;
+        let video_queue_iter = queued_videos_stmt.query_map(params![self.username], |row| {
             let url: String = row.get(0)?;
             let caption: String = row.get(1)?;
             let hashtags: String = row.get(2)?;
@@ -635,6 +680,7 @@ impl DatabaseTransaction {
             let will_post_at: String = row.get(6)?;
 
             let queued_post = QueuedContent {
+                username: self.username.clone(),
                 url,
                 caption,
                 hashtags,
@@ -704,7 +750,7 @@ impl DatabaseTransaction {
         let tx = self.conn.transaction()?;
 
         // Firstly we remove the posted_content from the content_queue
-        tx.execute("DELETE FROM rejected_content WHERE original_shortcode = ?1", params![shortcode])?;
+        tx.execute("DELETE FROM rejected_content WHERE original_shortcode = ?1 AND username = ?2", params![shortcode, self.username])?;
 
         tx.commit()?;
 
@@ -713,11 +759,12 @@ impl DatabaseTransaction {
 
     pub fn save_rejected_content(&mut self, rejected_content: RejectedContent) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM rejected_content WHERE original_shortcode = ?1", params![rejected_content.original_shortcode])?;
+        tx.execute("DELETE FROM rejected_content WHERE original_shortcode = ?1 AND username = ?2", params![rejected_content.original_shortcode, self.username])?;
 
         tx.execute(
-            "INSERT INTO rejected_content (url, caption, hashtags, original_author, original_shortcode, rejected_at, last_updated_at, expired) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO rejected_content (username, url, caption, hashtags, original_author, original_shortcode, rejected_at, last_updated_at, expired) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
+                rejected_content.username,
                 rejected_content.url,
                 rejected_content.caption,
                 rejected_content.hashtags,
@@ -737,8 +784,9 @@ impl DatabaseTransaction {
     pub fn load_rejected_content(&mut self) -> Result<Vec<RejectedContent>> {
         let tx = self.conn.transaction()?;
 
-        let mut posted_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, rejected_at, last_updated_at, expired FROM rejected_content")?;
-        let posted_content_iter = posted_content_stmt.query_map([], |row| {
+        let mut posted_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, rejected_at, last_updated_at, expired FROM rejected_content WHERE username = ?1")?;
+        let posted_content_iter = posted_content_stmt.query_map(params![self.username], |row| {
+            let username = self.username.clone();
             let url: String = row.get(0)?;
             let caption: String = row.get(1)?;
             let hashtags: String = row.get(2)?;
@@ -749,6 +797,7 @@ impl DatabaseTransaction {
             let expired: bool = row.get(7)?;
 
             let rejected_content = RejectedContent {
+                username,
                 url,
                 caption,
                 hashtags,
@@ -801,16 +850,17 @@ impl DatabaseTransaction {
         // This is what the "normal" behavior should be, the above will only happen if the bot was offline for a long time
         if !removed {
             // Firstly we remove the posted_content from the content_queue
-            tx.execute("DELETE FROM content_queue WHERE original_shortcode = ?1", params![posted_content.original_shortcode])?;
+            tx.execute("DELETE FROM content_queue WHERE original_shortcode = ?1 AND username = ?2", params![posted_content.original_shortcode, self.username])?;
         }
 
         // We remove the posted_content if it is already there
-        tx.execute("DELETE FROM posted_content WHERE original_shortcode = ?1", params![posted_content.original_shortcode])?;
+        tx.execute("DELETE FROM posted_content WHERE original_shortcode = ?1 AND username = ?2", params![posted_content.original_shortcode, self.username])?;
 
         // Then we add the posted_content to the posted_content table
         tx.execute(
-            "INSERT INTO posted_content (url, caption, hashtags, original_author, original_shortcode, posted_at, last_updated_at, expired) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO posted_content (username, url, caption, hashtags, original_author, original_shortcode, posted_at, last_updated_at, expired) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
+                self.username,
                 posted_content.url,
                 posted_content.caption,
                 posted_content.hashtags,
@@ -830,8 +880,9 @@ impl DatabaseTransaction {
     pub fn load_posted_content(&mut self) -> Result<Vec<PostedContent>> {
         let tx = self.conn.transaction()?;
 
-        let mut posted_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, posted_at, last_updated_at, expired FROM posted_content")?;
-        let posted_content_iter = posted_content_stmt.query_map([], |row| {
+        let mut posted_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, posted_at, last_updated_at, expired FROM posted_content WHERE username = ?1")?;
+        let posted_content_iter = posted_content_stmt.query_map(params![self.username], |row| {
+            let username = self.username.clone();
             let url: String = row.get(0)?;
             let caption: String = row.get(1)?;
             let hashtags: String = row.get(2)?;
@@ -842,6 +893,7 @@ impl DatabaseTransaction {
             let expired: bool = row.get(7)?;
 
             let queued_post = PostedContent {
+                username,
                 url,
                 caption,
                 hashtags,
@@ -891,8 +943,9 @@ impl DatabaseTransaction {
         // Then we add the failed_content to the failed_content table
         let tx = self.conn.transaction()?;
         tx.execute(
-            "INSERT INTO failed_content (url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at, expired) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO failed_content (username, url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at, expired) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
+                self.username,
                 failed_content.url,
                 failed_content.caption,
                 failed_content.hashtags,
@@ -912,8 +965,9 @@ impl DatabaseTransaction {
     /// This function updates a matching failed content with the new failed content
     pub fn update_failed_content(&mut self, failed_content: FailedContent) -> Result<()> {
         let tx = self.conn.transaction()?;
+        let username = self.username.clone();
         tx.execute(
-            "UPDATE failed_content SET url = ?1, caption = ?2, hashtags = ?3, original_author = ?4, last_updated_at = ?5, failed_at = ?6, expired = ?7 WHERE original_shortcode = ?8",
+            "UPDATE failed_content SET url = ?1, caption = ?2, hashtags = ?3, original_author = ?4, last_updated_at = ?5, failed_at = ?6, expired = ?7 WHERE original_shortcode = ?8 AND username = ?9",
             params![
                 failed_content.url,
                 failed_content.caption,
@@ -922,7 +976,8 @@ impl DatabaseTransaction {
                 failed_content.last_updated_at,
                 failed_content.failed_at,
                 failed_content.expired,
-                failed_content.original_shortcode
+                failed_content.original_shortcode,
+                username
             ],
         )?;
 
@@ -934,8 +989,9 @@ impl DatabaseTransaction {
     pub fn load_failed_content(&mut self) -> Result<Vec<FailedContent>> {
         let tx = self.conn.transaction()?;
 
-        let mut failed_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at, expired FROM failed_content")?;
-        let failed_content_iter = failed_content_stmt.query_map([], |row| {
+        let mut failed_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, failed_at, expired FROM failed_content WHERE username = ?1")?;
+        let failed_content_iter = failed_content_stmt.query_map(params![self.username], |row| {
+            let username = self.username.clone();
             let url: String = row.get(0)?;
             let caption: String = row.get(1)?;
             let hashtags: String = row.get(2)?;
@@ -946,6 +1002,7 @@ impl DatabaseTransaction {
             let expired: bool = row.get(7)?;
 
             let failed_content = FailedContent {
+                username,
                 url,
                 caption,
                 hashtags,
@@ -1036,8 +1093,8 @@ impl DatabaseTransaction {
 
     fn shortcode_exists_in_table(&mut self, table_name: &str, shortcode: &str) -> bool {
         let tx = self.conn.transaction().unwrap();
-        let mut stmt = tx.prepare(&format!("SELECT url FROM {} WHERE original_shortcode = ?1", table_name)).unwrap();
-        let exists = stmt.query_map(params![shortcode], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
+        let mut stmt = tx.prepare(&format!("SELECT url FROM {} WHERE original_shortcode = ?1 AND username = ?2", table_name)).unwrap();
+        let exists = stmt.query_map(params![shortcode, self.username], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
         exists
     }
 

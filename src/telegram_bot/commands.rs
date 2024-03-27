@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use teloxide::adaptors::Throttle;
 use teloxide::payloads::EditMessageReplyMarkupSetters;
-use teloxide::prelude::{ChatId, Message, Requester};
+use teloxide::prelude::{Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::utils::command::BotCommands;
 use teloxide::Bot;
@@ -26,12 +26,20 @@ pub enum Command {
 }
 
 pub async fn help(bot: Throttle<Bot>, msg: Message) -> HandlerResult {
-    bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
+    let span = tracing::span!(tracing::Level::INFO, "help");
+    let _enter = span.enter();
+    if msg.chat.id == CHAT_ID {
+        bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
+    }
     Ok(())
 }
 
 pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, msg: Message) -> HandlerResult {
-    if msg.chat.id == ChatId(34957918) {
+    let span = tracing::span!(tracing::Level::INFO, "start");
+    let _enter = span.enter();
+
+    println!("Chat ID: {:?}", msg.chat.id);
+    if msg.chat.id == CHAT_ID {
         bot.send_message(msg.chat.id, format!("Welcome back, {}! 🦀", msg.chat.first_name().unwrap()).to_string()).await?;
         clear_sent_messages(bot, database).await.unwrap();
         dialogue.update(State::PageView).await.unwrap();
@@ -43,6 +51,9 @@ pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database
 }
 
 pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, msg: Message) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "page");
+    let _enter = span.enter();
+
     let _ = bot.delete_message(CHAT_ID, msg.id).await;
 
     if let Some(state) = dialogue.get().await.unwrap() {
@@ -52,7 +63,7 @@ pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database,
     }
 
     let _ = clear_sent_messages(bot.clone(), database.clone()).await;
-    let mut tx = database.begin_transaction().unwrap();
+    let mut tx = database.begin_transaction().await.unwrap();
     let mut user_settings = tx.load_user_settings().unwrap();
     let page_num = msg.text().unwrap().split(" ").collect::<Vec<&str>>()[1].parse::<i32>();
     let page_num = match page_num {
@@ -74,6 +85,9 @@ pub async fn page(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database,
 }
 
 pub async fn settings(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>) -> HandlerResult {
+    let span = tracing::span!(tracing::Level::INFO, "settings");
+    let _enter = span.enter();
+
     if let Some(state) = dialogue.get().await.unwrap() {
         if state != State::PageView {
             let _ = bot.delete_message(CHAT_ID, msg.id).await;
@@ -93,7 +107,16 @@ pub async fn settings(bot: Throttle<Bot>, dialogue: BotDialogue, msg: Message, d
 }
 
 pub async fn display_settings_message(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut tx = database.begin_transaction().unwrap();
+    let span = tracing::span!(tracing::Level::INFO, "display_settings_message");
+    let _enter = span.enter();
+
+    if let Some(state) = dialogue.get().await.unwrap() {
+        if state != State::PageView {
+            return Ok(());
+        }
+    }
+
+    let mut tx = database.begin_transaction().await.unwrap();
     let user_settings = tx.load_user_settings().unwrap();
     let mut posting_status = "disabled";
     if user_settings.can_post {
