@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::telegram_bot::state::ContentStatus;
 use crate::utils::now_in_my_timezone;
-use crate::INTERFACE_UPDATE_INTERVAL;
+use crate::{INTERFACE_UPDATE_INTERVAL, IS_OFFLINE};
 
 #[derive(Clone, Debug)]
 pub struct UserSettings {
@@ -121,16 +121,14 @@ impl fmt::Debug for Database {
 
 impl Clone for Database {
     fn clone(&self) -> Self {
-        Database {
-            pool: self.pool.clone(),
-            username: self.username.clone(),
-        }
+        Database { pool: self.pool.clone(), username: self.username.clone() }
     }
 }
 
 impl Database {
-    pub fn new(username: String, is_offline: bool) -> Result<Self> {
-        let manager = if is_offline { SqliteConnectionManager::file(DEV_DB) } else { SqliteConnectionManager::file(PROD_DB) };
+    //noinspection RsConstantConditionIf
+    pub fn new(username: String) -> Result<Self> {
+        let manager = if IS_OFFLINE { SqliteConnectionManager::file(DEV_DB) } else { SqliteConnectionManager::file(PROD_DB) };
 
         let pool = Pool::new(manager).unwrap();
 
@@ -157,7 +155,7 @@ impl Database {
         let user_settings_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_settings WHERE username = ?1)", params![username], |row| row.get(0)).unwrap_or(false);
 
         if !user_settings_exists {
-            if is_offline {
+            if IS_OFFLINE {
                 let default_is_posting = 1;
                 let default_posting_interval = 2;
                 let default_random_interval = 0;
@@ -178,8 +176,8 @@ impl Database {
                 let default_posted_content_lifespan = 120;
                 let default_page_size = 8;
                 let query = format!(
-                    "INSERT INTO user_settings (can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ('{}', {}, {}, {}, {}, {}, {}, {})",
-                    default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
+                    "INSERT INTO user_settings (username, can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ('{}', {}, {}, {}, {}, {}, {}, {}, {})",
+                    username, default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
                 );
                 conn.execute(&query, [])?;
             }
@@ -187,8 +185,8 @@ impl Database {
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS content_info (
-            message_id INTEGER PRIMARY KEY,
             username TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
             url TEXT NOT NULL,
             status TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -413,7 +411,7 @@ impl DatabaseTransaction {
         let span = tracing::span!(tracing::Level::INFO, "save_content_mapping");
         let _enter = span.enter();
 
-        let existing_mapping = self.load_content_mapping()?;
+        let existing_mapping = self.load_content_mapping().unwrap();
         let user_settings = self.load_user_settings()?;
         let page_size = user_settings.page_size as i64;
 

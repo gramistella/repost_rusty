@@ -400,10 +400,7 @@ impl InnerBotManager {
                         Ok(_) => {
                             let undo_action_text = self.ui_definitions.buttons.get("undo").unwrap();
                             let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
-                            let undo_action = [
-                                InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", message_id)),
-                                InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", message_id)),
-                            ];
+                            let undo_action = [InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", message_id)), InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", message_id))];
 
                             let _msg = self.bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
                         }

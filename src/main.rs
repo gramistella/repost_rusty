@@ -15,6 +15,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
 use crate::database::Database;
+use crate::scraper::ScraperPoster;
 use crate::telegram_bot::BotManager;
 
 mod database;
@@ -24,20 +25,15 @@ mod utils;
 
 const CHAT_ID: ChatId = ChatId(34957918);
 const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
-const REFRESH_RATE: Duration = Duration::from_millis(500);
+const REFRESH_RATE: Duration = Duration::from_secs(6);
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 120);
 const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 10);
+const IS_OFFLINE: bool = true;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let (_file_guard, _stdout_guard) = init_logging();
 
-    let is_offline = true;
-
-    // Initialize the database
-
     let all_credentials = read_credentials("config/credentials.yaml");
-
     let mut all_handles = Vec::new();
 
     for (username, credentials) in all_credentials {
@@ -46,8 +42,11 @@ async fn main() -> anyhow::Result<()> {
             let _enter = span.enter();
             tracing::info!("Starting bot for user: {}", username);
 
-            let db = Database::new(username.clone(), is_offline)?;
-            match db.begin_transaction().await?.reorder_pages() {
+            // Create a single runtime for all threads
+            let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+
+            let db = Database::new(username.clone()).unwrap();
+            match rt.block_on(async { db.begin_transaction().await.unwrap().reorder_pages() }) {
                 Ok(_) => (),
                 Err(e) => {
                     tracing::error!("Error reordering pages: {:?}", e);
@@ -57,17 +56,13 @@ async fn main() -> anyhow::Result<()> {
             // Create a new channel
             let (tx, rx) = mpsc::channel(100);
 
-            let bot_manager = BotManager::new(db.clone(), credentials.clone());
-
-            // Create a single runtime for both threads
-            let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+            let bot_manager = rt.block_on(async { BotManager::new(db.clone(), credentials.clone()) });
+            let rt_clone_bot = Arc::clone(&rt);
 
             // Run the scraper and the bot concurrently
-            let rt_clone = Arc::clone(&rt);
-            let scraper = std::thread::spawn(move || rt_clone.block_on(scraper::run_scraper(tx, db.clone(), is_offline, credentials.clone())));
-
-            let rt_clone = Arc::clone(&rt);
-            let telegram_bot = std::thread::spawn(move || rt_clone.block_on(async move { bot_manager.run_bot(rx, username).await }));
+            let mut scraper_poster = rt.block_on(async { ScraperPoster::new(db.clone(), username.clone(), credentials.clone()) });
+            let scraper = std::thread::spawn(move || rt.block_on(scraper_poster.run_scraper(tx)));
+            let telegram_bot = std::thread::spawn(move || rt_clone_bot.block_on(async move { bot_manager.run_bot(rx, username).await }));
 
             all_handles.push(scraper);
             all_handles.push(telegram_bot);
@@ -104,7 +99,7 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
         .with_target(false)
         .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
         .with_writer(non_blocking)
-        .with_filter(LevelFilter::INFO);
+        .with_filter(LevelFilter::WARN);
 
     Registry::default().with(file_layer).with(layer2).init();
 

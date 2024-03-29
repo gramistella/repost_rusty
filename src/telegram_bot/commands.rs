@@ -38,12 +38,12 @@ pub async fn start(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database
     let span = tracing::span!(tracing::Level::INFO, "start");
     let _enter = span.enter();
 
-    println!("Chat ID: {:?}", msg.chat.id);
     if msg.chat.id == CHAT_ID {
         bot.send_message(msg.chat.id, format!("Welcome back, {}! 🦀", msg.chat.first_name().unwrap()).to_string()).await?;
         clear_sent_messages(bot, database).await.unwrap();
         dialogue.update(State::PageView).await.unwrap();
     } else {
+        println!("User {} tried to use the bot.", msg.chat.username().unwrap_or("unknown"));
         bot.send_message(msg.chat.id, "You can't use this bot.".to_string()).await?;
     }
 

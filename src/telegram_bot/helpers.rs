@@ -84,7 +84,9 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
     }
 
     // Save the updated video mappings
-    tx.save_content_mapping(content_mapping).unwrap();
+    if !content_mapping.is_empty() {
+        tx.save_content_mapping(content_mapping).unwrap();
+    }
 
     Ok(())
 }
@@ -200,10 +202,7 @@ pub async fn generate_full_content_caption(database: Database, ui_definitions: U
 
             let countdown_caption = format!("({})", countdown_caption);
 
-            let full_video_caption = format!(
-                "{}\n{}\n(from @{})\n\n{}\n\nWill post at {}\n{}",
-                queued_content.caption, queued_content.hashtags, queued_content.original_author, queued_caption, formatted_will_post_at, countdown_caption
-            );
+            let full_video_caption = format!("{}\n{}\n(from @{})\n\n{}\n\nWill post at {}\n{}", queued_content.caption, queued_content.hashtags, queued_content.original_author, queued_caption, formatted_will_post_at, countdown_caption);
             full_video_caption
         }
         "failed" => {

@@ -13,7 +13,7 @@ use crate::telegram_bot::helpers::{clear_sent_messages, create_queued_content, g
 use crate::telegram_bot::state::ContentStatus;
 use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
 use crate::utils::now_in_my_timezone;
-use crate::{CHAT_ID, INTERFACE_UPDATE_INTERVAL};
+use crate::CHAT_ID;
 
 pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>, q: CallbackQuery) -> HandlerResult {
     let span = tracing::span!(tracing::Level::INFO, "handle_page_view");
@@ -54,7 +54,7 @@ pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, databas
         }
         "reject" => {
             dialogue.update(State::RejectedView).await.unwrap();
-            handle_rejected_view(database, dialogue, q).await?;
+            handle_rejected_view(bot, database, ui_definitions, dialogue, q).await?;
         }
         "edit" => {
             dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
@@ -96,7 +96,6 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     let index_map = IndexMap::from([(message_id, content_info.clone())]);
     tx.save_content_mapping(index_map).unwrap();
 
-    let mut tx = database.begin_transaction().await.unwrap();
     let queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
 
     let user_settings = tx.load_user_settings().unwrap();
@@ -128,7 +127,7 @@ pub async fn handle_accepted_view(bot: Throttle<Bot>, database: Database, ui_def
     Ok(())
 }
 
-pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: CallbackQuery) -> HandlerResult {
+pub async fn handle_rejected_view(bot: Throttle<Bot>, database: Database, ui_definitions: UIDefinitions, dialogue: BotDialogue, q: CallbackQuery) -> HandlerResult {
     let span = tracing::span!(tracing::Level::INFO, "handle_rejected_view");
     let _enter = span.enter();
 
@@ -136,36 +135,59 @@ pub async fn handle_rejected_view(database: Database, dialogue: BotDialogue, q: 
 
     let (_action, message_id) = parse_callback_query(&q);
     let mut tx = database.begin_transaction().await.unwrap();
-    let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
+    let mut content_info = tx.get_content_info_by_message_id(message_id).unwrap();
     //println!("original message id {}, action {}", message_id, action);
 
-    video_info.status = ContentStatus::Rejected { shown: true };
-    let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, video_info.clone())]);
+    content_info.status = ContentStatus::Rejected { shown: true };
+    let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(message_id, content_info.clone())]);
     tx.save_content_mapping(content_mapping).unwrap();
 
     let now = now_in_my_timezone(tx.load_user_settings().unwrap());
 
-    // Subtract the refresh rate from the current time so that the rejected content is shown immediately
-    let last_updated_at = now - INTERFACE_UPDATE_INTERVAL;
-
     let rejected_content = RejectedContent {
-        username: video_info.username.clone(),
-        url: video_info.url.clone(),
-        caption: video_info.caption.clone(),
-        hashtags: video_info.hashtags.clone(),
-        original_author: video_info.original_author.clone(),
-        original_shortcode: video_info.original_shortcode.clone(),
+        username: content_info.username.clone(),
+        url: content_info.url.clone(),
+        caption: content_info.caption.clone(),
+        hashtags: content_info.hashtags.clone(),
+        original_author: content_info.original_author.clone(),
+        original_shortcode: content_info.original_shortcode.clone(),
         rejected_at: now.clone().to_rfc3339(),
-        last_updated_at: last_updated_at.clone().to_rfc3339(),
+        last_updated_at: now.clone().to_rfc3339(),
         expired: false,
     };
 
-    tx.save_rejected_content(rejected_content).unwrap();
+    tx.save_rejected_content(rejected_content.clone()).unwrap();
 
-    //let _did_expire = expire_rejected_content(&bot, ui_definitions, &mut tx, message_id, &mut video_info).await?;
-    //process_rejected_shown(&bot, &ui_definitions, &mut tx, message_id, &mut video_info, caption_body).await?;
+    //let _did_expire = expire_rejected_content(&bot, ui_definitions, &mut tx, message_id, &mut content_info).await?;
+    //process_rejected_shown(&bot, &ui_definitions, &mut tx, message_id, &mut content_info, caption_body).await?;
+    let full_content_caption = generate_full_content_caption(database.clone(), ui_definitions.clone(), "rejected", &content_info).await;
 
-    tx.save_content_mapping(IndexMap::from([(message_id, video_info)])).unwrap();
+    let _ = match bot.edit_message_caption(CHAT_ID, message_id).caption(full_content_caption.clone()).await {
+        Ok(_) => {
+            let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
+            let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
+            let undo_action = [InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", message_id)), InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", message_id))];
+
+            let _msg = bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+            let new_message = bot.send_video(CHAT_ID, InputFile::url(rejected_content.url.clone().parse().unwrap())).caption(full_content_caption).await?;
+
+            let undo_action_text = ui_definitions.buttons.get("undo").unwrap();
+            let remove_from_view_action_text = ui_definitions.buttons.get("remove_from_view").unwrap();
+            let buttons = [
+                InlineKeyboardButton::callback(undo_action_text, format!("undo_{}", new_message.id)),
+                InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id)),
+            ];
+
+            tx.save_content_mapping(IndexMap::from([(new_message.id, content_info.clone())]))?;
+
+            let _msg = bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([buttons])).await?;
+        }
+    };
+
+    tx.save_content_mapping(IndexMap::from([(message_id, content_info)])).unwrap();
     dialogue.update(State::PageView).await.unwrap();
 
     Ok(())
@@ -248,7 +270,7 @@ pub async fn handle_video_action(bot: Throttle<Bot>, dialogue: BotDialogue, data
             handle_accepted_view(bot, database, ui_definitions, dialogue, q).await?;
         } else if action == "reject" {
             dialogue.update(State::RejectedView).await.unwrap();
-            handle_rejected_view(database, dialogue, q).await?;
+            handle_rejected_view(bot, database, ui_definitions, dialogue, q).await?;
         } else if action == "edit" {
             dialogue.update(State::EditView { stored_messages_to_delete: Vec::new() }).await?;
             handle_edit_view(bot, database, ui_definitions, dialogue, nav_bar_mutex, q).await?;
