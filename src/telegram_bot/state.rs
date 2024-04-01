@@ -189,6 +189,7 @@ impl<'de> Deserialize<'de> for ContentStatus {
 fn get_status_string(content_status: ContentStatus) -> String {
     match content_status {
         ContentStatus::Waiting => "waiting".to_string(),
+        ContentStatus::RemovedFromView => "removed_from_view".to_string(),
         ContentStatus::Pending { shown } => {
             if shown {
                 "pending_shown".to_string()
@@ -223,9 +224,6 @@ fn get_status_string(content_status: ContentStatus) -> String {
             } else {
                 "failed_hidden".to_string()
             }
-        }
-        _ => {
-            panic!("ContentStatus::to_string() called on an invalid variant {:#?}", content_status);
         }
     }
 }
