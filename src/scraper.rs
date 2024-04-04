@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::DateTime;
 use indexmap::IndexMap;
-use instagram_scraper_rs::{InstagramScraper, Post, User};
+use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
 use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, SeedableRng};
@@ -19,12 +19,7 @@ use tracing::Instrument;
 use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
 use crate::telegram_bot::state::ContentStatus;
 use crate::utils::now_in_my_timezone;
-use crate::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
-
-const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 240);
-const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 15);
-const MAX_CONTENT_PER_ITERATION: usize = 10;
-const FETCH_SLEEP_LEN: u64 = 45;
+use crate::{FETCH_SLEEP_LEN, INTERFACE_UPDATE_INTERVAL, MAX_CONTENT_PER_ITERATION, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
 #[derive(Clone)]
 pub struct ScraperPoster {
@@ -190,7 +185,7 @@ impl ScraperPoster {
             flattened_posts_processed += 1;
 
             if actually_scraped >= MAX_CONTENT_PER_ITERATION {
-                self.println("Reached the maximum amount of scraped content per iteration, stopping");
+                self.println("Reached the maximum amount of scraped content per iteration");
                 break;
             }
 
@@ -198,7 +193,7 @@ impl ScraperPoster {
             if post.is_video {
                 let mut transaction = self.database.begin_transaction().await.unwrap();
                 if transaction.does_content_exist_with_shortcode(post.shortcode.clone()) == false {
-                    self.println(&format!("{}/{} Scraping content: {}", flattened_posts_processed, flattened_posts_len, post.shortcode));
+                    self.println(&format!("{}/{} Scraping content from {}: {}", flattened_posts_processed, flattened_posts_len, author.username, post.shortcode));
 
                     let url;
                     let caption;
@@ -214,7 +209,7 @@ impl ScraperPoster {
                                 self.println(&format!("Error while downloading reel | {}", e));
                                 self.is_restricted = true;
                                 let mut lock = self.latest_content_mutex.lock().await;
-                                *lock = Some(("url".to_string(), "caption".to_string(), author.username.clone(), "halted".to_string()));
+                                *lock = Some((e.to_string(), "caption".to_string(), author.username.clone(), "halted".to_string()));
                                 break;
                             }
                         };
@@ -275,10 +270,10 @@ impl ScraperPoster {
         let caption = caption.replace("#softcatmemes", "");
 
         // Catvibenow
-        let caption = caption.replace(
-            "\n•\nFollow @catvibenow for your cuteness update 🧐\n•\nCredit📸:\n(We don’t own this picture/photo. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for removal.)",
-            "",
-        );
+        let caption = caption.replace("•", "");
+        let caption = caption.replace("Follow @catvibenow for your cuteness update 🧐", "");
+        let caption = caption.replace("Credit📸:", "");
+        let caption = caption.replace("(We don’t own this picture/photo. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for removal.)", "");
 
         // purrfectfelinevids
         let caption = caption.replace("\n.\n.\n.\n.\n.", "");
@@ -327,7 +322,7 @@ impl ScraperPoster {
             self.println("Account awaits manual intervention, sleeping for 30 min");
             {
                 let mut lock = self.latest_content_mutex.lock().await;
-                *lock = Some(("url".to_string(), "caption".to_string(), "author".to_string(), "halted".to_string()));
+                *lock = Some(("Account awaits manual intervention".to_string(), "caption".to_string(), "author".to_string(), "halted".to_string()));
             }
             self.randomized_sleep(60 * 30).await;
             return true;
@@ -359,7 +354,7 @@ impl ScraperPoster {
                 };
             }
 
-            self.randomized_sleep(FETCH_SLEEP_LEN).await;
+            self.randomized_sleep(FETCH_SLEEP_LEN.as_secs()).await;
         }
     }
 
@@ -381,39 +376,36 @@ impl ScraperPoster {
                     Err(e) => {
                         self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
                         let mut lock = self.latest_content_mutex.lock().await;
-                        *lock = Some(("url".to_string(), "caption".to_string(), "author".to_string(), "halted".to_string()));
+                        *lock = Some((e.to_string(), "caption".to_string(), "author".to_string(), "halted".to_string()));
                         self.is_restricted = true;
                         break;
                     }
                 };
             }
 
-            self.randomized_sleep(FETCH_SLEEP_LEN).await;
+            self.randomized_sleep(FETCH_SLEEP_LEN.as_secs()).await;
         }
     }
 
     async fn login_scraper(&mut self) {
-        let mut scraper_guard = self.scraper.lock().await;
 
         let username = self.credentials.get("username").unwrap().clone();
         let password = self.credentials.get("password").unwrap().clone();
 
-        scraper_guard.authenticate_with_login(username.clone(), password.clone());
-
-        self.println("Logging in...");
-        let result = scraper_guard.login().await;
-        match result {
-            Ok(_) => {
-                self.println("Logged in successfully");
-            }
-            Err(e) => {
-                self.println(&format!(" Login failed: {}", e));
-            }
-        };
-
-        // Drop the lock to mutably borrow self
-        drop(scraper_guard);
-
+        { // Lock the scraper
+            let mut scraper_guard = self.scraper.lock().await;
+            scraper_guard.authenticate_with_login(username.clone(), password.clone());
+            self.println("Logging in...");
+            let result = scraper_guard.login().await;
+            match result {
+                Ok(_) => {
+                    self.println("Logged in successfully");
+                }
+                Err(e) => {
+                    self.println(&format!(" Login failed: {}", e));
+                }
+            };
+        }
         self.save_cookie_store_to_json().await;
     }
 
@@ -423,7 +415,7 @@ impl ScraperPoster {
         let mut cloned_self = self.clone();
         let poster_loop = tokio::spawn(async move {
             // Allow the scraper to login
-            sleep(Duration::from_secs(5)).await;
+            sleep(Duration::from_secs(30)).await;
 
             loop {
                 let mut transaction = cloned_self.database.begin_transaction().await.unwrap();
@@ -439,8 +431,22 @@ impl ScraperPoster {
                                     let mut scraper_guard = cloned_self.scraper.lock().await;
 
                                     if !cloned_self.is_offline {
+                                        
+                                        // Example of a caption:
+                                        // "This is a cool caption!"
+                                        // "•"
+                                        // "•"
+                                        // "•"
+                                        // "•"
+                                        // "•"
+                                        // "(We don’t own this reel. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for credit/removal.)"
+                                        // "•"
+                                        // "#cool #caption #hashtags"
+                                        
                                         let full_caption;
-                                        let spacer = "\n.\n.\n.\n.\n.\n.\n.\n";
+                                        let big_spacer = "\n•\n•\n•\n•\n•\n";
+                                        let small_spacer = "\n•\n";
+                                        let disclaimer = "(We don’t own this content. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for credit/removal.)";
                                         if queued_post.caption == "" && queued_post.hashtags == "" {
                                             full_caption = "".to_string();
                                         } else if queued_post.caption == "" {
@@ -448,7 +454,7 @@ impl ScraperPoster {
                                         } else if queued_post.hashtags == "" {
                                             full_caption = format!("{}", queued_post.caption);
                                         } else {
-                                            full_caption = format!("{}{}{}", queued_post.caption, spacer, queued_post.hashtags);
+                                            full_caption = format!("{}{}{}{}{}", queued_post.caption, big_spacer, disclaimer, small_spacer, queued_post.hashtags);
                                         }
 
                                         let user_id = cloned_self.credentials.get("instagram_business_account_id").unwrap();
@@ -475,9 +481,19 @@ impl ScraperPoster {
                                                 cloned_self.println(&format!("[+] Published content successfully: {}", queued_post.original_shortcode));
                                             }
                                             Err(err) => {
-                                                cloned_self.println(&format!("[!] ERROR: couldn't upload content to instagram!\nError: {}\n{}", err.to_string(), queued_post.url));
-                                                drop(scraper_guard);
-                                                cloned_self.handle_failed_content(&mut queued_post).await;
+                                                match err{
+                                                    InstagramScraperError::UploadFailedRecoverable(_) => {
+                                                        cloned_self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err.to_string()));
+                                                        drop(scraper_guard);
+                                                        cloned_self.handle_recoverable_failed_content().await;
+                                                    }
+                                                    InstagramScraperError::UploadFailedNonRecoverable(_) => {
+                                                        cloned_self.println(&format!("[!] Couldn't upload content to instagram!\n [ERROR] {}\n{}", err.to_string(), queued_post.url));
+                                                        drop(scraper_guard);
+                                                        cloned_self.handle_failed_content(&mut queued_post).await;
+                                                    }
+                                                    _ => {}
+                                                }
                                                 continue;
                                             }
                                         }
@@ -510,7 +526,6 @@ impl ScraperPoster {
                                     };
 
                                     transaction.save_posted_content(posted_content).unwrap();
-                                    cloned_self.println(&format!("[+] Saved posted content: {}", queued_post.original_shortcode));
                                 } else {
                                     let new_will_post_at = transaction.get_new_post_time().unwrap();
                                     queued_post.will_post_at = new_will_post_at;
@@ -564,6 +579,22 @@ impl ScraperPoster {
         };
 
         transaction.save_failed_content(failed_content.clone()).unwrap();
+    }
+
+    // Move all the queued content 
+    async fn handle_recoverable_failed_content(&mut self) {
+        let span = tracing::span!(tracing::Level::INFO, "handle_recoverable_failed_content");
+        let _enter = span.enter();
+
+        let mut transaction = self.database.begin_transaction().await.unwrap();
+        let user_settings = transaction.load_user_settings().unwrap();
+        
+        for mut queued_post in transaction.load_content_queue().unwrap() {
+            let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 60) as u64);
+            queued_post.last_updated_at = (now_in_my_timezone(user_settings.clone()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+            queued_post.will_post_at = new_will_post_at.to_rfc3339();
+            transaction.save_content_queue(queued_post.clone()).unwrap();
+        }
     }
 
     async fn save_cookie_store_to_json(&mut self) {

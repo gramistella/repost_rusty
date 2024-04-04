@@ -93,6 +93,7 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
 
 impl InnerBotManager {
     pub async fn send_or_replace_navigation_bar(&mut self) {
+        
         if self.dialogue.get().await.unwrap() != Some(State::PageView) {
             return;
         }
@@ -101,7 +102,9 @@ impl InnerBotManager {
         let user_settings = tx.load_user_settings().unwrap();
         let current_page = user_settings.current_page;
         let total_pages = tx.get_total_pages().unwrap();
-        let mut navigation_string = format!("Page {} of {}", current_page, total_pages);
+        let now = now_in_my_timezone(user_settings.clone()).format("%H:%M:%S").to_string();
+        let last_updated_caption= self.ui_definitions.labels.get("last_updated_caption").unwrap();
+        let mut navigation_string = format!("{} at {}\n\nPage {} of {}", last_updated_caption, now, current_page, total_pages);
 
         let mut navigation_actions = Vec::new();
 
@@ -122,11 +125,19 @@ impl InnerBotManager {
 
         let mut navigation_bar_guard = self.nav_bar_mutex.lock().await;
         if navigation_bar_guard.halted {
-            navigation_string = format!("⚠️  {}", navigation_string);
+            navigation_string = format!("{}  ⚠️", navigation_string);
+            if navigation_bar_guard.halted_reason.is_some() {
+                navigation_string = format!("{}\n{}", navigation_string, navigation_bar_guard.halted_reason.as_ref().unwrap());
+            }
         }
         let now = now_in_my_timezone(user_settings);
-        if navigation_bar_guard.last_updated_at < now - INTERFACE_UPDATE_INTERVAL || navigation_bar_guard.current_total_pages != total_pages {
+        let current_last_updated_at = navigation_bar_guard.last_updated_at;
+        let is_interface_update_interval_passed = current_last_updated_at < now - INTERFACE_UPDATE_INTERVAL;
+        let is_total_pages_changed = navigation_bar_guard.current_total_pages != total_pages;
+        if is_interface_update_interval_passed || is_total_pages_changed {
+            
             navigation_bar_guard.last_updated_at = now;
+            navigation_bar_guard.current_total_pages = total_pages;
 
             if navigation_bar_guard.message_id == MessageId(0) {
                 navigation_bar_guard.message_id = self.bot.send_message(CHAT_ID, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await.unwrap().id;
@@ -146,7 +157,9 @@ impl InnerBotManager {
                     navigation_bar_guard.message_id = self.bot.send_message(CHAT_ID, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await.unwrap().id;
                     navigation_bar_guard.last_caption = navigation_string.clone();
                 } else {
-                    if navigation_bar_guard.last_caption != navigation_string {
+                    // Since the caption looks like this "Page 1 of 2   |   Last updated at 12:00:00"
+                    // we need to split it by the "|" character and compare the first part to avoid unnecessary edits
+                    if navigation_bar_guard.last_caption.split("|").next() != navigation_string.split("|").next() || is_interface_update_interval_passed {
                         match self.bot.edit_message_text(CHAT_ID, navigation_bar_guard.message_id, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await {
                             Ok(_) => {}
                             Err(e) => {
@@ -165,10 +178,10 @@ impl InnerBotManager {
     }
 }
 
-pub async fn generate_full_content_caption(database: Database, ui_definitions: UIDefinitions, caption_type: &str, video_info: &ContentInfo) -> String {
+pub async fn generate_full_content_caption(database: Database, ui_definitions: UIDefinitions, caption_type: &str, content_info: &ContentInfo) -> String {
     let span = tracing::span!(tracing::Level::INFO, "generate_full_video_caption");
     let _enter = span.enter();
-    let caption_body = format!("{}\n{}\n(from @{})", video_info.caption, video_info.hashtags, video_info.original_author);
+    let caption_body = format!("{}\n{}\n(from @{})", content_info.caption, content_info.hashtags, content_info.original_author);
     let mut tx = database.begin_transaction().await.unwrap();
     match caption_type {
         "accepted" => {
@@ -178,7 +191,7 @@ pub async fn generate_full_content_caption(database: Database, ui_definitions: U
         }
         "rejected" => {
             let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
-            let rejected_content = tx.get_rejected_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+            let rejected_content = tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
             let rejected_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
             let formatted_rejected_at = rejected_at.format("%H:%M %m/%d").to_string();
             let will_expire_at = rejected_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
@@ -189,8 +202,38 @@ pub async fn generate_full_content_caption(database: Database, ui_definitions: U
             full_video_caption
         }
         "queued" => {
+            // Since the queued content is most likely to be updated or otherwise change its status,
+            // we might not be always able to find it in the queued_content table
             let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
-            let queued_content = tx.get_queued_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+            let queued_content = match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()){
+                Some(content) => {content}
+                None => {
+                    match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()){
+                        Some(_content) => {
+                            return generate_failed_caption(&database, &ui_definitions, content_info, &caption_body, &mut tx).await
+                        }
+                        None => {
+                            match tx.get_posted_content_by_shortcode(content_info.original_shortcode.clone()){
+                                Some(_content) => {
+                                    return generate_posted_caption(database, ui_definitions, content_info, caption_body, tx).await
+                                }
+                                None => {
+                                    match tx.get_content_info_by_shortcode(content_info.original_shortcode.clone()){
+                                        Some(_content) => {
+                                            return caption_body.to_string();
+                                        }
+                                        None => {
+                                            panic!("No content found for shortcode: {}", content_info.original_shortcode);
+                                        }
+                                    }
+                                    
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+          
             let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
             let formatted_will_post_at = will_post_at.format("%H:%M %m/%d").to_string();
 
@@ -206,37 +249,45 @@ pub async fn generate_full_content_caption(database: Database, ui_definitions: U
             full_video_caption
         }
         "failed" => {
-            let failed_caption = ui_definitions.labels.get("failed_caption").unwrap();
-
-            let failed_content = tx.get_failed_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
-            let failed_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap();
-            let will_expire_at = failed_at.checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
-            let formatted_failed_at = failed_at.format("%H:%M %m/%d").to_string();
-
-            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
-
-            let full_video_caption = format!("{}\n\n{} at {}\n\nWill expire in {}", caption_body, failed_caption, formatted_failed_at, countdown_caption);
-            full_video_caption
+            generate_failed_caption(&database, &ui_definitions, content_info, &caption_body, &mut tx).await
         }
         "pending" => caption_body.to_string(),
         "waiting" => caption_body.to_string(),
         "posted" => {
-            let posted_caption = ui_definitions.labels.get("posted_caption").unwrap();
-
-            let posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
-            let posted_at = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
-            let formatted_posted_at = posted_at.format("%H:%M %m/%d").to_string();
-            let will_expire_at = posted_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
-
-            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
-
-            let full_video_caption = format!("{}\n\n{} at {}\n\nWill expire in {}", caption_body, posted_caption, formatted_posted_at, countdown_caption);
-            full_video_caption
+            generate_posted_caption(database, ui_definitions, content_info, caption_body, tx).await
         }
         _ => {
             panic!("Unknown caption type: {}", caption_type);
         }
     }
+}
+
+async fn generate_posted_caption(database: Database, ui_definitions: UIDefinitions, video_info: &ContentInfo, caption_body: String, mut tx: DatabaseTransaction) -> String {
+    let posted_caption = ui_definitions.labels.get("posted_caption").unwrap();
+
+    let posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+    let posted_at = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
+    let formatted_posted_at = posted_at.format("%H:%M %m/%d").to_string();
+    let will_expire_at = posted_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
+
+    let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
+
+    let full_video_caption = format!("{}\n\n{} at {}\n\nWill expire in {}", caption_body, posted_caption, formatted_posted_at, countdown_caption);
+    full_video_caption
+}
+
+async fn generate_failed_caption(database: &Database, ui_definitions: &UIDefinitions, video_info: &ContentInfo, caption_body: &String, tx: &mut DatabaseTransaction) -> String {
+    let failed_caption = ui_definitions.labels.get("failed_caption").unwrap();
+
+    let failed_content = tx.get_failed_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
+    let failed_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap();
+    let will_expire_at = failed_at.checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
+    let formatted_failed_at = failed_at.format("%H:%M %m/%d").to_string();
+
+    let countdown_caption = countdown_until_expiration(database.clone(), will_expire_at.with_timezone(&Utc)).await;
+
+    let full_video_caption = format!("{}\n\n{} at {}\n\nWill expire in {}", caption_body, failed_caption, formatted_failed_at, countdown_caption);
+    full_video_caption
 }
 
 async fn countdown_until_expiration(database: Database, expiration_datetime: DateTime<Utc>) -> String {

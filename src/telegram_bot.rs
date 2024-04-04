@@ -46,6 +46,7 @@ struct NavigationBar {
     message_id: MessageId,
     current_total_pages: i32,
     halted: bool,
+    halted_reason: Option<String>,
     last_caption: String,
     last_updated_at: DateTime<Utc>,
 }
@@ -104,6 +105,7 @@ impl InnerBotManager {
             message_id: MessageId(0),
             current_total_pages: 0,
             halted: false,
+            halted_reason: None,
             last_caption: "".to_string(),
             last_updated_at: Utc::now(),
         };
@@ -155,12 +157,13 @@ impl InnerBotManager {
                 if original_shortcode == "halted" {
                     let mut nav_bar = self.nav_bar_mutex.lock().await;
                     nav_bar.halted = true;
+                    nav_bar.halted_reason = Some(received_url.clone());
                 } else if original_shortcode == "ignore" {
                     // Do nothing
                 } else if !tx.does_content_exist_with_shortcode(original_shortcode.clone()) {
                     let mut nav_bar = self.nav_bar_mutex.lock().await;
                     nav_bar.halted = false;
-
+                    nav_bar.halted_reason = None;
                     let re = regex::Regex::new(r"#\w+").unwrap();
                     let cloned_caption = received_caption.clone();
                     let hashtags: Vec<&str> = re.find_iter(&cloned_caption).map(|mat| mat.as_str()).collect();
@@ -588,15 +591,26 @@ impl InnerBotManager {
 
                             let _msg = self.bot.edit_message_reply_markup(CHAT_ID, message_id).reply_markup(InlineKeyboardMarkup::new([remove_action])).await?;
                         }
-                        Err(_) => {
-                            let new_message = self.bot.send_video(CHAT_ID, InputFile::url(posted_content.url.clone().parse().unwrap())).caption(full_content_caption).await?;
+                        Err(e) => {
+                            let error_message = e.to_string();
 
-                            let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
-                            let undo_action = [InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id))];
+                            if error_message.contains("message is not modified") {
+                                // This doesn't need to be logged
+                                //tracing::warn!("Message is not modified: {}", e);
+                            } else if error_message.contains("A network error: error sending request") {
+                                // This might not need to be logged
+                                tracing::warn!("Error sending request: {}", e);
+                            } else {
+                                tracing::warn!("Error editing message caption: {}", e);
+                                let new_message = self.bot.send_video(CHAT_ID, InputFile::url(posted_content.url.clone().parse().unwrap())).caption(full_content_caption).await?;
 
-                            tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
+                                let remove_from_view_action_text = self.ui_definitions.buttons.get("remove_from_view").unwrap();
+                                let undo_action = [InlineKeyboardButton::callback(remove_from_view_action_text, format!("remove_from_view_{}", new_message.id))];
 
-                            let _msg = self.bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+                                tx.save_content_mapping(IndexMap::from([(new_message.id, video_info.clone())]))?;
+
+                                let _msg = self.bot.edit_message_reply_markup(CHAT_ID, new_message.id).reply_markup(InlineKeyboardMarkup::new([undo_action])).await?;
+                            }
                         }
                     };
                     posted_content.last_updated_at = now.to_rfc3339();

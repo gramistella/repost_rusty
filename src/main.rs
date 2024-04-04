@@ -23,10 +23,19 @@ mod scraper;
 mod telegram_bot;
 mod utils;
 
+// Main configuration
 const CHAT_ID: ChatId = ChatId(34957918);
-const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
-const REFRESH_RATE: Duration = Duration::from_secs(6);
+const REFRESH_RATE: Duration = Duration::from_secs(5);
 const IS_OFFLINE: bool = false;
+
+// Telegram bot configuration
+const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(120);
+
+// Scraper configuration
+const MAX_CONTENT_PER_ITERATION: usize = 8;
+const FETCH_SLEEP_LEN: Duration = Duration::from_secs(60);
+const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 20);
+const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 300);
 
 fn main() -> anyhow::Result<()> {
     let (_file_guard, _stdout_guard) = init_logging();
@@ -40,7 +49,7 @@ fn main() -> anyhow::Result<()> {
             let _enter = span.enter();
             tracing::info!("Starting bot for user: {}", username);
 
-            // Create a single runtime for all threads
+            // Create a single runtime for each user
             let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
 
             let db = Database::new(username.clone()).unwrap();
@@ -58,16 +67,9 @@ fn main() -> anyhow::Result<()> {
             let rt_clone_bot = Arc::clone(&rt);
 
             // Run the scraper and the bot concurrently
-
-            // Do I need to do this?
-            // let mut scraper_poster = rt.block_on(async { ScraperPoster::new(db.clone(), username.clone(), credentials.clone()) });
-            // or is the current way fine?
-            // It seems to work for at least two accounts
-
             let mut scraper_poster = ScraperPoster::new(db.clone(), username.clone(), credentials.clone(), IS_OFFLINE);
             let scraper = std::thread::spawn(move || rt.block_on(scraper_poster.run_scraper(tx)));
             let telegram_bot = std::thread::spawn(move || rt_clone_bot.block_on(async move { bot_manager.run_bot(rx, username).await }));
-
             all_handles.push(scraper);
             all_handles.push(telegram_bot);
         }

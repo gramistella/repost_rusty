@@ -22,3 +22,4 @@ labels:
   posted_caption: "📬  Posted"
   queued_caption: "⏳  Queued"
   failed_caption: "⚠️  Failed"
+  last_updated_caption: "🕒  Last updated"
