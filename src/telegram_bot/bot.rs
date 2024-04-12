@@ -19,48 +19,46 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::Instrument;
 
-use crate::database::{ContentInfo, Database, FailedContent, DEFAULT_FAILURE_EXPIRATION};
+use crate::telegram_bot::database::{ContentInfo, Database, FailedContent, DEFAULT_FAILURE_EXPIRATION};
 use crate::telegram_bot::errors::handle_message_is_not_modified_error;
-use crate::telegram_bot::helpers::{generate_full_content_caption, update_content_status_if_posted};
 use crate::telegram_bot::state::{ContentStatus, State};
-use crate::utils::now_in_my_timezone;
-use crate::{CHAT_ID, INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
+use crate::telegram_bot::utils::{generate_full_content_caption, now_in_my_timezone, update_content_status_if_posted};
 
-mod callbacks;
-mod commands;
-mod errors;
-mod helpers;
-mod messages;
-pub(crate) mod state;
+pub const CHAT_ID: ChatId = ChatId(34957918);
+const REFRESH_RATE: Duration = Duration::from_secs(5);
 
-type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
+// Telegram bot configuration
+pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(120);
+
+pub(crate) type HandlerResult = Result<(), Box<dyn Error + Send + Sync>>;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct UIDefinitions {
-    buttons: HashMap<String, String>,
-    labels: HashMap<String, String>,
+    pub(crate) buttons: HashMap<String, String>,
+    pub(crate) labels: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
-struct NavigationBar {
-    message_id: MessageId,
-    current_total_pages: i32,
-    halted: bool,
-    halted_reason: Option<String>,
-    last_caption: String,
-    last_updated_at: DateTime<Utc>,
+pub(crate) struct NavigationBar {
+    pub(crate) message_id: MessageId,
+    pub(crate) current_total_pages: i32,
+    pub(crate) current_page_elements_length: i32,
+    pub(crate) halted: bool,
+    pub(crate) halted_reason: Option<String>,
+    pub(crate) last_caption: String,
+    pub(crate) last_updated_at: DateTime<Utc>,
 }
-type BotDialogue = Dialogue<State, InMemStorage<State>>;
+pub(crate) type BotDialogue = Dialogue<State, InMemStorage<State>>;
 
 #[derive(Clone)]
 pub struct InnerBotManager {
-    bot: Throttle<Bot>,
-    dialogue: BotDialogue,
+    pub(crate) bot: Throttle<Bot>,
+    pub(crate) dialogue: BotDialogue,
     storage: Arc<InMemStorage<State>>,
     execution_mutex: Arc<Mutex<()>>,
-    database: Database,
-    ui_definitions: UIDefinitions,
-    nav_bar_mutex: Arc<Mutex<NavigationBar>>,
+    pub(crate) database: Database,
+    pub(crate) ui_definitions: UIDefinitions,
+    pub(crate) nav_bar_mutex: Arc<Mutex<NavigationBar>>,
 }
 
 impl fmt::Debug for InnerBotManager {
@@ -96,7 +94,7 @@ impl InnerBotManager {
         let storage = InMemStorage::new();
         let dialogue = BotDialogue::new(storage.clone(), CHAT_ID);
 
-        let ui_definitions_yaml_data = include_str!("../config/ui_definitions.yaml");
+        let ui_definitions_yaml_data = include_str!("../../config/ui_definitions.yaml");
         let ui_definitions: UIDefinitions = serde_yaml::from_str(&ui_definitions_yaml_data).expect("Error parsing config file");
 
         let execution_mutex = Arc::new(Mutex::new(()));
@@ -104,6 +102,7 @@ impl InnerBotManager {
         let nav_bar = NavigationBar {
             message_id: MessageId(0),
             current_total_pages: 0,
+            current_page_elements_length: 0,
             halted: false,
             halted_reason: None,
             last_caption: "".to_string(),
@@ -168,10 +167,9 @@ impl InnerBotManager {
                     let cloned_caption = received_caption.clone();
                     let hashtags: Vec<&str> = re.find_iter(&cloned_caption).map(|mat| mat.as_str()).collect();
                     let hashtags = hashtags.join(" ");
-
                     let caption = re.replace_all(&received_caption.clone(), "").to_string();
                     let user_settings = tx.load_user_settings().unwrap();
-
+                    let now_string = now_in_my_timezone(user_settings.clone()).to_rfc3339();
                     let video = ContentInfo {
                         username: user_settings.username.clone(),
                         url: received_url.clone(),
@@ -180,8 +178,9 @@ impl InnerBotManager {
                         hashtags,
                         original_author: original_author.clone(),
                         original_shortcode: original_shortcode.clone(),
-                        last_updated_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
-                        url_last_updated_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
+                        last_updated_at: now_string.clone(),
+                        url_last_updated_at: now_string.clone(),
+                        added_at: now_string,
                         page_num: 1,
                         encountered_errors: 0,
                     };

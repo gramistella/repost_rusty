@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use chrono::Duration;
 use chrono::{DateTime, Utc};
 use teloxide::adaptors::Throttle;
 use teloxide::payloads::EditMessageTextSetters;
@@ -8,11 +9,16 @@ use teloxide::prelude::Requester;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId};
 use teloxide::Bot;
 
-use crate::database::{ContentInfo, Database, DatabaseTransaction, QueuedContent, DEFAULT_FAILURE_EXPIRATION};
+use crate::telegram_bot::bot::{InnerBotManager, UIDefinitions, CHAT_ID, INTERFACE_UPDATE_INTERVAL};
+use crate::telegram_bot::database::UserSettings;
+use crate::telegram_bot::database::{ContentInfo, Database, DatabaseTransaction, QueuedContent, DEFAULT_FAILURE_EXPIRATION};
 use crate::telegram_bot::state::{ContentStatus, State};
-use crate::telegram_bot::{InnerBotManager, UIDefinitions, CHAT_ID};
-use crate::utils::now_in_my_timezone;
-use crate::INTERFACE_UPDATE_INTERVAL;
+
+pub fn now_in_my_timezone(user_settings: UserSettings) -> DateTime<Utc> {
+    let utc_now = Utc::now();
+    let timezone_offset = Duration::try_hours(user_settings.timezone_offset as i64).unwrap();
+    utc_now + timezone_offset
+}
 
 pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyhow::Result<()> {
     let span = tracing::span!(tracing::Level::INFO, "clear_sent_messages");
@@ -93,7 +99,6 @@ pub async fn clear_sent_messages(bot: Throttle<Bot>, database: Database) -> anyh
 
 impl InnerBotManager {
     pub async fn send_or_replace_navigation_bar(&mut self) {
-        
         if self.dialogue.get().await.unwrap() != Some(State::PageView) {
             return;
         }
@@ -103,7 +108,7 @@ impl InnerBotManager {
         let current_page = user_settings.current_page;
         let total_pages = tx.get_total_pages().unwrap();
         let now = now_in_my_timezone(user_settings.clone()).format("%H:%M:%S").to_string();
-        let last_updated_caption= self.ui_definitions.labels.get("last_updated_caption").unwrap();
+        let last_updated_caption = self.ui_definitions.labels.get("last_updated_caption").unwrap();
         let mut navigation_string = format!("{} at {}\n\nPage {} of {}", last_updated_caption, now, current_page, total_pages);
 
         let mut navigation_actions = Vec::new();
@@ -115,14 +120,6 @@ impl InnerBotManager {
             navigation_actions.push(InlineKeyboardButton::callback("Next page", "next_page"));
         }
 
-        let current_page = tx.load_page().unwrap();
-        let mut max_id = MessageId(0);
-        for element in current_page {
-            if element.0 .0 > max_id.0 {
-                max_id = element.0;
-            }
-        }
-
         let mut navigation_bar_guard = self.nav_bar_mutex.lock().await;
         if navigation_bar_guard.halted {
             navigation_string = format!("{}  ⚠️", navigation_string);
@@ -130,49 +127,46 @@ impl InnerBotManager {
                 navigation_string = format!("{}\n{}", navigation_string, navigation_bar_guard.halted_reason.as_ref().unwrap());
             }
         }
+
         let now = now_in_my_timezone(user_settings);
         let current_last_updated_at = navigation_bar_guard.last_updated_at;
         let is_interface_update_interval_passed = current_last_updated_at < now - INTERFACE_UPDATE_INTERVAL;
         let is_total_pages_changed = navigation_bar_guard.current_total_pages != total_pages;
-        if is_interface_update_interval_passed || is_total_pages_changed {
-            
+        let current_page = tx.load_page().unwrap();
+        let is_new_element_added = (navigation_bar_guard.current_page_elements_length != current_page.len() as i32) || (current_page.last().unwrap().0 .0 > navigation_bar_guard.message_id.0);
+        if is_interface_update_interval_passed || is_total_pages_changed || is_new_element_added {
             navigation_bar_guard.last_updated_at = now;
             navigation_bar_guard.current_total_pages = total_pages;
+            navigation_bar_guard.current_page_elements_length = current_page.len() as i32;
 
             if navigation_bar_guard.message_id == MessageId(0) {
                 navigation_bar_guard.message_id = self.bot.send_message(CHAT_ID, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await.unwrap().id;
                 navigation_bar_guard.last_caption = navigation_string.clone();
-            } else {
-                if max_id.0 > navigation_bar_guard.message_id.0 {
-                    match self.bot.delete_message(CHAT_ID, navigation_bar_guard.message_id).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            if e.to_string() != "message to delete not found" {
-                                //tracing::warn!("Error deleting message: {}", e);
-                            } else {
-                                tracing::error!("ERROR in helpers.rs: \n{}", e.to_string());
-                            }
+            } else if is_new_element_added {
+                match self.bot.delete_message(CHAT_ID, navigation_bar_guard.message_id).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if e.to_string() != "message to delete not found" {
+                            //tracing::warn!("Error deleting message: {}", e);
+                        } else {
+                            tracing::error!("ERROR in utils: \n{}", e.to_string());
                         }
-                    }
-                    navigation_bar_guard.message_id = self.bot.send_message(CHAT_ID, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await.unwrap().id;
-                    navigation_bar_guard.last_caption = navigation_string.clone();
-                } else {
-                    // Since the caption looks like this "Page 1 of 2   |   Last updated at 12:00:00"
-                    // we need to split it by the "|" character and compare the first part to avoid unnecessary edits
-                    if navigation_bar_guard.last_caption.split("|").next() != navigation_string.split("|").next() || is_interface_update_interval_passed {
-                        match self.bot.edit_message_text(CHAT_ID, navigation_bar_guard.message_id, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                if e.to_string() != "message to edit not found" {
-                                    tracing::warn!("Error editing message: {}", e);
-                                } else {
-                                    tracing::error!("ERROR in helpers.rs: \n{}", e.to_string());
-                                }
-                            }
-                        }
-                        navigation_bar_guard.last_caption = navigation_string.clone();
                     }
                 }
+                navigation_bar_guard.message_id = self.bot.send_message(CHAT_ID, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await.unwrap().id;
+                navigation_bar_guard.last_caption = navigation_string.clone();
+            } else if is_total_pages_changed || is_interface_update_interval_passed {
+                match self.bot.edit_message_text(CHAT_ID, navigation_bar_guard.message_id, navigation_string.clone()).reply_markup(InlineKeyboardMarkup::new([navigation_actions])).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if e.to_string() != "message to edit not found" {
+                            tracing::warn!("Error editing message: {}", e);
+                        } else {
+                            tracing::error!("ERROR in utils: \n{}", e.to_string());
+                        }
+                    }
+                }
+                navigation_bar_guard.last_caption = navigation_string.clone();
             }
         }
     }
@@ -194,7 +188,7 @@ pub async fn generate_full_content_caption(database: Database, ui_definitions: U
             let rejected_content = tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
             let rejected_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap();
             let formatted_rejected_at = rejected_at.format("%H:%M %m/%d").to_string();
-            let will_expire_at = rejected_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
+            let will_expire_at = rejected_at.checked_add_signed(Duration::try_seconds(tx.load_user_settings().unwrap().rejected_content_lifespan * 60).unwrap()).unwrap();
 
             let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
 
@@ -205,35 +199,24 @@ pub async fn generate_full_content_caption(database: Database, ui_definitions: U
             // Since the queued content is most likely to be updated or otherwise change its status,
             // we might not be always able to find it in the queued_content table
             let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
-            let queued_content = match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()){
-                Some(content) => {content}
-                None => {
-                    match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()){
-                        Some(_content) => {
-                            return generate_failed_caption(&database, &ui_definitions, content_info, &caption_body, &mut tx).await
-                        }
-                        None => {
-                            match tx.get_posted_content_by_shortcode(content_info.original_shortcode.clone()){
-                                Some(_content) => {
-                                    return generate_posted_caption(database, ui_definitions, content_info, caption_body, tx).await
-                                }
-                                None => {
-                                    match tx.get_content_info_by_shortcode(content_info.original_shortcode.clone()){
-                                        Some(_content) => {
-                                            return caption_body.to_string();
-                                        }
-                                        None => {
-                                            panic!("No content found for shortcode: {}", content_info.original_shortcode);
-                                        }
-                                    }
-                                    
-                                }
+            let queued_content = match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()) {
+                Some(content) => content,
+                None => match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()) {
+                    Some(_content) => return generate_failed_caption(&database, &ui_definitions, content_info, &caption_body, &mut tx).await,
+                    None => match tx.get_posted_content_by_shortcode(content_info.original_shortcode.clone()) {
+                        Some(_content) => return generate_posted_caption(database, ui_definitions, content_info, caption_body, tx).await,
+                        None => match tx.get_content_info_by_shortcode(content_info.original_shortcode.clone()) {
+                            Some(_content) => {
+                                return caption_body.to_string();
                             }
-                        }
-                    }
-                }
+                            None => {
+                                panic!("No content found for shortcode: {}", content_info.original_shortcode);
+                            }
+                        },
+                    },
+                },
             };
-          
+
             let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
             let formatted_will_post_at = will_post_at.format("%H:%M %m/%d").to_string();
 
@@ -248,14 +231,10 @@ pub async fn generate_full_content_caption(database: Database, ui_definitions: U
             let full_video_caption = format!("{}\n{}\n(from @{})\n\n{}\n\nWill post at {}\n{}", queued_content.caption, queued_content.hashtags, queued_content.original_author, queued_caption, formatted_will_post_at, countdown_caption);
             full_video_caption
         }
-        "failed" => {
-            generate_failed_caption(&database, &ui_definitions, content_info, &caption_body, &mut tx).await
-        }
+        "failed" => generate_failed_caption(&database, &ui_definitions, content_info, &caption_body, &mut tx).await,
         "pending" => caption_body.to_string(),
         "waiting" => caption_body.to_string(),
-        "posted" => {
-            generate_posted_caption(database, ui_definitions, content_info, caption_body, tx).await
-        }
+        "posted" => generate_posted_caption(database, ui_definitions, content_info, caption_body, tx).await,
         _ => {
             panic!("Unknown caption type: {}", caption_type);
         }
@@ -268,7 +247,7 @@ async fn generate_posted_caption(database: Database, ui_definitions: UIDefinitio
     let posted_content = tx.get_posted_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
     let posted_at = DateTime::parse_from_rfc3339(&posted_content.posted_at).unwrap();
     let formatted_posted_at = posted_at.format("%H:%M %m/%d").to_string();
-    let will_expire_at = posted_at.checked_add_signed(chrono::Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
+    let will_expire_at = posted_at.checked_add_signed(Duration::try_seconds(tx.load_user_settings().unwrap().posted_content_lifespan * 60).unwrap()).unwrap();
 
     let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
 
@@ -281,7 +260,7 @@ async fn generate_failed_caption(database: &Database, ui_definitions: &UIDefinit
 
     let failed_content = tx.get_failed_content_by_shortcode(video_info.original_shortcode.clone()).unwrap();
     let failed_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap();
-    let will_expire_at = failed_at.checked_add_signed(chrono::Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
+    let will_expire_at = failed_at.checked_add_signed(Duration::from_std(DEFAULT_FAILURE_EXPIRATION).unwrap()).unwrap();
     let formatted_failed_at = failed_at.format("%H:%M %m/%d").to_string();
 
     let countdown_caption = countdown_until_expiration(database.clone(), will_expire_at.with_timezone(&Utc)).await;

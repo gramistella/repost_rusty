@@ -6,9 +6,10 @@ use teloxide::prelude::{Message, Requester};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 use teloxide::Bot;
 
-use crate::database::Database;
+use crate::telegram_bot::bot::{BotDialogue, HandlerResult, UIDefinitions};
 use crate::telegram_bot::commands::display_settings_message;
-use crate::telegram_bot::{BotDialogue, HandlerResult, State, UIDefinitions};
+use crate::telegram_bot::database::Database;
+use crate::telegram_bot::state::State;
 
 pub async fn receive_posting_interval(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, msg: Message) -> HandlerResult {
     match msg.text().map(ToOwned::to_owned) {

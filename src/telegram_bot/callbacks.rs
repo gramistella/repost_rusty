@@ -7,13 +7,13 @@ use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Mes
 use teloxide::Bot;
 use tokio::sync::Mutex;
 
-use crate::database::{ContentInfo, Database, RejectedContent};
+use crate::telegram_bot::bot::CHAT_ID;
+use crate::telegram_bot::bot::{BotDialogue, HandlerResult, NavigationBar, UIDefinitions};
 use crate::telegram_bot::commands::display_settings_message;
-use crate::telegram_bot::helpers::{clear_sent_messages, create_queued_content, generate_full_content_caption, update_content_status_if_posted};
+use crate::telegram_bot::database::{ContentInfo, Database, RejectedContent};
 use crate::telegram_bot::state::ContentStatus;
-use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions};
-use crate::utils::now_in_my_timezone;
-use crate::CHAT_ID;
+use crate::telegram_bot::state::State;
+use crate::telegram_bot::utils::{clear_sent_messages, create_queued_content, generate_full_content_caption, now_in_my_timezone, update_content_status_if_posted};
 
 pub async fn handle_page_view(bot: Throttle<Bot>, dialogue: BotDialogue, database: Database, ui_definitions: UIDefinitions, execution_mutex: Arc<Mutex<()>>, nav_bar_mutex: Arc<Mutex<NavigationBar>>, q: CallbackQuery) -> HandlerResult {
     let span = tracing::span!(tracing::Level::INFO, "handle_page_view");
@@ -488,6 +488,7 @@ pub async fn handle_remove_from_queue(bot: Throttle<Bot>, database: Database, ui
     let mut tx = database.begin_transaction().await.unwrap();
     let mut video_info = tx.get_content_info_by_message_id(message_id).unwrap();
 
+    // called `Result::unwrap()` on an `Err` value: QueryReturnedNoRows
     tx.remove_post_from_queue_with_shortcode(video_info.original_shortcode.clone()).unwrap();
 
     video_info.status = ContentStatus::Pending { shown: true };

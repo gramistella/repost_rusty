@@ -14,6 +14,7 @@ buttons:
   edit_hashtags: "✏️ Edit hashtags"
   remove_from_view: "❌  Remove"
   remove_from_queue: "❌  Remove from queue"
+  post_now: "📬  Post now"
 
 labels:
   settings_title: "⚙️  Settings  🔧\n\n🕒"

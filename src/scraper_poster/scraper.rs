@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
 use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, SeedableRng};
+use serenity::all::MessageId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::Sender;
@@ -16,10 +17,11 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;
 
-use crate::database::{Database, FailedContent, PostedContent, QueuedContent};
-use crate::telegram_bot::state::ContentStatus;
-use crate::utils::now_in_my_timezone;
-use crate::{FETCH_SLEEP_LEN, INTERFACE_UPDATE_INTERVAL, MAX_CONTENT_PER_ITERATION, REFRESH_RATE, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
+use crate::discord_bot::bot::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
+use crate::discord_bot::database::{ContentInfo, Database, FailedContent, PostedContent, QueuedContent};
+use crate::discord_bot::state::ContentStatus;
+use crate::discord_bot::utils::now_in_my_timezone;
+use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
 #[derive(Clone)]
 pub struct ScraperPoster {
@@ -52,54 +54,78 @@ impl ScraperPoster {
         }
     }
 
-    pub async fn run_scraper(&mut self, tx: Sender<(String, String, String, String)>) {
-        let (sender_loop, scraper_loop) = self.scraper_loop(tx).await;
+    pub async fn run_scraper(&mut self) {
+        let (sender_loop, scraper_loop) = self.scraper_loop().await;
 
         let poster_loop = self.poster_loop();
 
         let sender_span = tracing::span!(tracing::Level::INFO, "sender");
-        let scraper_span = tracing::span!(tracing::Level::INFO, "scraper");
+        let scraper_span = tracing::span!(tracing::Level::INFO, "scraper_poster");
         let poster_span = tracing::span!(tracing::Level::INFO, "poster");
 
         let _ = tokio::try_join!(sender_loop.instrument(sender_span), scraper_loop.instrument(scraper_span), poster_loop.instrument(poster_span));
     }
 
     //noinspection RsConstantConditionIf
-    async fn scraper_loop(&mut self, tx: Sender<(String, String, String, String)>) -> (JoinHandle<anyhow::Result<()>>, JoinHandle<anyhow::Result<()>>) {
+    async fn scraper_loop(&mut self) -> (JoinHandle<anyhow::Result<()>>, JoinHandle<anyhow::Result<()>>) {
         let span = tracing::span!(tracing::Level::INFO, "outer_scraper_loop");
         let _enter = span.enter();
         let scraper_loop: JoinHandle<anyhow::Result<()>>;
-        let accounts_to_scrape: HashMap<String, String> = read_accounts_to_scrape("config/accounts_to_scrape.yaml", self.username.as_str()).await;
+        let mut accounts_to_scrape: HashMap<String, String> = read_accounts_to_scrape("config/accounts_to_scrape.yaml", self.username.as_str()).await;
         let hashtag_mapping: HashMap<String, String> = read_hashtag_mapping("config/hashtags.yaml").await;
 
+        let mut transaction = self.database.begin_transaction().await.unwrap();
         let sender_latest_content = Arc::clone(&self.latest_content_mutex);
         let sender_loop = tokio::spawn(async move {
             loop {
-                let content_tuple = {
-                    let lock = sender_latest_content.lock().await;
-                    lock.clone()
-                };
+                {
+                    // Use a scoped block to avoid sleeping while the mutex is locked
+                    let content_tuple = {
+                        let lock = sender_latest_content.lock().await;
+                        lock.clone()
+                    };
 
-                if let Some((url, caption, author, shortcode)) = content_tuple {
-                    tx.send((url, caption, author, shortcode)).await.unwrap();
-                } else {
-                    tx.send(("".to_string(), "".to_string(), "".to_string(), "ignore".to_string())).await.unwrap();
+                    let user_settings = transaction.load_user_settings().unwrap();
+
+                    if let Some((url, caption, author, shortcode)) = content_tuple {
+                        if !transaction.does_content_exist_with_shortcode(shortcode.clone()) {
+                            let re = regex::Regex::new(r"#\w+").unwrap();
+                            let cloned_caption = caption.clone();
+                            let hashtags: Vec<&str> = re.find_iter(&cloned_caption).map(|mat| mat.as_str()).collect();
+                            let hashtags = hashtags.join(" ");
+                            let caption = re.replace_all(&caption.clone(), "").to_string();
+                            let now_string = now_in_my_timezone(&user_settings).to_rfc3339();
+
+                            let video = ContentInfo {
+                                username: user_settings.username.clone(),
+                                url: url.clone(),
+                                status: ContentStatus::Pending { shown: false },
+                                caption,
+                                hashtags,
+                                original_author: author.clone(),
+                                original_shortcode: shortcode.clone(),
+                                last_updated_at: now_string.clone(),
+                                url_last_updated_at: now_string.clone(),
+                                added_at: now_string,
+                                page_num: 1,
+                                encountered_errors: 0,
+                            };
+
+                            let message_id = transaction.get_temp_message_id(user_settings);
+                            let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(MessageId::new(message_id as u64), video.clone())]);
+
+                            transaction.save_content_mapping(content_mapping).unwrap();
+                        }
+                    } else {
+                        //tx.send(("".to_string(), "".to_string(), "".to_string(), "ignore".to_string())).await.unwrap();
+                    }
                 }
-
                 tokio::time::sleep(REFRESH_RATE).await;
             }
         });
 
         if self.is_offline {
-            let testing_urls = vec![
-                "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/427593823_409517391528628_721852697655626393_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=104&_nc_ohc=9pssChekERcAX_XayYY&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAXS0ConI008uTXkgc-woujGN6BchRo_ofWZkPVrg1JfQ&oe=65D574C7&_nc_sid=2999b8",
-                "https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/429215690_1444115769649034_2337419377310423138_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=jEzG6M_uCAQAX8oTbjC&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCGYsCaoUB8qOYTSJJFJZbLMuKCbGZqfXH9ydMu9jKhxQ&oe=65D5D2CE&_nc_sid=2999b8",
-                "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/48718206_1450879249116459_8164759842261415987_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=103&_nc_ohc=GUN_mDr2OYsAX9fRqgF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfC78iGTuJdhnNbhO_fuieXvYT5R3pkhMAD-MLNxtxR7TQ&oe=65D572F7&_nc_sid=2999b8",
-                "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428456788_295092509963149_5948637286561662383_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=101&_nc_ohc=zkatv7OeKwUAX8YNkBr&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfAQIp78Fu1NCj719FprGjWMV_gZ3s_b8Ux_mWy3Ek1uOA&oe=65D73480&_nc_sid=2999b8",
-                "https://scontent-mxp2-1.cdninstagram.com/v/t50.2886-16/428478842_735629148752808_8195281140553080552_n.mp4?_nc_ht=scontent-mxp2-1.cdninstagram.com&_nc_cat=100&_nc_ohc=C_p4c8oZuQAAX-v2g55&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfDFvSm0eBmcCsuO3rFKcdLFdi6HBHTKzAkN8tqdAoUn_w&oe=65D69DF3&_nc_sid=2999b8",
-                "https://scontent-mxp1-1.cdninstagram.com/v/t50.2886-16/428226521_1419744418741015_2882822033667053284_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=107&_nc_ohc=Dir0Fhly2oQAX-WOLlD&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCdg_GUWzIIA6ueap7WZgK1zG1Zq903lp_RxGFMT22xWA&oe=65D6A70B&_nc_sid=2999b8",
-                "https://scontent-mxp1-1.cdninstagram.com/v/t66.30100-16/121970702_1790725214757830_3319359828076371228_n.mp4?_nc_ht=scontent-mxp1-1.cdninstagram.com&_nc_cat=102&_nc_ohc=sdXOm_-HZdYAX8rM2fF&edm=AP_V10EBAAAA&ccb=7-5&oh=00_AfCM70VvPF38qW8nyUmlObryDhI643vN5WHjvDqc3NRbcA&oe=65D6EF9B&_nc_sid=2999b8",
-            ];
+            let testing_urls = vec!["https://tekeye.uk/html/images/Joren_Falls_Izu_Jap.mp4", "https://www.w3schools.com/html/mov_bbb.mp4", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4"];
 
             println!("Sending offline data");
 
@@ -135,12 +161,12 @@ impl ScraperPoster {
 
                 let mut accounts_being_scraped = Vec::new();
 
-                cloned_self.fetch_user_info(&accounts_to_scrape, &mut accounts_being_scraped).await;
+                cloned_self.fetch_user_info(&mut accounts_to_scrape, &mut accounts_being_scraped).await;
 
                 // Since this is not within the loop, we need to handle it separately
                 while cloned_self.is_restricted {
                     cloned_self.should_continue_due_to_restriction().await;
-                    cloned_self.fetch_user_info(&accounts_to_scrape, &mut accounts_being_scraped).await;
+                    cloned_self.fetch_user_info(&mut accounts_to_scrape, &mut accounts_being_scraped).await;
                 }
 
                 loop {
@@ -276,7 +302,10 @@ impl ScraperPoster {
         let caption = caption.replace("(We don’t own this picture/photo. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for removal.)", "");
 
         // purrfectfelinevids
-        let caption = caption.replace("\n.\n.\n.\n.\n.", "");
+        let caption = caption.replace("\n\n.\n.\n.\n.\n.", "");
+
+        // kingcattos
+        let caption = caption.replace("-", "");
 
         let mut hashtags = caption.split_whitespace().filter(|s| s.starts_with('#')).collect::<Vec<&str>>();
         let selected_hashtags;
@@ -316,7 +345,7 @@ impl ScraperPoster {
     }
 
     /// This function checks if the account is restricted and sleeps for 30 minutes if it is.
-    /// It updates the latest content shortcode to indicate that the scraper has been halted.
+    /// It updates the latest content shortcode to indicate that the scraper_poster has been halted.
     async fn should_continue_due_to_restriction(&mut self) -> bool {
         if self.is_restricted {
             self.println("Account awaits manual intervention, sleeping for 30 min");
@@ -358,11 +387,11 @@ impl ScraperPoster {
         }
     }
 
-    async fn fetch_user_info(&mut self, accounts_to_scrape: &HashMap<String, String>, accounts_being_scraped: &mut Vec<User>) {
+    async fn fetch_user_info(&mut self, accounts_to_scrape: &mut HashMap<String, String>, accounts_being_scraped: &mut Vec<User>) {
         let mut accounts_scraped = 0;
         let accounts_to_scrape_len = accounts_to_scrape.len();
         self.println("Fetching user info...");
-        for (profile, _hashtags) in accounts_to_scrape {
+        for (profile, _hashtags) in accounts_to_scrape.clone() {
             {
                 accounts_scraped += 1;
                 let mut scraper_guard = self.scraper.lock().await;
@@ -375,10 +404,17 @@ impl ScraperPoster {
                     }
                     Err(e) => {
                         self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
-                        let mut lock = self.latest_content_mutex.lock().await;
-                        *lock = Some((e.to_string(), "caption".to_string(), "author".to_string(), "halted".to_string()));
-                        self.is_restricted = true;
-                        break;
+                        match e {
+                            InstagramScraperError::UserNotFound(profile) => {
+                                accounts_to_scrape.remove(&profile);
+                            }
+                            _ => {
+                                let mut lock = self.latest_content_mutex.lock().await;
+                                *lock = Some((e.to_string(), "caption".to_string(), "author".to_string(), "halted".to_string()));
+                                self.is_restricted = true;
+                                break;
+                            }
+                        }
                     }
                 };
             }
@@ -388,11 +424,11 @@ impl ScraperPoster {
     }
 
     async fn login_scraper(&mut self) {
-
         let username = self.credentials.get("username").unwrap().clone();
         let password = self.credentials.get("password").unwrap().clone();
 
-        { // Lock the scraper
+        {
+            // Lock the scraper_poster
             let mut scraper_guard = self.scraper.lock().await;
             scraper_guard.authenticate_with_login(username.clone(), password.clone());
             self.println("Logging in...");
@@ -414,7 +450,8 @@ impl ScraperPoster {
         let _enter = span.enter();
         let mut cloned_self = self.clone();
         let poster_loop = tokio::spawn(async move {
-            // Allow the scraper to login
+            cloned_self.amend_queue().await;
+            // Allow the scraper_poster to login
             sleep(Duration::from_secs(30)).await;
 
             loop {
@@ -426,12 +463,11 @@ impl ScraperPoster {
                     if content_info.status.to_string().contains("queued_") {
                         let queued_posts = transaction.load_content_queue().unwrap();
                         for mut queued_post in queued_posts {
-                            if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(user_settings.clone()) {
+                            if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(&user_settings) {
                                 if user_settings.can_post {
                                     let mut scraper_guard = cloned_self.scraper.lock().await;
 
                                     if !cloned_self.is_offline {
-                                        
                                         // Example of a caption:
                                         // "This is a cool caption!"
                                         // "•"
@@ -442,9 +478,9 @@ impl ScraperPoster {
                                         // "(We don’t own this reel. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for credit/removal.)"
                                         // "•"
                                         // "#cool #caption #hashtags"
-                                        
+
                                         let full_caption;
-                                        let big_spacer = "\n•\n•\n•\n•\n•\n";
+                                        let big_spacer = "\n\n\n•\n•\n•\n•\n•\n";
                                         let small_spacer = "\n•\n";
                                         let disclaimer = "(We don’t own this content. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for credit/removal.)";
                                         if queued_post.caption == "" && queued_post.hashtags == "" {
@@ -462,26 +498,39 @@ impl ScraperPoster {
 
                                         let (_message_id, content_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
 
-                                        if DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap() < now_in_my_timezone(user_settings.clone()) - Duration::from_secs(60 * 60 * 12) {
-                                            cloned_self.println(&format!("[+] Updating content url before posting: {}", queued_post.original_shortcode));
+                                        if DateTime::parse_from_rfc3339(&content_info.url_last_updated_at).unwrap() < now_in_my_timezone(&user_settings) - Duration::from_secs(60 * 60 * 12) {
+                                            //cloned_self.println(&format!("[+] Updating content url before posting: {}", queued_post.original_shortcode));
                                             match scraper_guard.download_reel(&queued_post.original_shortcode).await {
                                                 Ok((url, _caption)) => {
                                                     queued_post.url = url;
                                                 }
                                                 Err(err) => {
-                                                    cloned_self.println(&format!("[!] ERROR: couldn't update reel url!\nError: {}\n{}", err.to_string(), queued_post.original_shortcode));
+                                                    cloned_self.println(&format!("[!] couldn't update reel url!\n [ERROR] {}", err.to_string()));
+                                                    match err {
+                                                        InstagramScraperError::MediaNotFound(_) => {
+                                                            drop(scraper_guard);
+                                                            cloned_self.handle_failed_content(&mut queued_post).await;
+                                                            continue;
+                                                        }
+                                                        _ => {}
+                                                    }
                                                 }
                                             }
                                         }
 
                                         cloned_self.println(&format!("[+] Publishing content to instagram: {}", queued_post.original_shortcode));
-
+                                        let timer = std::time::Instant::now();
                                         match scraper_guard.upload_reel(user_id, access_token, &queued_post.url, &full_caption).await {
                                             Ok(_) => {
-                                                cloned_self.println(&format!("[+] Published content successfully: {}", queued_post.original_shortcode));
+                                                let duration = timer.elapsed(); // End timer
+
+                                                let minutes = duration.as_secs() / 60;
+                                                let seconds = duration.as_secs() % 60;
+
+                                                cloned_self.println(&format!("[+] Published content successfully: {}, took {} minutes and {} seconds", queued_post.original_shortcode, minutes, seconds));
                                             }
                                             Err(err) => {
-                                                match err{
+                                                match err {
                                                     InstagramScraperError::UploadFailedRecoverable(_) => {
                                                         cloned_self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err.to_string()));
                                                         drop(scraper_guard);
@@ -520,8 +569,8 @@ impl ScraperPoster {
                                         hashtags: queued_post.hashtags.clone(),
                                         original_author: queued_post.original_author.clone(),
                                         original_shortcode: queued_post.original_shortcode.clone(),
-                                        posted_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
-                                        last_updated_at: now_in_my_timezone(user_settings.clone()).to_rfc3339(),
+                                        posted_at: now_in_my_timezone(&user_settings).to_rfc3339(),
+                                        last_updated_at: now_in_my_timezone(&user_settings).to_rfc3339(),
                                         expired: false,
                                     };
 
@@ -529,7 +578,7 @@ impl ScraperPoster {
                                 } else {
                                     let new_will_post_at = transaction.get_new_post_time().unwrap();
                                     queued_post.will_post_at = new_will_post_at;
-                                    transaction.save_content_queue(queued_post.clone()).unwrap();
+                                    transaction.save_queued_content(queued_post.clone()).unwrap();
 
                                     let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
                                     video_info.status = ContentStatus::Queued { shown: false };
@@ -555,17 +604,13 @@ impl ScraperPoster {
         let mut transaction = self.database.begin_transaction().await.unwrap();
         let user_settings = transaction.load_user_settings().unwrap();
         let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-        if video_info.status.to_string().contains("shown") {
-            video_info.status = ContentStatus::Failed { shown: true };
-        } else {
-            video_info.status = ContentStatus::Failed { shown: false };
-        }
+        video_info.status = ContentStatus::Failed { shown: false };
 
         let index_map = IndexMap::from([(message_id, video_info.clone())]);
         transaction.save_content_mapping(index_map).unwrap();
 
-        let now = now_in_my_timezone(user_settings.clone()).to_rfc3339();
-        let last_updated_at = (now_in_my_timezone(user_settings.clone()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        let now = now_in_my_timezone(&user_settings).to_rfc3339();
+        let last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         let failed_content = FailedContent {
             username: queued_post.username.clone(),
             url: queued_post.url.clone(),
@@ -581,19 +626,20 @@ impl ScraperPoster {
         transaction.save_failed_content(failed_content.clone()).unwrap();
     }
 
-    // Move all the queued content 
+    // Move all the queued content
     async fn handle_recoverable_failed_content(&mut self) {
         let span = tracing::span!(tracing::Level::INFO, "handle_recoverable_failed_content");
         let _enter = span.enter();
 
         let mut transaction = self.database.begin_transaction().await.unwrap();
         let user_settings = transaction.load_user_settings().unwrap();
-        
+
         for mut queued_post in transaction.load_content_queue().unwrap() {
-            let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 60) as u64);
-            queued_post.last_updated_at = (now_in_my_timezone(user_settings.clone()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+            // Add 1/2 of the posting interval to the will_post_at time
+            let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 30) as u64);
+            queued_post.last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
             queued_post.will_post_at = new_will_post_at.to_rfc3339();
-            transaction.save_content_queue(queued_post.clone()).unwrap();
+            transaction.save_queued_content(queued_post.clone()).unwrap();
         }
     }
 
@@ -604,7 +650,7 @@ impl ScraperPoster {
 
         let scraper_guard = self.scraper.lock().await;
         let cookie_store = Arc::clone(&scraper_guard.session.cookie_store);
-        cookie_store.lock().unwrap().save_json(&mut writer).expect("ERROR in scraper.rs, failed to save cookie_store!");
+        cookie_store.lock().unwrap().save_json(&mut writer).expect("ERROR in scraper_poster.rs, failed to save cookie_store!");
     }
 
     /// Randomized sleep function, will randomize the sleep duration by up to 30% of the original duration
@@ -618,6 +664,37 @@ impl ScraperPoster {
         });
 
         sleep(Duration::from_secs(sleep_duration)).await;
+    }
+
+    /// This function will amend the queue to ensure that only one post is posted at a time,
+    /// even if the bot was shut down for a while.
+    async fn amend_queue(&self) {
+        let mut tx = self.database.begin_transaction().await.unwrap();
+        let content_queue = tx.load_content_queue().unwrap();
+        let user_settings = tx.load_user_settings().unwrap();
+        let mut content_to_post = 0;
+        for queued_post in content_queue.clone() {
+            if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(&user_settings) {
+                self.println(&format!("Amending queue: {}", queued_post.original_shortcode));
+                content_to_post += 1;
+            }
+        }
+
+        if content_to_post > 1 {
+            // Determine difference between the current time and the time the first post will be posted
+            let first_post_time = DateTime::parse_from_rfc3339(&content_queue.first().unwrap().will_post_at).unwrap();
+
+            // Calculate the time difference between the first post and now
+            let time_difference = now_in_my_timezone(&user_settings) - first_post_time.with_timezone(&Utc);
+
+            // Add the time difference to all the posts
+            for mut queued_post in content_queue {
+                let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + time_difference;
+                self.println(&format!("Changing post time for {}: {}", queued_post.original_shortcode, new_will_post_at));
+                queued_post.will_post_at = new_will_post_at.to_rfc3339();
+                tx.save_queued_content(queued_post.clone()).unwrap();
+            }
+        }
     }
 
     fn println(&self, message: &str) {

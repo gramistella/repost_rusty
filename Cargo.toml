@@ -28,6 +28,9 @@ futures = "0.3.30"
 reqwest_cookie_store = "0.7.0"
 tracing = "0.1.40"
 tracing-appender = { version = "0.2.3"  }
+serenity = { version = "0.12.1" }
+poise = { version = "0.6.1" }
+backtrace = "0.3.71"
 #indicatif = "0.16.2"
 
 # Turn on debug info in release builds for cargo flamegraph

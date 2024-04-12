@@ -1,35 +1,30 @@
 extern crate r2d2;
 extern crate r2d2_sqlite;
 
+use backtrace::Backtrace;
+use std::backtrace;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
-use teloxide::prelude::ChatId;
 use tokio::sync::mpsc;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
-use crate::database::Database;
-use crate::scraper::ScraperPoster;
-use crate::telegram_bot::BotManager;
+use crate::discord_bot::bot::DiscordBot;
+use crate::discord_bot::database::Database;
+use crate::scraper_poster::scraper::ScraperPoster;
 
-mod database;
-mod scraper;
+mod discord_bot;
+mod scraper_poster;
 mod telegram_bot;
-mod utils;
 
 // Main configuration
-const CHAT_ID: ChatId = ChatId(34957918);
-const REFRESH_RATE: Duration = Duration::from_secs(5);
 const IS_OFFLINE: bool = false;
-
-// Telegram bot configuration
-const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(120);
 
 // Scraper configuration
 const MAX_CONTENT_PER_ITERATION: usize = 8;
@@ -60,18 +55,18 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // Create a new channel
-            let (tx, rx) = mpsc::channel(100);
-
-            let bot_manager = rt.block_on(async { BotManager::new(db.clone(), credentials.clone()) });
+            //let bot_manager = rt.block_on(async { BotManager::new(db.clone(), credentials.clone()) });
+            let mut discord_bot_manager = rt.block_on(async { DiscordBot::new(db.clone(), credentials.clone()).await });
             let rt_clone_bot = Arc::clone(&rt);
 
-            // Run the scraper and the bot concurrently
+            // Run the scraper_poster and the bot concurrently
             let mut scraper_poster = ScraperPoster::new(db.clone(), username.clone(), credentials.clone(), IS_OFFLINE);
-            let scraper = std::thread::spawn(move || rt.block_on(scraper_poster.run_scraper(tx)));
-            let telegram_bot = std::thread::spawn(move || rt_clone_bot.block_on(async move { bot_manager.run_bot(rx, username).await }));
+            let scraper = std::thread::spawn(move || rt.block_on(scraper_poster.run_scraper()));
+
+            let discord = std::thread::spawn(move || rt_clone_bot.block_on(async { discord_bot_manager.run_bot().await }));
+            //let telegram_bot = std::thread::spawn(move || rt_clone_bot.block_on(async move { bot_manager.run_bot(rx, username).await }));
             all_handles.push(scraper);
-            all_handles.push(telegram_bot);
+            all_handles.push(discord);
         }
     }
 
@@ -95,7 +90,7 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
         .with_target(false)
         .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
         .with_writer(non_blocking)
-        .with_filter(LevelFilter::INFO);
+        .with_filter(LevelFilter::WARN);
 
     let (non_blocking, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
     let layer2 = tracing_subscriber::fmt::Layer::new()
@@ -112,6 +107,42 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
     //LogWrapper::new(multi.clone(), logger).try_init().unwrap();
     Registry::default().with(file_layer).with(layer2).init();
 
+    // Set a custom panic hook
+    let enable_panic_hook = false;
+    if enable_panic_hook {
+        std::panic::set_hook(Box::new(|panic_info| {
+            // Get panic message
+            let panic_message = match panic_info.payload().downcast_ref::<&str>() {
+                Some(s) => *s,
+                None => "Box<Any>",
+            };
+
+            // Get location information
+            let location = panic_info.location().unwrap();
+
+            // Log panic information
+            tracing::error!(
+                target: "panic",
+                "thread '{}' panicked at '{}', {}:{}",
+                std::thread::current().name().unwrap_or("<unnamed>"),
+                panic_message,
+                location.file(),
+                location.line(),
+            );
+
+            // Log stack trace
+            if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+                tracing::error!("panic occurred: {:?}", s);
+            } else {
+                tracing::error!("panic occurred");
+            }
+            if let Some(s) = std::env::var_os("RUST_BACKTRACE") {
+                if s == "1" || s == "full" {
+                    tracing::error!("stack backtrace: {:?}", Backtrace::capture());
+                }
+            }
+        }));
+    }
     (file_guard, stdout_guard)
 }
 

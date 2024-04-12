@@ -9,10 +9,10 @@ use teloxide::utils::command::BotCommands;
 use teloxide::Bot;
 use tokio::sync::Mutex;
 
-use crate::database::Database;
-use crate::telegram_bot::helpers::clear_sent_messages;
-use crate::telegram_bot::{BotDialogue, HandlerResult, NavigationBar, State, UIDefinitions, CHAT_ID};
-use crate::utils::now_in_my_timezone;
+use crate::telegram_bot::bot::{BotDialogue, HandlerResult, NavigationBar, UIDefinitions, CHAT_ID};
+use crate::telegram_bot::database::Database;
+use crate::telegram_bot::state::State;
+use crate::telegram_bot::utils::{clear_sent_messages, now_in_my_timezone};
 
 /// These commands are supported:
 #[derive(BotCommands, Clone)]

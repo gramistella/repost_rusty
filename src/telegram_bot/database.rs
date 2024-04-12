@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use teloxide::types::MessageId;
 use tokio::sync::Mutex;
 
+use crate::telegram_bot::bot::INTERFACE_UPDATE_INTERVAL;
 use crate::telegram_bot::state::ContentStatus;
-use crate::utils::now_in_my_timezone;
-use crate::{INTERFACE_UPDATE_INTERVAL, IS_OFFLINE};
+use crate::telegram_bot::utils::now_in_my_timezone;
+use crate::IS_OFFLINE;
 
 #[derive(Clone, Debug)]
 pub struct UserSettings {
@@ -90,6 +91,7 @@ pub struct ContentInfo {
     pub original_shortcode: String,
     pub last_updated_at: String,
     pub url_last_updated_at: String,
+    pub added_at: String,
     pub encountered_errors: i32,
     pub page_num: i32,
 }
@@ -195,6 +197,7 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             last_updated_at TEXT NOT NULL,
             url_last_updated_at TEXT NOT NULL,
+            added_at TEXT NOT NULL,
             page_num INTEGER NOT NULL,
             encountered_errors INTEGER NOT NULL
         )",
@@ -431,7 +434,7 @@ impl DatabaseTransaction {
 
             let status_string = new_value.status.to_string();
             tx.execute(
-                "INSERT INTO content_info (username, message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO content_info (username, message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, added_at, page_num, encountered_errors) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     self.username,
                     new_key.0,
@@ -443,6 +446,7 @@ impl DatabaseTransaction {
                     new_value.original_shortcode,
                     new_value.last_updated_at,
                     new_value.url_last_updated_at,
+                    new_value.added_at,
                     new_value.page_num,
                     new_value.encountered_errors
                 ],
@@ -511,7 +515,7 @@ impl DatabaseTransaction {
 
     pub fn load_content_mapping(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let tx = self.conn.transaction()?;
-        let mut stmt = tx.prepare("SELECT username, message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, page_num, encountered_errors FROM content_info WHERE username = ?1 ORDER BY page_num, message_id")?;
+        let mut stmt = tx.prepare("SELECT username, message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, url_last_updated_at, added_at, page_num, encountered_errors FROM content_info WHERE username = ?1 ORDER BY page_num, added_at")?;
         let content_info_iter = stmt.query_map([self.username.clone()], |row| {
             let username: String = row.get(0)?;
             let message_id: i32 = row.get(1)?;
@@ -523,8 +527,9 @@ impl DatabaseTransaction {
             let original_shortcode: String = row.get(7)?;
             let last_updated_at: String = row.get(8)?;
             let url_last_updated_at: String = row.get(9)?;
-            let page_num: i32 = row.get(10)?;
-            let encountered_errors: i32 = row.get(11)?;
+            let added_at: String = row.get(10)?;
+            let page_num: i32 = row.get(11)?;
+            let encountered_errors: i32 = row.get(12)?;
 
             let status: ContentStatus = status.parse().unwrap();
             let content_info = ContentInfo {
@@ -537,6 +542,7 @@ impl DatabaseTransaction {
                 original_shortcode,
                 last_updated_at,
                 url_last_updated_at,
+                added_at,
                 page_num,
                 encountered_errors,
             };
@@ -667,7 +673,7 @@ impl DatabaseTransaction {
     pub fn load_content_queue(&mut self) -> Result<Vec<QueuedContent>> {
         let tx = self.conn.transaction()?;
 
-        let mut queued_videos_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, will_post_at FROM content_queue WHERE username = ?1")?;
+        let mut queued_videos_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, last_updated_at, will_post_at FROM content_queue WHERE username = ?1 ORDER BY will_post_at")?;
         let video_queue_iter = queued_videos_stmt.query_map(params![self.username], |row| {
             let url: String = row.get(0)?;
             let caption: String = row.get(1)?;
