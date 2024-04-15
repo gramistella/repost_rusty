@@ -1,14 +1,14 @@
 use std::ops::Deref;
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration};
-use serenity::all::{Builder, Context, CreateInteractionResponse, CreateMessage, EditMessage, Interaction, Mention, MessageId, MessageReference};
+use chrono::Duration;
+use serenity::all::{Context, CreateMessage, EditMessage, Interaction, Mention, MessageId, MessageReference};
 use tokio::sync::Mutex;
 
 use crate::discord_bot::bot::{ChannelIdMap, UiDefinitions, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
 use crate::discord_bot::database::{ContentInfo, Database, QueuedContent, RejectedContent};
 use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::{generate_full_caption, get_edit_buttons, get_pending_buttons, get_queued_buttons, get_rejected_buttons, now_in_my_timezone};
+use crate::discord_bot::utils::{generate_full_caption, get_edit_buttons, get_pending_buttons, now_in_my_timezone};
 
 #[derive(Clone)]
 pub struct InnerEventHandler {
@@ -19,27 +19,18 @@ pub struct InnerEventHandler {
 }
 
 impl InnerEventHandler {
-    pub async fn interaction_post_now(self, ctx: Context, interaction: Interaction, _content_id: MessageId, content_info: &mut ContentInfo) {
-        //let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
-
+    pub async fn interaction_publish_now(self, content_info: &mut ContentInfo) {
         let mut tx = self.database.begin_transaction().await.unwrap();
         let user_settings = tx.load_user_settings().unwrap();
+        let now = now_in_my_timezone(&user_settings);
 
         let mut queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
-        let now = now_in_my_timezone(&user_settings);
-        let last_updated_at = DateTime::parse_from_rfc3339(&queued_content.last_updated_at).unwrap();
-        queued_content.last_updated_at = (last_updated_at - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         queued_content.will_post_at = (now + Duration::seconds(30)).to_rfc3339();
-
         tx.save_queued_content(queued_content).unwrap();
 
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
+        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     }
-    pub async fn interaction_accepted(self, ctx: Context, interaction: Interaction, content_id: MessageId, content_info: &mut ContentInfo) {
-        let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
-
-        let edited_msg = EditMessage::new();
+    pub async fn interaction_accepted(self, content_info: &mut ContentInfo) {
         content_info.status = ContentStatus::Queued { shown: true };
 
         let mut tx = self.database.begin_transaction().await.unwrap();
@@ -58,20 +49,12 @@ impl InnerEventHandler {
         };
 
         tx.save_queued_content(queued_content).unwrap();
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions.clone(), content_info).await;
-        let msg_buttons = get_queued_buttons(&self.ui_definitions);
-        let edited_msg = edited_msg.content(msg_caption);
-        let edited_msg = edited_msg.components(msg_buttons);
-        ctx.http.edit_message(channel_id, content_id, &edited_msg, vec![]).await.unwrap();
 
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
+        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     }
 
-    pub async fn interaction_rejected(self, ctx: Context, interaction: Interaction, content_id: MessageId, content_info: &mut ContentInfo) {
-        let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
-
-        //map.insert("content".to_string(), "You clicked a button".to_string());
+    pub async fn interaction_rejected(self, content_info: &mut ContentInfo) {
+        content_info.status = ContentStatus::Rejected { shown: true };
 
         let mut tx = self.database.begin_transaction().await.unwrap();
         let user_settings = tx.load_user_settings().unwrap();
@@ -89,77 +72,46 @@ impl InnerEventHandler {
         };
         tx.save_rejected_content(rejected_content).unwrap();
 
-        let edited_msg = EditMessage::new();
-        content_info.status = ContentStatus::Rejected { shown: true };
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions, content_info).await;
-        let msg_buttons = get_rejected_buttons(&self.ui_definitions);
-        let edited_msg = edited_msg.content(msg_caption);
-        let edited_msg = edited_msg.components(msg_buttons);
-
-        ctx.http.edit_message(channel_id, content_id, &edited_msg, vec![]).await.unwrap();
-
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
+        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     }
 
-    pub async fn interaction_remove_from_queue(self, ctx: Context, interaction: Interaction, content_id: MessageId, content_info: &mut ContentInfo) {
-        let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
+    pub async fn interaction_remove_from_queue(self, content_info: &mut ContentInfo) {
+        content_info.status = ContentStatus::Pending { shown: true };
 
         let mut tx = self.database.begin_transaction().await.unwrap();
         tx.remove_post_from_queue_with_shortcode(content_info.original_shortcode.clone()).unwrap();
-        let edited_msg = EditMessage::new();
-        content_info.status = ContentStatus::Pending { shown: true };
 
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions, content_info).await;
-        let msg_buttons = get_pending_buttons(&self.ui_definitions);
-        let edited_msg = edited_msg.content(msg_caption);
-        let edited_msg = edited_msg.components(msg_buttons);
-        ctx.http.edit_message(channel_id, content_id, &edited_msg, vec![]).await.unwrap();
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
+        let user_settings = tx.load_user_settings().unwrap();
+        let now = now_in_my_timezone(&user_settings);
+        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     }
 
-    pub async fn interaction_undo_rejected(self, ctx: Context, interaction: Interaction, content_id: MessageId, content_info: &mut ContentInfo) {
-        let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
+    pub async fn interaction_undo_rejected(self, content_info: &mut ContentInfo) {
+        content_info.status = ContentStatus::Pending { shown: true };
 
         let mut tx = self.database.begin_transaction().await.unwrap();
         tx.remove_rejected_content_with_shortcode(content_info.original_shortcode.clone()).unwrap();
 
-        let edited_msg = EditMessage::new();
-        content_info.status = ContentStatus::Pending { shown: true };
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions, content_info).await;
-        let msg_buttons = get_pending_buttons(&self.ui_definitions);
-        let edited_msg = edited_msg.content(msg_caption);
-        let edited_msg = edited_msg.components(msg_buttons);
-        ctx.http.edit_message(channel_id, content_id, &edited_msg, vec![]).await.unwrap();
-
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
+        let user_settings = tx.load_user_settings().unwrap();
+        let now = now_in_my_timezone(&user_settings);
+        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     }
 
-    pub async fn interaction_remove_from_view(self, ctx: Context, interaction: Interaction, content_id: MessageId, content_info: &mut ContentInfo) {
+    pub async fn interaction_remove_from_view(self, ctx: &Context, content_id: MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
 
         content_info.status = ContentStatus::RemovedFromView;
 
         ctx.http.delete_message(channel_id, content_id, None).await.unwrap();
-
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
     }
 
-    pub async fn interaction_remove_from_view_failed(self, ctx: Context, interaction: Interaction, content_id: MessageId, content_info: &mut ContentInfo) {
-        //let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
-
+    pub async fn interaction_remove_from_view_failed(self, ctx: &Context, content_id: MessageId, content_info: &mut ContentInfo) {
         content_info.status = ContentStatus::RemovedFromView;
 
         ctx.http.delete_message(POSTED_CHANNEL_ID, content_id, None).await.unwrap();
-
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
     }
 
-    pub async fn interaction_go_back(&mut self, ctx: Context, interaction: Interaction, content_id: MessageId, content_info: &mut ContentInfo) {
+    pub async fn interaction_go_back(&mut self, ctx: &Context, content_id: MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
 
         let msg_caption = generate_full_caption(&self.database, &self.ui_definitions.clone(), content_info).await;
@@ -171,12 +123,9 @@ impl InnerEventHandler {
         ctx.http.edit_message(channel_id, content_id, &edited_msg, vec![]).await.unwrap();
 
         *self.edited_content.lock().await = None;
-
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
     }
 
-    pub async fn interaction_edit(&mut self, ctx: Context, interaction: Interaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
+    pub async fn interaction_edit(&mut self, ctx: &Context, content_id: &mut MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
 
         let msg_caption = generate_full_caption(&self.database, &self.ui_definitions.clone(), content_info).await;
@@ -186,12 +135,9 @@ impl InnerEventHandler {
         let edited_msg = edited_msg.content(msg_caption).components(msg_buttons);
 
         ctx.http.edit_message(channel_id, *content_id, &edited_msg, vec![]).await.unwrap();
-
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
     }
 
-    pub async fn interaction_edit_caption(&mut self, ctx: Context, interaction: Interaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
+    pub async fn interaction_edit_caption(&mut self, ctx: &Context, interaction: &Interaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
 
         let mention = Mention::User(interaction.clone().message_component().unwrap().user.id);
@@ -205,12 +151,9 @@ impl InnerEventHandler {
             content_info: content_info.clone(),
             message_to_delete: Some(msg.id),
         });
-
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
     }
 
-    pub async fn interaction_edit_hashtags(&mut self, ctx: Context, interaction: Interaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
+    pub async fn interaction_edit_hashtags(&mut self, ctx: &Context, interaction: &Interaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
 
         let mention = Mention::User(interaction.clone().message_component().unwrap().user.id);
@@ -224,9 +167,6 @@ impl InnerEventHandler {
             content_info: content_info.clone(),
             message_to_delete: Some(msg.id),
         });
-
-        let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
     }
 }
 

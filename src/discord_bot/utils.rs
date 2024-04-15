@@ -2,16 +2,19 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
-use serenity::all::{ChannelId, CreateActionRow, CreateButton, Http};
+use lazy_static::lazy_static;
+use regex::Regex;
+use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, Http, MessageId};
 
 use crate::discord_bot::bot::UiDefinitions;
-use crate::discord_bot::database::{ContentInfo, Database, UserSettings, DEFAULT_FAILURE_EXPIRATION};
+use crate::discord_bot::database::{ContentInfo, Database, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord_bot::state::ContentStatus;
 
 pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
     // let upper_spacer = "^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^";
     // let upper_spacer = "## nununununununununununununununu";
     let upper_spacer = "### ->->->->->->->->->->->->->->->->->->->->->->";
+    let base_caption = format!("{upper_spacer}\n‎\n{}\n‎\n(from @{})\n‎\n{}\n", content_info.caption, content_info.original_author, content_info.hashtags);
 
     let mut tx = database.begin_transaction().await.unwrap();
     let user_settings = tx.load_user_settings().unwrap();
@@ -36,16 +39,13 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
 
             let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
             if formatted_will_post_at.is_empty() {
-                format!("{upper_spacer}\n‎\n{}\n(from @{})\n{}\n\n{}\n‎\nPosting now...\n\n{}‎", content_info.caption, content_info.original_author, content_info.hashtags, queued_caption, formatted_will_post_at)
+                format!("{base_caption}\n{}\n‎\nPosting now...\n\n{}‎", queued_caption, formatted_will_post_at)
             } else {
-                format!(
-                    "{upper_spacer}\n‎\n{}\n(from @{})\n{}\n\n{}\nWill post at {}\n\n{}\n‎",
-                    content_info.caption, content_info.original_author, content_info.hashtags, queued_caption, formatted_will_post_at, countdown_caption
-                )
+                format!("{base_caption}\n{}\nWill post at {}\n\n{}\n‎", queued_caption, formatted_will_post_at, countdown_caption)
             }
         }
         ContentStatus::Pending { .. } => {
-            format!("{upper_spacer}\n‎\n{}\n(from @{})\n{}\n‎", content_info.caption, content_info.original_author, content_info.hashtags)
+            format!("{base_caption}‎")
         }
         ContentStatus::Rejected { .. } => {
             let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
@@ -54,11 +54,17 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
 
             let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
 
-            format!("{upper_spacer}\n‎\n{}\n(from @{})\n{}\n\n{}\n{}\n‎", content_info.caption, content_info.original_author, content_info.hashtags, rejected_caption, countdown_caption)
+            format!("{base_caption}\n{}\n{}\n‎", rejected_caption, countdown_caption)
         }
-        ContentStatus::Posted { .. } => {
-            let posted_caption = ui_definitions.labels.get("posted_caption").unwrap();
-            format!("{upper_spacer}\n‎\n{}\n(from @{})\n{}\n\n{}\n‎", content_info.caption, content_info.original_author, content_info.hashtags, posted_caption)
+        ContentStatus::Published { .. } => {
+            let published_caption = ui_definitions.labels.get("published_caption").unwrap();
+            let published_content = tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
+            let published_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap().format("%Y-%m-%d %H:%M:%S").to_string();
+            let will_expire_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap() + DEFAULT_POSTED_EXPIRATION;
+
+            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
+
+            format!("{base_caption}\n{} at {}\n{}\n‎", published_caption, published_at, countdown_caption)
         }
         ContentStatus::Failed { .. } => {
             let failed_caption = ui_definitions.labels.get("failed_caption").unwrap();
@@ -66,7 +72,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             let will_expire_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap() + DEFAULT_FAILURE_EXPIRATION;
 
             let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
-            format!("{upper_spacer}\n‎\n{}\n(from @{})\n{}\n\n{}\n{}\n‎", content_info.caption, content_info.original_author, content_info.hashtags, failed_caption, countdown_caption)
+            format!("{base_caption}\n{}\n{}\n‎", failed_caption, countdown_caption)
         }
         _ => {
             panic!("Invalid status {}", content_info.status.to_string());
@@ -91,8 +97,8 @@ pub async fn clear_all_messages(database: &Database, http: &Arc<Http>, channel_i
             content.status = ContentStatus::Pending { shown: false };
         } else if content.status == (ContentStatus::Queued { shown: true }) {
             content.status = ContentStatus::Queued { shown: false };
-        } else if content.status == (ContentStatus::Posted { shown: true }) {
-            content.status = ContentStatus::Posted { shown: false };
+        } else if content.status == (ContentStatus::Published { shown: true }) {
+            content.status = ContentStatus::Published { shown: false };
         } else if content.status == (ContentStatus::Rejected { shown: true }) {
             content.status = ContentStatus::Rejected { shown: false };
         } else if content.status == (ContentStatus::Failed { shown: true }) {
@@ -149,11 +155,11 @@ pub fn get_pending_buttons(ui_definitions: &UiDefinitions) -> Vec<CreateActionRo
 pub fn get_queued_buttons(ui_definitions: &UiDefinitions) -> Vec<CreateActionRow> {
     let remove_from_queue = ui_definitions.buttons.get("remove_from_queue").unwrap();
     let edit_queued = ui_definitions.buttons.get("edit").unwrap();
-    let post_now = ui_definitions.buttons.get("post_now").unwrap();
+    let publish_now = ui_definitions.buttons.get("publish_now").unwrap();
     vec![CreateActionRow::Buttons(vec![
         CreateButton::new("remove_from_queue").label(remove_from_queue),
         CreateButton::new("edit_queued").label(edit_queued),
-        CreateButton::new("post_now").label(post_now),
+        CreateButton::new("publish_now").label(publish_now),
     ])]
 }
 
@@ -168,10 +174,74 @@ pub fn get_failed_buttons(ui_definitions: &UiDefinitions) -> Vec<CreateActionRow
     vec![CreateActionRow::Buttons(vec![CreateButton::new("remove_from_view_failed").label(remove_from_view)])]
 }
 
-pub fn get_posted_buttons(_ui_definitions: &UiDefinitions) -> Vec<CreateActionRow> {
+pub fn get_published_buttons(_ui_definitions: &UiDefinitions) -> Vec<CreateActionRow> {
     // I initially wanted to add an edit button, which when clicked would show a "Delete from Instagram" button
     // Unfortunately, it appears that deleting and updating reels is not supported via the Instagram API.
     //  let edit = ui_definitions.buttons.get("edit").unwrap();
     // vec![CreateActionRow::Buttons(vec![CreateButton::new("edit_post").label(edit)])]
     vec![]
+}
+
+lazy_static! {
+    static ref CUSTOM_ID_REGEX: Regex = Regex::new(r#"custom_id: "([^"]+)""#).unwrap();
+}
+pub async fn should_update_buttons(channel_id: ChannelId, ctx: &Context, message_id: &MessageId, new_buttons: Vec<CreateActionRow>) -> bool {
+    fn extract_custom_ids(component_description: &str) -> Vec<String> {
+        CUSTOM_ID_REGEX.captures_iter(component_description).filter_map(|cap| cap.get(1).map(|match_| match_.as_str().to_string())).collect()
+    }
+
+    let old_msg = match channel_id.message(&ctx.http, *message_id).await {
+        Ok(msg) => msg,
+        Err(_) => return true,
+    };
+
+    let first_component_element = match old_msg.components.get(0) {
+        Some(component) => component,
+        None => {
+            if new_buttons.is_empty() {
+                return false;
+            } else {
+                return true;
+            }
+        }
+    };
+
+    let old_components = first_component_element.components.clone();
+    let mut old_custom_ids = vec![];
+    for old_component in old_components {
+        let old_component = format!("{:?}", old_component);
+        let custom_ids = extract_custom_ids(&old_component);
+        for id in custom_ids {
+            old_custom_ids.push(id);
+        }
+    }
+
+    let mut new_custom_ids = vec![];
+    for new_component in new_buttons {
+        let new_component = format!("{:?}", new_component);
+        let custom_ids = extract_custom_ids(&new_component);
+        for id in custom_ids {
+            new_custom_ids.push(id);
+        }
+    }
+
+    if old_custom_ids == new_custom_ids {
+        false
+    } else {
+        true
+    }
+}
+
+pub async fn should_update_caption(channel_id: ChannelId, ctx: &Context, message_id: &MessageId, new_content: String) -> bool {
+    let old_msg = match channel_id.message(&ctx.http, *message_id).await {
+        Ok(msg) => msg,
+        Err(_) => return true,
+    };
+
+    let old_content = old_msg.content.clone();
+    if old_content == new_content {
+        false
+    } else {
+        true
+    }
 }

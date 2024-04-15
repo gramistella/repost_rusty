@@ -9,7 +9,6 @@ use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -30,13 +29,15 @@ const IS_OFFLINE: bool = false;
 const MAX_CONTENT_PER_ITERATION: usize = 8;
 const FETCH_SLEEP_LEN: Duration = Duration::from_secs(60);
 const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 20);
-const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 300);
+const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 60 * 12);
 
 fn main() -> anyhow::Result<()> {
     let (_file_guard, _stdout_guard) = init_logging();
 
     let all_credentials = read_credentials("config/credentials.yaml");
     let mut all_handles = Vec::new();
+
+    let mut is_first_run = true;
 
     for (username, credentials) in all_credentials {
         if credentials.get("enabled").expect("No enabled field in credentials") == "true" {
@@ -56,7 +57,7 @@ fn main() -> anyhow::Result<()> {
             }
 
             //let bot_manager = rt.block_on(async { BotManager::new(db.clone(), credentials.clone()) });
-            let mut discord_bot_manager = rt.block_on(async { DiscordBot::new(db.clone(), credentials.clone()).await });
+            let mut discord_bot_manager = rt.block_on(async { DiscordBot::new(db.clone(), credentials.clone(), is_first_run).await });
             let rt_clone_bot = Arc::clone(&rt);
 
             // Run the scraper_poster and the bot concurrently
@@ -67,6 +68,8 @@ fn main() -> anyhow::Result<()> {
             //let telegram_bot = std::thread::spawn(move || rt_clone_bot.block_on(async move { bot_manager.run_bot(rx, username).await }));
             all_handles.push(scraper);
             all_handles.push(discord);
+
+            is_first_run = false;
         }
     }
 

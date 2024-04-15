@@ -11,14 +11,13 @@ use rand::{Rng, SeedableRng};
 use serenity::all::MessageId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;
 
 use crate::discord_bot::bot::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
-use crate::discord_bot::database::{ContentInfo, Database, FailedContent, PostedContent, QueuedContent};
+use crate::discord_bot::database::{ContentInfo, Database, FailedContent, PublishedContent, QueuedContent};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::now_in_my_timezone;
 use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
@@ -88,6 +87,11 @@ impl ScraperPoster {
                     let user_settings = transaction.load_user_settings().unwrap();
 
                     if let Some((url, caption, author, shortcode)) = content_tuple {
+                        if shortcode == "halted" {
+                            tokio::time::sleep(REFRESH_RATE).await;
+                            continue;
+                        }
+
                         if !transaction.does_content_exist_with_shortcode(shortcode.clone()) {
                             let re = regex::Regex::new(r"#\w+").unwrap();
                             let cloned_caption = caption.clone();
@@ -293,6 +297,11 @@ impl ScraperPoster {
             "\n-\n-\n-\n- credit: unknown (We do not claim ownership of this video, all rights are reserved and belong to their respective owners, no copyright infringement intended. Please DM us for credit/removal) tags:",
             "",
         );
+        let caption = caption.replace("-", "");
+        let caption = caption.replace("credit: unknown", "");
+        let caption = caption.replace("(We do not claim ownership of this video, all rights are reserved and belong to their respective owners, no copyright infringement intended. Please DM us for credit/removal)", "");
+        let caption = caption.replace("tags:", "");
+
         let caption = caption.replace("#softcatmemes", "");
 
         // Catvibenow
@@ -303,6 +312,10 @@ impl ScraperPoster {
 
         // purrfectfelinevids
         let caption = caption.replace("\n\n.\n.\n.\n.\n.", "");
+
+        // instantgatos
+        let caption = caption.replace("Follow @instantgatos for more", "");
+        let caption = caption.replace("Follow @gatosforyou for more", "");
 
         // kingcattos
         let caption = caption.replace("-", "");
@@ -558,23 +571,23 @@ impl ScraperPoster {
                                     }
 
                                     let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-                                    video_info.status = ContentStatus::Posted { shown: false };
+                                    video_info.status = ContentStatus::Published { shown: false };
                                     let index_map = IndexMap::from([(message_id, video_info.clone())]);
                                     transaction.save_content_mapping(index_map).unwrap();
 
-                                    let posted_content = PostedContent {
+                                    let published_content = PublishedContent {
                                         username: queued_post.username.clone(),
                                         url: queued_post.url.clone(),
                                         caption: queued_post.caption.clone(),
                                         hashtags: queued_post.hashtags.clone(),
                                         original_author: queued_post.original_author.clone(),
                                         original_shortcode: queued_post.original_shortcode.clone(),
-                                        posted_at: now_in_my_timezone(&user_settings).to_rfc3339(),
+                                        published_at: now_in_my_timezone(&user_settings).to_rfc3339(),
                                         last_updated_at: now_in_my_timezone(&user_settings).to_rfc3339(),
                                         expired: false,
                                     };
 
-                                    transaction.save_posted_content(posted_content).unwrap();
+                                    transaction.save_published_content(published_content).unwrap();
                                 } else {
                                     let new_will_post_at = transaction.get_new_post_time().unwrap();
                                     queued_post.will_post_at = new_will_post_at;

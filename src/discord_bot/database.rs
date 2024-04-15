@@ -42,7 +42,7 @@ pub struct QueuedContent {
 }
 
 #[derive(Clone)]
-pub struct PostedContent {
+pub struct PublishedContent {
     pub username: String,
     pub url: String,
     pub caption: String,
@@ -50,7 +50,7 @@ pub struct PostedContent {
     pub original_author: String,
     pub original_shortcode: String,
     pub last_updated_at: String,
-    pub posted_at: String,
+    pub published_at: String,
     pub expired: bool,
 }
 
@@ -99,7 +99,8 @@ pub struct ContentInfo {
 const PROD_DB: &str = "db/prod.db";
 const DEV_DB: &str = "db/dev.db";
 
-pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
+pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 12);
+pub const DEFAULT_POSTED_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 12);
 
 pub(crate) struct Database {
     pool: Arc<Mutex<Pool<SqliteConnectionManager>>>,
@@ -739,7 +740,7 @@ impl DatabaseTransaction {
         None
     }
 
-    pub fn get_posted_content_by_shortcode(&mut self, shortcode: String) -> Option<PostedContent> {
+    pub fn get_published_content_by_shortcode(&mut self, shortcode: String) -> Option<PublishedContent> {
         let failed_content = self.load_posted_content().unwrap();
 
         for content in failed_content {
@@ -827,7 +828,7 @@ impl DatabaseTransaction {
     /// Save a posted content to the database
     ///
     /// Will automatically remove the content from the content_queue
-    pub fn save_posted_content(&mut self, posted_content: PostedContent) -> Result<()> {
+    pub fn save_published_content(&mut self, posted_content: PublishedContent) -> Result<()> {
         let queued_content = match self.get_queued_content_by_shortcode(posted_content.original_shortcode.clone()) {
             None => None,
             Some(post) => Some(post),
@@ -870,7 +871,7 @@ impl DatabaseTransaction {
                 posted_content.hashtags,
                 posted_content.original_author,
                 posted_content.original_shortcode,
-                posted_content.posted_at,
+                posted_content.published_at,
                 posted_content.last_updated_at,
                 posted_content.expired
             ],
@@ -881,7 +882,7 @@ impl DatabaseTransaction {
         Ok(())
     }
 
-    pub fn load_posted_content(&mut self) -> Result<Vec<PostedContent>> {
+    pub fn load_posted_content(&mut self) -> Result<Vec<PublishedContent>> {
         let tx = self.conn.transaction()?;
 
         let mut posted_content_stmt = tx.prepare("SELECT url, caption, hashtags, original_author, original_shortcode, posted_at, last_updated_at, expired FROM posted_content WHERE username = ?1")?;
@@ -896,14 +897,14 @@ impl DatabaseTransaction {
             let last_updated_at: String = row.get(6)?;
             let expired: bool = row.get(7)?;
 
-            let queued_post = PostedContent {
+            let queued_post = PublishedContent {
                 username,
                 url,
                 caption,
                 hashtags,
                 original_author,
                 original_shortcode,
-                posted_at,
+                published_at: posted_at,
                 last_updated_at,
                 expired,
             };
@@ -1040,7 +1041,7 @@ impl DatabaseTransaction {
         // Get all the post times
         let mut post_times = Vec::new();
         for post in &posted_content {
-            let post_time = DateTime::parse_from_rfc3339(&post.posted_at).unwrap().with_timezone(&Utc);
+            let post_time = DateTime::parse_from_rfc3339(&post.published_at).unwrap().with_timezone(&Utc);
             post_times.push(post_time);
         }
         for post in &queued_content {

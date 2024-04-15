@@ -4,14 +4,13 @@ use std::str::FromStr;
 
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
-use teloxide::prelude::*;
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ContentStatus {
     Waiting,
     RemovedFromView,
     Pending { shown: bool },
-    Posted { shown: bool },
+    Published { shown: bool },
     Queued { shown: bool },
     Rejected { shown: bool },
     Failed { shown: bool },
@@ -45,8 +44,8 @@ impl FromStr for ContentStatus {
             "waiting" => Ok(ContentStatus::Waiting),
             "pending_shown" => Ok(ContentStatus::Pending { shown: true }),
             "pending_hidden" => Ok(ContentStatus::Pending { shown: false }),
-            "posted_shown" => Ok(ContentStatus::Posted { shown: true }),
-            "posted_hidden" => Ok(ContentStatus::Posted { shown: false }),
+            "published_shown" => Ok(ContentStatus::Published { shown: true }),
+            "published_hidden" => Ok(ContentStatus::Published { shown: false }),
             "queued_shown" => Ok(ContentStatus::Queued { shown: true }),
             "queued_hidden" => Ok(ContentStatus::Queued { shown: false }),
             "rejected_shown" => Ok(ContentStatus::Rejected { shown: true }),
@@ -81,8 +80,8 @@ impl<'de> Visitor<'de> for ContentStatusVisitor {
             "waiting" => Ok(ContentStatus::Waiting),
             "pending_shown" => Ok(ContentStatus::Pending { shown: true }),
             "pending_hidden" => Ok(ContentStatus::Pending { shown: false }),
-            "posted_shown" => Ok(ContentStatus::Posted { shown: true }),
-            "posted_hidden" => Ok(ContentStatus::Posted { shown: false }),
+            "published_shown" => Ok(ContentStatus::Published { shown: true }),
+            "published_hidden" => Ok(ContentStatus::Published { shown: false }),
             "queued_shown" => Ok(ContentStatus::Queued { shown: true }),
             "queued_hidden" => Ok(ContentStatus::Queued { shown: false }),
             "rejected_shown" => Ok(ContentStatus::Rejected { shown: true }),
@@ -91,7 +90,7 @@ impl<'de> Visitor<'de> for ContentStatusVisitor {
             "failed_hidden" => Ok(ContentStatus::Failed { shown: false }),
             _ => Err(de::Error::unknown_variant(
                 value,
-                &["waiting", "pending_shown", "pending_hidden", "posted_shown", "posted_hidden", "queued_shown", "queued_hidden", "rejected_shown", "rejected_hidden", "failed_shown", "failed_hidden"],
+                &["waiting", "pending_shown", "pending_hidden", "published_shown", "published_hidden", "queued_shown", "queued_hidden", "rejected_shown", "rejected_hidden", "failed_shown", "failed_hidden"],
             )),
         }
     }
@@ -117,11 +116,11 @@ fn get_status_string(content_status: ContentStatus) -> String {
                 "pending_hidden".to_string()
             }
         }
-        ContentStatus::Posted { shown } => {
+        ContentStatus::Published { shown } => {
             if shown {
-                "posted_shown".to_string()
+                "published_shown".to_string()
             } else {
-                "posted_hidden".to_string()
+                "published_hidden".to_string()
             }
         }
         ContentStatus::Queued { shown } => {
