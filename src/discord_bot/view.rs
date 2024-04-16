@@ -6,7 +6,7 @@ use crate::discord_bot::bot::{ChannelIdMap, INTERFACE_UPDATE_INTERVAL, POSTED_CH
 use crate::discord_bot::database::{ContentInfo, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord_bot::interactions::InnerEventHandler;
 use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::{generate_full_caption, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, now_in_my_timezone, should_update_buttons, should_update_caption};
+use crate::discord_bot::utils::{generate_full_caption, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, now_in_my_timezone, randomize_now, should_update_buttons, should_update_caption};
 
 impl InnerEventHandler {
     pub async fn process_pending(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
@@ -21,12 +21,13 @@ impl InnerEventHandler {
 
         if content_info.status == (ContentStatus::Pending { shown: true }) {
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = now.to_rfc3339();
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
             }
         } else {
             content_info.status = ContentStatus::Pending { shown: true };
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
@@ -77,12 +78,13 @@ impl InnerEventHandler {
 
         if content_info.status == (ContentStatus::Queued { shown: true }) {
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = now.to_rfc3339();
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
             }
         } else {
             content_info.status = ContentStatus::Queued { shown: true };
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
@@ -105,7 +107,13 @@ impl InnerEventHandler {
 
         let last_updated_at = DateTime::parse_from_rfc3339(&content_info.last_updated_at).unwrap();
 
-        let rejected_content = tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
+        let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()) {
+            Some(rejected_content) => rejected_content,
+            None => {
+                tracing::error!("Content not found in rejected table: {:?}", content_info);
+                return;
+            }
+        };
         let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::try_seconds(user_settings.rejected_content_lifespan * 60).unwrap();
 
         if content_info.status == (ContentStatus::Rejected { shown: true }) {
@@ -114,12 +122,13 @@ impl InnerEventHandler {
 
                 ctx.http.delete_message(channel_id, *content_id, None).await.unwrap();
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = now.to_rfc3339();
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
             }
         } else {
             content_info.status = ContentStatus::Rejected { shown: true };
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
@@ -149,14 +158,25 @@ impl InnerEventHandler {
         if content_info.status == (ContentStatus::Published { shown: true }) {
             if will_expire_at.with_timezone(&Utc) < now {
                 content_info.status = ContentStatus::RemovedFromView;
-                ctx.http.delete_message(POSTED_CHANNEL_ID, *content_id, None).await.unwrap();
+                match ctx.http.delete_message(POSTED_CHANNEL_ID, *content_id, None).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        let e = format!("{:?}", e);
+                        if e.contains("10008") && e.contains("Unknown Message") {
+                            // Message was already deleted
+                        } else {
+                            tracing::error!("Error deleting message: {}", e);
+                        }
+                    }
+                }
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = now.to_rfc3339();
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
                 update_message_if_needed(&ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
             }
         } else {
             content_info.status = ContentStatus::Published { shown: true };
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
@@ -197,12 +217,13 @@ impl InnerEventHandler {
                 content_info.status = ContentStatus::RemovedFromView;
                 ctx.http.delete_message(POSTED_CHANNEL_ID, *content_id, None).await.unwrap();
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = now.to_rfc3339();
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
                 update_message_if_needed(&ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
             }
         } else {
             content_info.status = ContentStatus::Failed { shown: true };
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
 

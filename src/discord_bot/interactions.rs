@@ -79,7 +79,13 @@ impl InnerEventHandler {
         content_info.status = ContentStatus::Pending { shown: true };
 
         let mut tx = self.database.begin_transaction().await.unwrap();
-        tx.remove_post_from_queue_with_shortcode(content_info.original_shortcode.clone()).unwrap();
+        match tx.remove_post_from_queue_with_shortcode(content_info.original_shortcode.clone()) {
+            Ok(_) => (),
+            Err(_e) => {
+                // It's fine it's not in the queue already
+                //tracing::error!("Error removing post from queue: {:?}", e);
+            }
+        }
 
         let user_settings = tx.load_user_settings().unwrap();
         let now = now_in_my_timezone(&user_settings);

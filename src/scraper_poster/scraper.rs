@@ -129,7 +129,20 @@ impl ScraperPoster {
         });
 
         if self.is_offline {
-            let testing_urls = vec!["https://tekeye.uk/html/images/Joren_Falls_Izu_Jap.mp4", "https://www.w3schools.com/html/mov_bbb.mp4", "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4"];
+            let testing_urls = vec![
+                "https://tekeye.uk/html/images/Joren_Falls_Izu_Jap.mp4",
+                "https://www.w3schools.com/html/mov_bbb.mp4",
+                "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+                "https://tekeye.uk/html/images/Joren_Falls_Izu_Jap.mp4",
+                "https://www.w3schools.com/html/mov_bbb.mp4",
+                "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+                "https://tekeye.uk/html/images/Joren_Falls_Izu_Jap.mp4",
+                "https://www.w3schools.com/html/mov_bbb.mp4",
+                "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+                "https://tekeye.uk/html/images/Joren_Falls_Izu_Jap.mp4",
+                "https://www.w3schools.com/html/mov_bbb.mp4",
+                "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+            ];
 
             println!("Sending offline data");
 
@@ -219,12 +232,11 @@ impl ScraperPoster {
                 break;
             }
 
+            let base_print = format!("{flattened_posts_processed}/{flattened_posts_len} - {actually_scraped}/{MAX_CONTENT_PER_ITERATION}");
             // Send the URL through the channel
             if post.is_video {
                 let mut transaction = self.database.begin_transaction().await.unwrap();
                 if transaction.does_content_exist_with_shortcode(post.shortcode.clone()) == false {
-                    self.println(&format!("{}/{} Scraping content from {}: {}", flattened_posts_processed, flattened_posts_len, author.username, post.shortcode));
-
                     let url;
                     let caption;
                     {
@@ -233,6 +245,7 @@ impl ScraperPoster {
                             Ok((url, caption)) => {
                                 actually_scraped += 1;
                                 self.is_restricted = false;
+                                self.println(&format!("{base_print} Scraped content from {}: {}", author.username, post.shortcode));
                                 (url, caption)
                             }
                             Err(e) => {
@@ -264,18 +277,18 @@ impl ScraperPoster {
 
                     match existing_content_shortcodes.iter().position(|x| x == &post.shortcode) {
                         Some(_) => {
-                            self.println(&format!("{}/{} Content already scraped: {}", flattened_posts_processed, flattened_posts_len, post.shortcode));
+                            self.println(&format!("{base_print} Content already scraped: {}", post.shortcode));
                         }
                         None => {
                             // Check if the shortcode is in the posted, failed or rejected content
                             if existing_posted_shortcodes.contains(&post.shortcode) {
-                                self.println(&format!("{}/{} Content already posted: {}", flattened_posts_processed, flattened_posts_len, post.shortcode));
+                                self.println(&format!("{base_print} Content already posted: {}", post.shortcode));
                             } else if existing_failed_shortcodes.contains(&post.shortcode) {
-                                self.println(&format!("{}/{} Content already failed: {}", flattened_posts_processed, flattened_posts_len, post.shortcode));
+                                self.println(&format!("{base_print} Content already failed: {}", post.shortcode));
                             } else if existing_rejected_shortcodes.contains(&post.shortcode) {
-                                self.println(&format!("{}/{} Content already rejected: {}", flattened_posts_processed, flattened_posts_len, post.shortcode));
+                                self.println(&format!("{base_print} Content already rejected: {}", post.shortcode));
                             } else {
-                                let error_message = format!("{}/{} Content not found in any mapping: {}", flattened_posts_processed, flattened_posts_len, post.shortcode);
+                                let error_message = format!("{base_print} Content not found in any mapping: {}", post.shortcode);
                                 tracing::error!(error_message);
                                 panic!("{}", error_message);
                             }
@@ -312,6 +325,7 @@ impl ScraperPoster {
 
         // purrfectfelinevids
         let caption = caption.replace("\n\n.\n.\n.\n.\n.", "");
+        let caption = caption.replace(" (we do not claim ownership of this video, all rights are reserved and belong to their respective owners, no copyright infringement intended. please dm us for credit/removal)", "");
 
         // instantgatos
         let caption = caption.replace("Follow @instantgatos for more", "");

@@ -3,11 +3,12 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
+use rand::Rng;
 use regex::Regex;
 use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, Http, MessageId};
 
-use crate::discord_bot::bot::UiDefinitions;
-use crate::discord_bot::database::{ContentInfo, Database, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
+use crate::discord_bot::bot::{UiDefinitions, INTERFACE_UPDATE_INTERVAL};
+use crate::discord_bot::database::{ContentInfo, Database, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord_bot::state::ContentStatus;
 
 pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
@@ -49,7 +50,12 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
         }
         ContentStatus::Rejected { .. } => {
             let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
-            let rejected_content = tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
+            let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()) {
+                Some(rejected_content) => rejected_content,
+                None => {
+                    return format!("{base_caption}\n{}\n‎", rejected_caption);
+                }
+            };
             let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::seconds(user_settings.rejected_content_lifespan * 60);
 
             let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
@@ -244,4 +250,12 @@ pub async fn should_update_caption(channel_id: ChannelId, ctx: &Context, message
     } else {
         true
     }
+}
+
+pub fn randomize_now(tx: &mut DatabaseTransaction) -> DateTime<Utc> {
+    let content_mapping = tx.load_content_mapping().unwrap();
+    let all_update_times = content_mapping.iter().map(|(_id, content)| DateTime::parse_from_rfc3339(&content.last_updated_at).unwrap().with_timezone(&Utc)).collect::<Vec<DateTime<Utc>>>();
+
+    let max_time = *all_update_times.iter().max().unwrap();
+    max_time + Duration::seconds(5)
 }

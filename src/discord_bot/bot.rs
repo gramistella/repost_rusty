@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serenity::all::{Builder, ChannelId, CreateCommand, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction};
+use serenity::all::{Builder, ChannelId, CreateCommand, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, RatelimitInfo, Shard};
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::prelude::*;
@@ -16,9 +16,9 @@ use crate::discord_bot::interactions::{EditedContentKind, InnerEventHandler};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::clear_all_messages;
 
-pub(crate) const REFRESH_RATE: Duration = Duration::from_secs(1);
+pub(crate) const REFRESH_RATE: Duration = Duration::from_millis(500);
 
-pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
 
 pub(crate) const GUILD_ID: GuildId = GuildId::new(1090413253592612917);
 pub(crate) const POSTED_CHANNEL_ID: ChannelId = ChannelId::new(1228041627898216469);
@@ -93,6 +93,10 @@ impl EventHandler for Handler {
             }
             */
         }
+    }
+
+    async fn ratelimit(&self, data: RatelimitInfo) {
+        println!("Ratelimited: {:?}", data);
     }
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
         let mut tx = self.database.begin_transaction().await.unwrap();
@@ -206,7 +210,7 @@ impl Handler {
             }
         }
 
-        let content_mapping = tx.load_content_mapping().unwrap();
+        let content_mapping = tx.load_page().unwrap();
 
         for (mut content_id, mut content) in content_mapping {
             // Check if the bot is currently handling an interaction
@@ -225,7 +229,7 @@ impl Handler {
             //println!("Processing content: {}", content_id);
             match content.status {
                 ContentStatus::Waiting => {}
-                ContentStatus::RemovedFromView => {}
+                ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(content.original_shortcode).unwrap(),
                 ContentStatus::Pending { .. } => inner_event_handler.process_pending(&ctx, &mut tx, &mut content_id, &mut content).await,
                 ContentStatus::Queued { .. } => inner_event_handler.process_queued(&ctx, &mut tx, &mut content_id, &mut content).await,
                 ContentStatus::Published { .. } => inner_event_handler.process_published(&ctx, &mut tx, &mut content_id, &mut content).await,
@@ -246,7 +250,7 @@ impl DiscordBot {
         let token = credentials.get("discord_token").expect("No discord token found in credentials");
 
         // Set gateway intents, which decides what events the bot will be notified about
-        let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::DIRECT_MESSAGES | GatewayIntents::MESSAGE_CONTENT | GatewayIntents::non_privileged();
+        let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
         let framework = poise::Framework::builder()
             .options(poise::FrameworkOptions { commands: vec![edit_caption()], ..Default::default() })
@@ -258,6 +262,7 @@ impl DiscordBot {
             })
             .build();
 
+        // let interaction_shard = Shard::new();
         // Create a new instance of the Client, logging in as a bot.
         let client = Client::builder(&token, intents)
             .event_handler(Handler {

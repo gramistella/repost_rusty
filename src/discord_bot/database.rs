@@ -99,8 +99,8 @@ pub struct ContentInfo {
 const PROD_DB: &str = "db/prod.db";
 const DEV_DB: &str = "db/dev.db";
 
-pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 12);
-pub const DEFAULT_POSTED_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 12);
+pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 8);
+pub const DEFAULT_POSTED_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 8);
 
 pub(crate) struct Database {
     pool: Arc<Mutex<Pool<SqliteConnectionManager>>>,
@@ -177,7 +177,7 @@ impl Database {
                 let default_random_interval = 30;
                 let default_removed_content_lifespan = 120;
                 let default_posted_content_lifespan = 120;
-                let default_page_size = 10;
+                let default_page_size = 12;
                 let query = format!(
                     "INSERT INTO user_settings (username, can_post, posting_interval, random_interval_variance, rejected_content_lifespan, posted_content_lifespan, timezone_offset, current_page, page_size) VALUES ('{}', {}, {}, {}, {}, {}, {}, {}, {})",
                     username, default_is_posting, default_posting_interval, default_random_interval, default_removed_content_lifespan, default_posted_content_lifespan, default_timezone_offset, default_current_page, default_page_size
