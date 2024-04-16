@@ -3,11 +3,10 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
-use rand::Rng;
 use regex::Regex;
 use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, Http, MessageId};
 
-use crate::discord_bot::bot::{UiDefinitions, INTERFACE_UPDATE_INTERVAL};
+use crate::discord_bot::bot::UiDefinitions;
 use crate::discord_bot::database::{ContentInfo, Database, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord_bot::state::ContentStatus;
 
@@ -23,9 +22,12 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
     match content_info.status {
         ContentStatus::Queued { .. } => {
             let mut formatted_will_post_at = "".to_string();
-            let mut countdown_caption = "".to_string();
+            let mut countdown_caption;
+            let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
             match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()) {
-                None => {}
+                None => {
+                    format!("{base_caption}\n{}\n‎\nPosting now...\n\n{}‎", queued_caption, formatted_will_post_at)
+                }
                 Some(queued_content) => {
                     let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
                     formatted_will_post_at = will_post_at.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -35,14 +37,8 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
                     if countdown_caption.contains("0 hours, 0 minutes and 0 seconds") {
                         countdown_caption = "Posting now...".to_string();
                     }
+                    format!("{base_caption}\n{}\nWill post at {}\n\n{}\n‎", queued_caption, formatted_will_post_at, countdown_caption)
                 }
-            }
-
-            let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
-            if formatted_will_post_at.is_empty() {
-                format!("{base_caption}\n{}\n‎\nPosting now...\n\n{}‎", queued_caption, formatted_will_post_at)
-            } else {
-                format!("{base_caption}\n{}\nWill post at {}\n\n{}\n‎", queued_caption, formatted_will_post_at, countdown_caption)
             }
         }
         ContentStatus::Pending { .. } => {
