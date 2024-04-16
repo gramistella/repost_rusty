@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serenity::all::{Builder, ChannelId, CreateCommand, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, RatelimitInfo, Shard};
+use serenity::all::{Builder, ChannelId, CreateCommand, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, RatelimitInfo};
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::prelude::*;

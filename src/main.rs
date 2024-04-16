@@ -20,7 +20,6 @@ use crate::scraper_poster::scraper::ScraperPoster;
 
 mod discord_bot;
 mod scraper_poster;
-mod telegram_bot;
 
 // Main configuration
 const IS_OFFLINE: bool = false;
@@ -56,7 +55,6 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
-            //let bot_manager = rt.block_on(async { BotManager::new(db.clone(), credentials.clone()) });
             let mut discord_bot_manager = rt.block_on(async { DiscordBot::new(db.clone(), credentials.clone(), is_first_run).await });
             let rt_clone_bot = Arc::clone(&rt);
 
@@ -65,7 +63,7 @@ fn main() -> anyhow::Result<()> {
             let scraper = std::thread::spawn(move || rt.block_on(scraper_poster.run_scraper()));
 
             let discord = std::thread::spawn(move || rt_clone_bot.block_on(async { discord_bot_manager.run_bot().await }));
-            //let telegram_bot = std::thread::spawn(move || rt_clone_bot.block_on(async move { bot_manager.run_bot(rx, username).await }));
+
             all_handles.push(scraper);
             all_handles.push(discord);
 
@@ -73,7 +71,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Wait for both tasks to complete
+    // Wait for all tasks to complete
     for handle in all_handles {
         handle.join().expect("Thread panicked");
     }
