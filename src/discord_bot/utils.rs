@@ -1,10 +1,9 @@
-use std::sync::Arc;
-
 use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, Http, MessageId};
+use std::sync::Arc;
 
 use crate::discord_bot::bot::UiDefinitions;
 use crate::discord_bot::database::{ContentInfo, Database, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
@@ -199,13 +198,7 @@ pub async fn should_update_buttons(channel_id: ChannelId, ctx: &Context, message
 
     let first_component_element = match old_msg.components.get(0) {
         Some(component) => component,
-        None => {
-            if new_buttons.is_empty() {
-                return false;
-            } else {
-                return true;
-            }
-        }
+        None => return if new_buttons.is_empty() { false } else { true },
     };
 
     let old_components = first_component_element.components.clone();
@@ -253,5 +246,7 @@ pub fn randomize_now(tx: &mut DatabaseTransaction) -> DateTime<Utc> {
     let all_update_times = content_mapping.iter().map(|(_id, content)| DateTime::parse_from_rfc3339(&content.last_updated_at).unwrap().with_timezone(&Utc)).collect::<Vec<DateTime<Utc>>>();
 
     let max_time = *all_update_times.iter().max().unwrap();
-    max_time + Duration::seconds(5)
+
+    // 5 seconds is the minimum time between updates to avoid rate limiting
+    max_time + Duration::seconds(6)
 }

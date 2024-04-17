@@ -1,13 +1,12 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serenity::all::{Builder, ChannelId, CreateCommand, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, RatelimitInfo};
+use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, RatelimitInfo};
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::prelude::*;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::discord_bot::commands::{edit_caption, Data};
@@ -42,6 +41,8 @@ pub struct DiscordBot {
     client: Arc<Mutex<Client>>,
 }
 
+// Not sure why but the IDE is not recognizing this as being read
+#[allow(dead_code)]
 pub(crate) struct ChannelIdMap {
     channel_id: ChannelId,
 }
@@ -84,20 +85,9 @@ impl EventHandler for Handler {
                 ctx.http.delete_message(channel_id, edited_content.message_to_delete.unwrap(), None).await.unwrap();
                 inner_event_handler.clone().process_pending(&ctx, &mut tx, &mut edited_content.content_id, &mut edited_content.content_info).await;
             }
-            //println!("Message received: {}", msg.content);
-            /*
-            if msg.content == "!ping" {
-                if let Err(why) = msg.channel_id.say(&ctx.http, "Pong!").await {
-                    println!("Error sending message: {why:?}");
-                }
-            }
-            */
         }
     }
 
-    async fn ratelimit(&self, data: RatelimitInfo) {
-        println!("Ratelimited: {:?}", data);
-    }
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
         let mut tx = self.database.begin_transaction().await.unwrap();
         let ctx = Arc::new(Mutex::new(ctx));
@@ -117,7 +107,6 @@ impl EventHandler for Handler {
 
         task.await.unwrap();
     }
-
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         //let _guard = self.inner_event_handler.execution_mutex.lock().await;
         //println!("Interaction received: {:?}", interaction);
@@ -195,6 +184,10 @@ impl EventHandler for Handler {
             }
             tx.save_content_mapping(IndexMap::from([(original_message_id, content)])).unwrap();
         }
+    }
+
+    async fn ratelimit(&self, data: RatelimitInfo) {
+        tracing::warn!("Rate limited: {:?}", data);
     }
 }
 
@@ -347,11 +340,5 @@ impl DiscordBot {
         println!("Running discord bot for {}", self.username);
 
         self.start_listener().await;
-
-        let command = CreateCommand::new("/edit_caption").description("Edit the caption of a post");
-
-        let guild_id = GuildId::new(1090413253592612917);
-
-        self.client.lock().await.http.create_guild_command(guild_id, &command).await.unwrap();
     }
 }

@@ -1,7 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
@@ -9,6 +5,9 @@ use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, SeedableRng};
 use serenity::all::MessageId;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
@@ -231,9 +230,9 @@ impl ScraperPoster {
                 self.println("Reached the maximum amount of scraped content per iteration");
                 break;
             }
-            
+
             let base_print = format!("{flattened_posts_processed}/{flattened_posts_len} - {actually_scraped}/{MAX_CONTENT_PER_ITERATION}");
-            
+
             // Send the URL through the channel
             if post.is_video {
                 let mut transaction = self.database.begin_transaction().await.unwrap();
@@ -272,7 +271,6 @@ impl ScraperPoster {
 
                     self.save_cookie_store_to_json().await;
                 } else {
-
                     let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().values().map(|content_info| content_info.original_shortcode.clone()).collect();
                     let existing_posted_shortcodes: Vec<String> = transaction.load_posted_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
                     let existing_failed_shortcodes: Vec<String> = transaction.load_failed_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
@@ -299,7 +297,6 @@ impl ScraperPoster {
                     };
                 }
             } else {
-
                 self.println(&format!("{base_print} Content is not a video: {}", post.shortcode));
             }
             self.randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;

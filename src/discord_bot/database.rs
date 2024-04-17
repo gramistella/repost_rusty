@@ -1,6 +1,3 @@
-use std::fmt;
-use std::sync::Arc;
-
 use chrono::{DateTime, Duration, Timelike, Utc};
 use indexmap::IndexMap;
 use r2d2::{Pool, PooledConnection};
@@ -9,6 +6,8 @@ use rand::Rng;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
 use serenity::all::MessageId;
+use std::fmt;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::discord_bot::bot::INTERFACE_UPDATE_INTERVAL;

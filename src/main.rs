@@ -1,14 +1,12 @@
 extern crate r2d2;
 extern crate r2d2_sqlite;
 
-use backtrace::Backtrace;
 use std::backtrace;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
-
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -37,32 +35,30 @@ fn main() -> anyhow::Result<()> {
     let mut all_handles = Vec::new();
 
     let mut is_first_run = true;
-
     for (username, credentials) in all_credentials {
         if credentials.get("enabled").expect("No enabled field in credentials") == "true" {
             let span = tracing::span!(tracing::Level::INFO, "main", username = username.as_str());
             let _enter = span.enter();
             tracing::info!("Starting bot for user: {}", username);
 
-            // Create a single runtime for each user
-            let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+            let rt_scraper_poster = Arc::new(tokio::runtime::Runtime::new().unwrap());
+            let rt_discord_bot = Arc::new(tokio::runtime::Runtime::new().unwrap());
 
             let db = Database::new(username.clone()).unwrap();
-            match rt.block_on(async { db.begin_transaction().await.unwrap().reorder_pages() }) {
+            match rt_discord_bot.block_on(async { db.begin_transaction().await.unwrap().reorder_pages() }) {
                 Ok(_) => (),
                 Err(e) => {
                     tracing::error!("Error reordering pages: {:?}", e);
                 }
             }
 
-            let mut discord_bot_manager = rt.block_on(async { DiscordBot::new(db.clone(), credentials.clone(), is_first_run).await });
-            let rt_clone_bot = Arc::clone(&rt);
+            let mut discord_bot_manager = rt_discord_bot.block_on(async { DiscordBot::new(db.clone(), credentials.clone(), is_first_run).await });
 
             // Run the scraper_poster and the bot concurrently
             let mut scraper_poster = ScraperPoster::new(db.clone(), username.clone(), credentials.clone(), IS_OFFLINE);
-            let scraper = std::thread::spawn(move || rt.block_on(scraper_poster.run_scraper()));
+            let scraper = std::thread::spawn(move || rt_scraper_poster.block_on(scraper_poster.run_scraper()));
 
-            let discord = std::thread::spawn(move || rt_clone_bot.block_on(async { discord_bot_manager.run_bot().await }));
+            let discord = std::thread::spawn(move || rt_discord_bot.block_on(async { discord_bot_manager.run_bot().await }));
 
             all_handles.push(scraper);
             all_handles.push(discord);
@@ -109,41 +105,29 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
     Registry::default().with(file_layer).with(layer2).init();
 
     // Set a custom panic hook
-    let enable_panic_hook = false;
-    if enable_panic_hook {
-        std::panic::set_hook(Box::new(|panic_info| {
-            // Get panic message
-            let panic_message = match panic_info.payload().downcast_ref::<&str>() {
-                Some(s) => *s,
-                None => "Box<Any>",
-            };
+    std::panic::set_hook(Box::new(|panic_info| {
+        // Get panic message
+        let panic_message = match panic_info.payload().downcast_ref::<&str>() {
+            Some(s) => *s,
+            None => "Box<Any>",
+        };
 
-            // Get location information
-            let location = panic_info.location().unwrap();
+        // Get location information
+        let location = panic_info.location().unwrap();
+        let backtrace = backtrace::Backtrace::force_capture();
 
-            // Log panic information
-            tracing::error!(
-                target: "panic",
-                "thread '{}' panicked at '{}', {}:{}",
-                std::thread::current().name().unwrap_or("<unnamed>"),
-                panic_message,
-                location.file(),
-                location.line(),
-            );
+        // Log panic information
+        tracing::error!(
+            target: "panic",
+            "thread '{}' panicked at '{}', {}:{}\n{}",
+            std::thread::current().name().unwrap_or("<unnamed>"),
+            panic_message,
+            location.file(),
+            location.line(),
+            backtrace.to_string()
+        );
+    }));
 
-            // Log stack trace
-            if let Some(s) = panic_info.payload().downcast_ref::<String>() {
-                tracing::error!("panic occurred: {:?}", s);
-            } else {
-                tracing::error!("panic occurred");
-            }
-            if let Some(s) = std::env::var_os("RUST_BACKTRACE") {
-                if s == "1" || s == "full" {
-                    tracing::error!("stack backtrace: {:?}", Backtrace::capture());
-                }
-            }
-        }));
-    }
     (file_guard, stdout_guard)
 }
 

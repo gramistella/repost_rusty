@@ -21,18 +21,17 @@ impl InnerEventHandler {
 
         if content_info.status == (ContentStatus::Pending { shown: true }) {
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
-
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Pending { shown: true };
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -78,19 +77,18 @@ impl InnerEventHandler {
 
         if content_info.status == (ContentStatus::Queued { shown: true }) {
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
-
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Queued { shown: true };
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
 
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -122,19 +120,18 @@ impl InnerEventHandler {
 
                 ctx.http.delete_message(channel_id, *content_id, None).await.unwrap();
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
-
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Rejected { shown: true };
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
 
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -170,13 +167,11 @@ impl InnerEventHandler {
                     }
                 }
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
-
                 update_message_if_needed(&ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Published { shown: true };
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
@@ -193,6 +188,7 @@ impl InnerEventHandler {
                 }
             }
             *content_id = msg.id;
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -217,13 +213,11 @@ impl InnerEventHandler {
                 content_info.status = ContentStatus::RemovedFromView;
                 ctx.http.delete_message(POSTED_CHANNEL_ID, *content_id, None).await.unwrap();
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
-
                 update_message_if_needed(&ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
+                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Failed { shown: true };
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
 
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
 
@@ -231,6 +225,8 @@ impl InnerEventHandler {
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
             channel_id.delete_message(&ctx.http, *content_id).await.unwrap();
             *content_id = msg.id;
+
+            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
