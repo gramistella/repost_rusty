@@ -56,6 +56,7 @@ impl FromStr for ContentStatus {
         }
     }
 }
+
 impl ContentStatus {
     pub fn to_string(&self) -> String {
         get_status_string(self.clone())

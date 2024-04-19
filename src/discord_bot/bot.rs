@@ -90,22 +90,19 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
         let mut tx = self.database.begin_transaction().await.unwrap();
-        let ctx = Arc::new(Mutex::new(ctx));
         let self_clone = Arc::new(Mutex::new(self.clone()));
         // Assuming `self` is an instance of `DiscordBot`
 
-        let task = tokio::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 {
-                    let ctx = ctx.lock().await;
                     let self_clone = self_clone.lock().await;
                     self_clone.ready_loop(&ctx, &mut tx).await;
                 }
                 sleep(REFRESH_RATE).await;
             }
         });
-
-        task.await.unwrap();
+        
     }
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         //let _guard = self.inner_event_handler.execution_mutex.lock().await;

@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
 use regex::Regex;
-use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, Http, MessageId};
+use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, Http, Message, MessageId};
 use std::sync::Arc;
 
 use crate::discord_bot::bot::UiDefinitions;
@@ -186,15 +186,10 @@ pub fn get_published_buttons(_ui_definitions: &UiDefinitions) -> Vec<CreateActio
 lazy_static! {
     static ref CUSTOM_ID_REGEX: Regex = Regex::new(r#"custom_id: "([^"]+)""#).unwrap();
 }
-pub async fn should_update_buttons(channel_id: ChannelId, ctx: &Context, message_id: &MessageId, new_buttons: Vec<CreateActionRow>) -> bool {
+pub async fn should_update_buttons(old_msg: Message, new_buttons: Vec<CreateActionRow>) -> bool {
     fn extract_custom_ids(component_description: &str) -> Vec<String> {
         CUSTOM_ID_REGEX.captures_iter(component_description).filter_map(|cap| cap.get(1).map(|match_| match_.as_str().to_string())).collect()
     }
-
-    let old_msg = match channel_id.message(&ctx.http, *message_id).await {
-        Ok(msg) => msg,
-        Err(_) => return true,
-    };
 
     let first_component_element = match old_msg.components.get(0) {
         Some(component) => component,
@@ -227,11 +222,7 @@ pub async fn should_update_buttons(channel_id: ChannelId, ctx: &Context, message
     }
 }
 
-pub async fn should_update_caption(channel_id: ChannelId, ctx: &Context, message_id: &MessageId, new_content: String) -> bool {
-    let old_msg = match channel_id.message(&ctx.http, *message_id).await {
-        Ok(msg) => msg,
-        Err(_) => return true,
-    };
+pub async fn should_update_caption(old_msg: Message, new_content: String) -> bool {
 
     let old_content = old_msg.content.clone();
     if old_content == new_content {
@@ -247,6 +238,6 @@ pub fn randomize_now(tx: &mut DatabaseTransaction) -> DateTime<Utc> {
 
     let max_time = *all_update_times.iter().max().unwrap();
 
-    // 5 seconds is the minimum time between updates to avoid rate limiting
+    // 5 seconds is the minimum time between updates to avoid discord rate limiting
     max_time + Duration::seconds(6)
 }

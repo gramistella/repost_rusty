@@ -35,6 +35,7 @@ impl InnerEventHandler {
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
+        
         tx.save_content_mapping(content_mapping).unwrap();
     }
 
@@ -112,6 +113,7 @@ impl InnerEventHandler {
                 return;
             }
         };
+        
         let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::try_seconds(user_settings.rejected_content_lifespan * 60).unwrap();
 
         if content_info.status == (ContentStatus::Rejected { shown: true }) {
@@ -223,7 +225,17 @@ impl InnerEventHandler {
 
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
-            channel_id.delete_message(&ctx.http, *content_id).await.unwrap();
+            match channel_id.delete_message(&ctx.http, *content_id).await{
+                Ok(_) => {}
+                Err(e) => {
+                    let e = format!("{:?}", e);
+                    if e.contains("10008") && e.contains("Unknown Message") {
+                        // Message was already deleted
+                    } else {
+                        tracing::error!("Error deleting message: {}", e);
+                    }
+                }
+            }
             *content_id = msg.id;
 
             content_info.last_updated_at = randomize_now(tx).to_rfc3339();
@@ -235,14 +247,20 @@ impl InnerEventHandler {
 }
 
 async fn update_message_if_needed(ctx: &Context, content_id: MessageId, channel_id: ChannelId, msg_caption: &String, msg_buttons: Vec<CreateActionRow>) {
+
+    let old_msg = match channel_id.message(&ctx.http, content_id).await {
+        Ok(msg) => msg,
+        Err(_) => return,
+    };
+    
     let mut edited_message = EditMessage::new();
     let mut should_update = false;
-    if should_update_caption(channel_id, &ctx, &content_id, msg_caption.clone()).await {
+    if should_update_caption(old_msg.clone(), msg_caption.clone()).await {
         edited_message = edited_message.content(msg_caption);
         should_update = true;
     }
 
-    if should_update_buttons(channel_id, &ctx, &content_id, msg_buttons.clone()).await {
+    if should_update_buttons(old_msg, msg_buttons.clone()).await {
         edited_message = edited_message.components(msg_buttons);
         should_update = true;
     }
@@ -252,11 +270,7 @@ async fn update_message_if_needed(ctx: &Context, content_id: MessageId, channel_
             Ok(_) => {}
             Err(e) => {
                 let e = format!("{:?}", e);
-                if e.contains("10008") && e.contains("Unknown Message") {
-                    // Message was already deleted
-                } else {
-                    tracing::error!("Error deleting message: {}", e);
-                }
+                tracing::error!("Error editing message: {}", e);
             }
         }
     }
