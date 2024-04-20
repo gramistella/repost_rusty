@@ -2,13 +2,12 @@ use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
 use serenity::all::{ChannelId, Context, CreateActionRow, CreateAttachment, CreateMessage, EditMessage, MessageId};
 
-use crate::discord_bot::bot::{ChannelIdMap, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
+use crate::discord_bot::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
 use crate::discord_bot::database::{ContentInfo, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
-use crate::discord_bot::interactions::InnerEventHandler;
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::{generate_full_caption, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, now_in_my_timezone, randomize_now, should_update_buttons, should_update_caption};
 
-impl InnerEventHandler {
+impl Handler {
     pub async fn process_pending(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
         let user_settings = tx.load_user_settings().unwrap();
@@ -35,7 +34,7 @@ impl InnerEventHandler {
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
-        
+
         tx.save_content_mapping(content_mapping).unwrap();
     }
 
@@ -113,7 +112,7 @@ impl InnerEventHandler {
                 return;
             }
         };
-        
+
         let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::try_seconds(user_settings.rejected_content_lifespan * 60).unwrap();
 
         if content_info.status == (ContentStatus::Rejected { shown: true }) {
@@ -225,7 +224,7 @@ impl InnerEventHandler {
 
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
-            match channel_id.delete_message(&ctx.http, *content_id).await{
+            match channel_id.delete_message(&ctx.http, *content_id).await {
                 Ok(_) => {}
                 Err(e) => {
                     let e = format!("{:?}", e);
@@ -247,12 +246,11 @@ impl InnerEventHandler {
 }
 
 async fn update_message_if_needed(ctx: &Context, content_id: MessageId, channel_id: ChannelId, msg_caption: &String, msg_buttons: Vec<CreateActionRow>) {
-
     let old_msg = match channel_id.message(&ctx.http, content_id).await {
         Ok(msg) => msg,
         Err(_) => return,
     };
-    
+
     let mut edited_message = EditMessage::new();
     let mut should_update = false;
     if should_update_caption(old_msg.clone(), msg_caption.clone()).await {

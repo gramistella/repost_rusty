@@ -11,7 +11,7 @@ use tokio::time::sleep;
 
 use crate::discord_bot::commands::{edit_caption, Data};
 use crate::discord_bot::database::{Database, DatabaseTransaction};
-use crate::discord_bot::interactions::{EditedContentKind, InnerEventHandler};
+use crate::discord_bot::interactions::{EditedContent, EditedContentKind};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::clear_all_messages;
 
@@ -23,9 +23,11 @@ pub(crate) const GUILD_ID: GuildId = GuildId::new(1090413253592612917);
 pub(crate) const POSTED_CHANNEL_ID: ChannelId = ChannelId::new(1228041627898216469);
 
 #[derive(Clone)]
-struct Handler {
-    database: Database,
-    inner_event_handler: Arc<Mutex<InnerEventHandler>>,
+pub struct Handler {
+    pub database: Database,
+    pub ui_definitions: UiDefinitions,
+    pub edited_content: Arc<Mutex<Option<EditedContent>>>,
+    pub interaction_mutex: Arc<Mutex<()>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -37,7 +39,6 @@ pub(crate) struct UiDefinitions {
 #[derive(Clone)]
 pub struct DiscordBot {
     username: String,
-
     client: Arc<Mutex<Client>>,
 }
 
@@ -57,8 +58,7 @@ impl EventHandler for Handler {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
 
         if msg.channel_id == channel_id && msg.author.bot == false {
-            let inner_event_handler = self.inner_event_handler.lock().await;
-            let edited_content = inner_event_handler.edited_content.lock().await;
+            let edited_content = self.edited_content.lock().await;
             if edited_content.is_some() {
                 let mut edited_content = edited_content.clone().unwrap();
 
@@ -83,7 +83,7 @@ impl EventHandler for Handler {
                 tx.save_content_mapping(content_mapping).unwrap();
                 msg.delete(&ctx.http).await.unwrap();
                 ctx.http.delete_message(channel_id, edited_content.message_to_delete.unwrap(), None).await.unwrap();
-                inner_event_handler.clone().process_pending(&ctx, &mut tx, &mut edited_content.content_id, &mut edited_content.content_info).await;
+                self.process_pending(&ctx, &mut tx, &mut edited_content.content_id, &mut edited_content.content_info).await;
             }
         }
     }
@@ -102,7 +102,6 @@ impl EventHandler for Handler {
                 sleep(REFRESH_RATE).await;
             }
         });
-        
     }
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         //let _guard = self.inner_event_handler.execution_mutex.lock().await;
@@ -111,8 +110,7 @@ impl EventHandler for Handler {
         let response = CreateInteractionResponse::Acknowledge;
         response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
 
-        let inner_event_handler = self.inner_event_handler.lock().await;
-        let _is_handling_interaction = inner_event_handler.interaction_mutex.lock().await;
+        let _is_handling_interaction = self.interaction_mutex.lock().await;
 
         let mut original_message_id = interaction.clone().message_component().unwrap().message.id;
 
@@ -135,44 +133,42 @@ impl EventHandler for Handler {
             let interaction_message = interaction.clone().message_component().unwrap();
             let interaction_type = interaction_message.clone().data.custom_id;
 
-            let mut inner_event_handler = inner_event_handler.clone();
-
             match interaction_type.as_str() {
                 "publish_now" => {
-                    inner_event_handler.interaction_publish_now(&mut content).await;
+                    self.interaction_publish_now(&mut content).await;
                 }
                 "accept" => {
-                    inner_event_handler.interaction_accepted(&mut content).await;
+                    self.interaction_accepted(&mut content).await;
                 }
                 "remove_from_queue" => {
-                    inner_event_handler.interaction_remove_from_queue(&mut content).await;
+                    self.interaction_remove_from_queue(&mut content).await;
                 }
                 "reject" => {
-                    inner_event_handler.interaction_rejected(&mut content).await;
+                    self.interaction_rejected(&mut content).await;
                 }
                 "undo_rejected" => {
-                    inner_event_handler.interaction_undo_rejected(&mut content).await;
+                    self.interaction_undo_rejected(&mut content).await;
                 }
                 "remove_from_view" => {
-                    inner_event_handler.interaction_remove_from_view(&ctx, original_message_id, &mut content).await;
+                    self.interaction_remove_from_view(&ctx, original_message_id, &mut content).await;
                 }
                 "remove_from_view_failed" => {
-                    inner_event_handler.interaction_remove_from_view_failed(&ctx, original_message_id, &mut content).await;
+                    self.interaction_remove_from_view_failed(&ctx, original_message_id, &mut content).await;
                 }
                 "edit" => {
-                    inner_event_handler.interaction_edit(&ctx, &mut original_message_id, &mut content).await;
+                    self.interaction_edit(&ctx, &mut original_message_id, &mut content).await;
                 }
                 "go_back" => {
-                    inner_event_handler.interaction_go_back(&ctx, original_message_id, &mut content).await;
+                    self.interaction_go_back(&ctx, original_message_id, &mut content).await;
                 }
                 "edit_caption" => {
-                    if inner_event_handler.edited_content.lock().await.is_none() {
-                        inner_event_handler.interaction_edit_caption(&ctx, &interaction, &mut original_message_id, &mut content).await;
+                    if self.edited_content.lock().await.is_none() {
+                        self.interaction_edit_caption(&ctx, &interaction, &mut original_message_id, &mut content).await;
                     }
                 }
                 "edit_hashtags" => {
-                    if inner_event_handler.edited_content.lock().await.is_none() {
-                        inner_event_handler.interaction_edit_hashtags(&ctx, &interaction, &mut original_message_id, &mut content).await;
+                    if self.edited_content.lock().await.is_none() {
+                        self.interaction_edit_hashtags(&ctx, &interaction, &mut original_message_id, &mut content).await;
                     }
                 }
                 _ => {
@@ -192,8 +188,7 @@ impl Handler {
     async fn ready_loop(&self, ctx: &Context, tx: &mut DatabaseTransaction) {
         // Check if the bot is currently editing a message
         {
-            let inner_event_handler = self.inner_event_handler.lock().await;
-            let is_editing = inner_event_handler.edited_content.lock().await;
+            let is_editing = self.edited_content.lock().await;
 
             if is_editing.is_some() {
                 return;
@@ -204,9 +199,9 @@ impl Handler {
 
         for (mut content_id, mut content) in content_mapping {
             // Check if the bot is currently handling an interaction
-            let inner_event_handler = self.inner_event_handler.lock().await;
+
             let mut tx = self.database.begin_transaction().await.unwrap();
-            let is_handling_interaction = inner_event_handler.interaction_mutex.try_lock();
+            let is_handling_interaction = self.interaction_mutex.try_lock();
             match is_handling_interaction {
                 Ok(_) => {}
                 Err(_e) => {
@@ -220,11 +215,11 @@ impl Handler {
             match content.status {
                 ContentStatus::Waiting => {}
                 ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(content.original_shortcode).unwrap(),
-                ContentStatus::Pending { .. } => inner_event_handler.process_pending(&ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Queued { .. } => inner_event_handler.process_queued(&ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Published { .. } => inner_event_handler.process_published(&ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Rejected { .. } => inner_event_handler.process_rejected(&ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Failed { .. } => inner_event_handler.process_failed(&ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Pending { .. } => self.process_pending(&ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Queued { .. } => self.process_queued(&ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Published { .. } => self.process_published(&ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Rejected { .. } => self.process_rejected(&ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Failed { .. } => self.process_failed(&ctx, &mut tx, &mut content_id, &mut content).await,
             }
         }
     }
@@ -257,12 +252,9 @@ impl DiscordBot {
         let client = Client::builder(&token, intents)
             .event_handler(Handler {
                 database: database.clone(),
-                inner_event_handler: Arc::new(Mutex::new(InnerEventHandler {
-                    database: database.clone(),
-                    ui_definitions: ui_definitions.clone(),
-                    edited_content: Arc::new(Mutex::new(None)),
-                    interaction_mutex: Arc::new(Mutex::new(())),
-                })),
+                ui_definitions: ui_definitions.clone(),
+                edited_content: Arc::new(Mutex::new(None)),
+                interaction_mutex: Arc::new(Mutex::new(())),
             })
             .framework(framework)
             .await

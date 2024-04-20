@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
 use regex::Regex;
-use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, Http, Message, MessageId};
+use serenity::all::{ChannelId, CreateActionRow, CreateButton, Http, Message};
 use std::sync::Arc;
 
 use crate::discord_bot::bot::UiDefinitions;
@@ -223,7 +223,6 @@ pub async fn should_update_buttons(old_msg: Message, new_buttons: Vec<CreateActi
 }
 
 pub async fn should_update_caption(old_msg: Message, new_content: String) -> bool {
-
     let old_content = old_msg.content.clone();
     if old_content == new_content {
         false
