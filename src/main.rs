@@ -1,7 +1,7 @@
 extern crate r2d2;
 extern crate r2d2_sqlite;
 
-use std::backtrace;
+use std::{backtrace, env};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -12,12 +12,15 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
+use crate::database::Database;
 use crate::discord_bot::bot::DiscordBot;
-use crate::discord_bot::database::Database;
 use crate::scraper_poster::scraper::ScraperPoster;
 
+mod database;
 mod discord_bot;
+mod s3;
 mod scraper_poster;
+mod video_processing;
 
 // Main configuration
 const IS_OFFLINE: bool = false;
@@ -30,6 +33,8 @@ const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 60 * 12);
 
 fn main() -> anyhow::Result<()> {
     let (_file_guard, _stdout_guard) = init_logging();
+
+    env::set_var("RUST_BACKTRACE", "1");
 
     let all_credentials = read_credentials("config/credentials.yaml");
     let mut all_handles = Vec::new();
@@ -103,31 +108,7 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
     //let logger = Registry::default().with(file_layer).with(layer2);
     //LogWrapper::new(multi.clone(), logger).try_init().unwrap();
     Registry::default().with(file_layer).with(layer2).init();
-
-    // Set a custom panic hook
-    std::panic::set_hook(Box::new(|panic_info| {
-        // Get panic message
-        let panic_message = match panic_info.payload().downcast_ref::<&str>() {
-            Some(s) => *s,
-            None => "Box<Any>",
-        };
-
-        // Get location information
-        let location = panic_info.location().unwrap();
-        let backtrace = backtrace::Backtrace::force_capture();
-
-        // Log panic information
-        tracing::error!(
-            target: "panic",
-            "thread '{}' panicked at '{}', {}:{}\n{}",
-            std::thread::current().name().unwrap_or("<unnamed>"),
-            panic_message,
-            location.file(),
-            location.line(),
-            backtrace.to_string()
-        );
-    }));
-
+    
     (file_guard, stdout_guard)
 }
 

@@ -5,8 +5,8 @@ use regex::Regex;
 use serenity::all::{ChannelId, CreateActionRow, CreateButton, Http, Message};
 use std::sync::Arc;
 
+use crate::database::{ContentInfo, Database, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION, BotStatus};
 use crate::discord_bot::bot::UiDefinitions;
-use crate::discord_bot::database::{ContentInfo, Database, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord_bot::state::ContentStatus;
 
 pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
@@ -31,7 +31,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
                     let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
                     formatted_will_post_at = will_post_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
-                    countdown_caption = countdown_until_expiration(database, will_post_at.with_timezone(&Utc)).await;
+                    countdown_caption = countdown_until_expiration(&mut tx, will_post_at.with_timezone(&Utc)).await;
 
                     if countdown_caption.contains("0 hours, 0 minutes and 0 seconds") {
                         countdown_caption = "Posting now...".to_string();
@@ -53,7 +53,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             };
             let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::seconds(user_settings.rejected_content_lifespan * 60);
 
-            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(&mut tx, will_expire_at.with_timezone(&Utc)).await;
 
             format!("{base_caption}\n{}\n{}\n‎", rejected_caption, countdown_caption)
         }
@@ -63,7 +63,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             let published_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap().format("%Y-%m-%d %H:%M:%S").to_string();
             let will_expire_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap() + DEFAULT_POSTED_EXPIRATION;
 
-            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(&mut tx, will_expire_at.with_timezone(&Utc)).await;
 
             format!("{base_caption}\n{} at {}\n{}\n‎", published_caption, published_at, countdown_caption)
         }
@@ -72,7 +72,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             let failed_content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
             let will_expire_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap() + DEFAULT_FAILURE_EXPIRATION;
 
-            let countdown_caption = countdown_until_expiration(database, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(&mut tx, will_expire_at.with_timezone(&Utc)).await;
             format!("{base_caption}\n{}\n{}\n‎", failed_caption, countdown_caption)
         }
         _ => {
@@ -116,8 +116,8 @@ pub fn now_in_my_timezone(user_settings: &UserSettings) -> DateTime<Utc> {
     utc_now + timezone_offset
 }
 
-pub async fn countdown_until_expiration(database: &Database, expiration_datetime: DateTime<Utc>) -> String {
-    let user_settings = database.begin_transaction().await.unwrap().load_user_settings().unwrap();
+pub async fn countdown_until_expiration(tx: &mut DatabaseTransaction, expiration_datetime: DateTime<Utc>) -> String {
+    let user_settings = tx.load_user_settings().unwrap();
     let now = now_in_my_timezone(&user_settings);
     let duration_until_expiration = expiration_datetime.signed_duration_since(now);
 
@@ -181,6 +181,17 @@ pub fn get_published_buttons(_ui_definitions: &UiDefinitions) -> Vec<CreateActio
     //  let edit = ui_definitions.buttons.get("edit").unwrap();
     // vec![CreateActionRow::Buttons(vec![CreateButton::new("edit_post").label(edit)])]
     vec![]
+}
+
+pub fn get_bot_status_buttons(bot_status: &BotStatus) -> Vec<CreateActionRow> {
+    if bot_status.status == 1 {
+        vec![CreateActionRow::Buttons(vec![
+            CreateButton::new("resume_from_halt").label("Resume"),
+            
+        ])]
+    } else {
+        vec![]
+    }
 }
 
 lazy_static! {

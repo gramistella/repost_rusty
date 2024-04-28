@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Timelike, Utc};
+use image_hasher::ImageHash;
 use indexmap::IndexMap;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -14,6 +15,12 @@ use crate::discord_bot::bot::INTERFACE_UPDATE_INTERVAL;
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::now_in_my_timezone;
 use crate::IS_OFFLINE;
+
+const PROD_DB: &str = "db/prod.db";
+const DEV_DB: &str = "db/dev.db";
+
+pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
+pub const DEFAULT_POSTED_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 
 #[derive(Clone, Debug)]
 pub struct UserSettings {
@@ -95,11 +102,24 @@ pub struct ContentInfo {
     pub page_num: i32,
 }
 
-const PROD_DB: &str = "db/prod.db";
-const DEV_DB: &str = "db/dev.db";
+#[derive(Clone, PartialEq, Debug)]
+pub struct HashedVideo {
+    pub duration: f64,
+    pub hash_frame_1: ImageHash,
+    pub hash_frame_2: ImageHash,
+    pub hash_frame_3: ImageHash,
+    pub hash_frame_4: ImageHash,
+}
 
-pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 8);
-pub const DEFAULT_POSTED_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 8);
+#[derive(Clone, PartialEq, Debug)]
+pub struct BotStatus {
+    pub message_id: MessageId,
+    pub username: String,
+    /// 0 = all good, 1 = account awaiting manual intervention, 2 = Other
+    pub status: i32,
+    pub status_message: String,
+    pub last_updated_at: String,
+}
 
 pub(crate) struct Database {
     pool: Arc<Mutex<Pool<SqliteConnectionManager>>>,
@@ -155,7 +175,7 @@ impl Database {
         let default_current_page = 1;
 
         let user_settings_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_settings WHERE username = ?1)", params![username], |row| row.get(0)).unwrap_or(false);
-
+        
         if !user_settings_exists {
             if IS_OFFLINE {
                 let default_is_posting = 1;
@@ -263,6 +283,37 @@ impl Database {
             [],
         )?;
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS video_hashes (
+            username TEXT NOT NULL,
+            duration TEXT NOT NULL,
+            hash_frame_1 TEXT NOT NULL,
+            hash_frame_2 TEXT NOT NULL,
+            hash_frame_3 TEXT NOT NULL,
+            hash_frame_4 TEXT NOT NULL
+        )",
+            [],
+        )?;
+
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS bot_status (
+            username TEXT NOT NULL,
+            message_id INTEGER NOT NULL,
+            status INTEGER NOT NULL,
+            status_message TEXT NOT NULL,
+            last_updated_at TEXT NOT NULL
+        )",
+            [],
+        )?;
+
+        let bot_status_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM bot_status WHERE username = ?1)", params![username], |row| row.get(0)).unwrap_or(false);
+
+        if !bot_status_exists {
+            let query = format!("INSERT INTO bot_status (username, message_id, status, status_message, last_updated_at) VALUES ('{}', 1, 0, 'operational', '{}')", username, Utc::now().to_rfc3339());
+            conn.execute(&query, [])?;
+        }
+
         let pool = Arc::new(Mutex::new(pool));
 
         Ok(Database { pool, username })
@@ -323,7 +374,7 @@ impl DatabaseTransaction {
         Ok(user_settings)
     }
 
-    pub fn save_user_settings(&mut self, user_settings: UserSettings) -> Result<()> {
+    pub fn save_user_settings(&mut self, user_settings: &UserSettings) -> Result<()> {
         let tx = self.conn.transaction()?;
 
         // Remove all the user settings
@@ -349,6 +400,52 @@ impl DatabaseTransaction {
 
         Ok(())
     }
+    
+    pub fn load_bot_status(&mut self) -> Result<BotStatus> {
+        let mut message_id: Option<u64> = None;
+        let mut status: Option<i32> = None;
+        let mut status_message: Option<String> = None;
+        let mut last_updated_at: Option<String> = None;
+        let tx = self.conn.transaction()?;
+
+        tx.query_row(
+            "SELECT message_id, status, status_message, last_updated_at FROM bot_status WHERE username = ?1",
+            [self.username.clone()],
+            |row| {
+                message_id = Some(row.get(0)?);
+                status = Some(row.get(1)?);
+                status_message = Some(row.get(2)?);
+                last_updated_at = Some(row.get(3)?);
+                Ok(())
+            },
+        )?;
+
+        let bot_status = BotStatus {
+            username: self.username.clone(),
+            message_id: MessageId::new(message_id.unwrap()),
+            status: status.unwrap(),
+            status_message: status_message.unwrap(),
+            last_updated_at: last_updated_at.unwrap(),
+        };
+
+        Ok(bot_status)
+    }
+    
+    pub fn save_bot_status(&mut self, bot_status: &BotStatus) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        
+        tx.execute("DELETE FROM bot_status WHERE username = ?1", [self.username.clone()])?;
+        
+        tx.execute(
+            "INSERT INTO bot_status (username, message_id, status, status_message, last_updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![bot_status.username, bot_status.message_id.get(), bot_status.status, bot_status.status_message, bot_status.last_updated_at],
+        )?;
+
+        tx.commit()?;
+
+        Ok(())
+    }
+    
     pub fn get_content_info_by_message_id(&mut self, message_id: MessageId) -> Option<ContentInfo> {
         let video_mapping = self.load_content_mapping().unwrap();
 
@@ -488,14 +585,14 @@ impl DatabaseTransaction {
     pub fn load_next_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let mut user_settings = self.load_user_settings().unwrap();
         user_settings.current_page += 1;
-        self.save_user_settings(user_settings).unwrap();
+        self.save_user_settings(&user_settings).unwrap();
         self.load_page()
     }
 
     pub fn load_previous_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let mut user_settings = self.load_user_settings().unwrap();
         user_settings.current_page -= 1;
-        self.save_user_settings(user_settings).unwrap();
+        self.save_user_settings(&user_settings).unwrap();
         self.load_page()
     }
     pub fn load_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
@@ -1085,6 +1182,55 @@ impl DatabaseTransaction {
         };
 
         Ok(new_post_time.to_rfc3339())
+    }
+
+    pub fn load_hashed_videos(&mut self) -> Result<Vec<HashedVideo>> {
+        let tx = self.conn.transaction()?;
+
+        let mut video_hashes_stmt = tx.prepare("SELECT duration, hash_frame_1, hash_frame_2, hash_frame_3, hash_frame_4 FROM video_hashes WHERE username = ?1")?;
+        let video_hashes_iter = video_hashes_stmt.query_map([&self.username], |row| {
+            let duration: String = row.get(0)?;
+            let hash_frame_1: String = row.get(1)?;
+            let hash_frame_2: String = row.get(2)?;
+            let hash_frame_3: String = row.get(3)?;
+            let hash_frame_4: String = row.get(4)?;
+
+            let duration: f64 = duration.parse().unwrap();
+            let hash_frame_1 = ImageHash::from_base64(&hash_frame_1).unwrap();
+            let hash_frame_2 = ImageHash::from_base64(&hash_frame_2).unwrap();
+            let hash_frame_3 = ImageHash::from_base64(&hash_frame_3).unwrap();
+            let hash_frame_4 = ImageHash::from_base64(&hash_frame_4).unwrap();
+
+            let video_hashes = HashedVideo {
+                duration,
+                hash_frame_1,
+                hash_frame_2,
+                hash_frame_3,
+                hash_frame_4,
+            };
+
+            Ok(video_hashes)
+        })?;
+
+        let mut video_hashes_list = Vec::new();
+        for video_hashes in video_hashes_iter {
+            let video_hashes = video_hashes?;
+            video_hashes_list.push(video_hashes.clone());
+        }
+
+        Ok(video_hashes_list)
+    }
+
+    pub fn save_hashed_video(&mut self, hashed_video: HashedVideo) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO video_hashes (username, duration, hash_frame_1, hash_frame_2, hash_frame_3, hash_frame_4) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![self.username, hashed_video.duration, hashed_video.hash_frame_1.to_base64(), hashed_video.hash_frame_2.to_base64(), hashed_video.hash_frame_3.to_base64(), hashed_video.hash_frame_4.to_base64()],
+        )?;
+
+        tx.commit()?;
+
+        Ok(())
     }
 
     pub fn does_content_exist_with_shortcode(&mut self, shortcode: String) -> bool {

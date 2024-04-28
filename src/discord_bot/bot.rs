@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
+use crate::database::{Database, DatabaseTransaction};
 use crate::discord_bot::commands::{edit_caption, Data};
-use crate::discord_bot::database::{Database, DatabaseTransaction};
 use crate::discord_bot::interactions::{EditedContent, EditedContentKind};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::clear_all_messages;
@@ -21,6 +21,7 @@ pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
 
 pub(crate) const GUILD_ID: GuildId = GuildId::new(1090413253592612917);
 pub(crate) const POSTED_CHANNEL_ID: ChannelId = ChannelId::new(1228041627898216469);
+pub(crate) const STATUS_CHANNEL_ID: ChannelId = ChannelId::new(1233547564880498688);
 
 #[derive(Clone)]
 pub struct Handler {
@@ -116,6 +117,9 @@ impl EventHandler for Handler {
 
         let mut tx = self.database.begin_transaction().await.unwrap();
 
+        let interaction_message = interaction.clone().message_component().unwrap();
+        let interaction_type = interaction_message.clone().data.custom_id;
+
         // Check if the original message id is in the content mapping
         let mut found_content = None;
         for (id, content) in tx.load_content_mapping().unwrap() {
@@ -125,14 +129,25 @@ impl EventHandler for Handler {
         }
 
         if found_content.is_none() {
-            tracing::error!("Content not found for message id: {}", original_message_id);
-            return;
+            let mut bot_status = tx.load_bot_status().unwrap();
+            if bot_status.message_id == original_message_id {
+                
+                match interaction_type.as_str() {
+                    "resume_from_halt" => {
+                        self.interaction_resume_from_halt(&mut bot_status).await;
+                    }
+                    _ => {
+                        tracing::error!("Unhandled interaction type: {:?}", interaction_type);
+                    }
+                }
+            } else {
+                tracing::error!("Content not found for message id: {}", original_message_id);
+                return;
+            }
         } else {
             let mut content = found_content.clone().unwrap();
 
-            let interaction_message = interaction.clone().message_component().unwrap();
-            let interaction_type = interaction_message.clone().data.custom_id;
-
+            
             match interaction_type.as_str() {
                 "publish_now" => {
                     self.interaction_publish_now(&mut content).await;
@@ -194,7 +209,8 @@ impl Handler {
                 return;
             }
         }
-
+        
+        self.process_bot_status(&ctx, tx).await;
         let content_mapping = tx.load_page().unwrap();
 
         for (mut content_id, mut content) in content_mapping {
@@ -226,7 +242,7 @@ impl Handler {
 }
 
 impl DiscordBot {
-    pub async fn new(database: Database, credentials: HashMap<String, String>, setup_posted_channel: bool) -> Self {
+    pub async fn new(database: Database, credentials: HashMap<String, String>, is_first_run: bool) -> Self {
         let ui_definitions_yaml_data = include_str!("../../config/ui_definitions.yaml");
         let ui_definitions: UiDefinitions = serde_yaml::from_str(&ui_definitions_yaml_data).expect("Error parsing config file");
 
@@ -283,19 +299,41 @@ impl DiscordBot {
 
         clear_all_messages(&database, &client.http, channel_id, true).await;
 
-        if setup_posted_channel {
+        if is_first_run {
+            
+            // Setup the posted channel
             let messages = POSTED_CHANNEL_ID.messages(&client.http, GetMessages::new()).await.unwrap();
-
+            
+            let mut is_message_there = false;
             for (i, message) in messages.iter().enumerate() {
                 if i == 0 && message.author.bot && message.content.contains("Welcome back! 🦀") {
+                    is_message_there = true;
                     continue;
                 } else {
                     message.delete(&client.http).await.unwrap();
                 }
             }
-
-            let msg = CreateMessage::new().content("Welcome back! 🦀");
-            let _ = client.http.send_message(POSTED_CHANNEL_ID, vec![], &msg).await;
+            
+            if !is_message_there {
+                let msg = CreateMessage::new().content("Welcome back! 🦀");
+                let _ = client.http.send_message(POSTED_CHANNEL_ID, vec![], &msg).await;
+            }
+            
+            // Setup the status channel
+            let messages = STATUS_CHANNEL_ID.messages(&client.http, GetMessages::new()).await.unwrap();
+            
+            for message in messages {
+                 if message.author.name == *username && message.author.bot && message.content.contains("Bot is") {
+                     let mut tx = database.begin_transaction().await.unwrap();
+                     let mut bot_status = tx.load_bot_status().unwrap();
+                     if bot_status.message_id == message.id {
+                     } else {
+                         bot_status.message_id = message.id;
+                         tx.save_bot_status(&bot_status).unwrap();
+                     }
+                 }
+            }
+            
         }
 
         let msg = CreateMessage::new().content("Welcome back! 🦀");
@@ -314,20 +352,17 @@ impl DiscordBot {
         }
 
         let client = Arc::new(Mutex::new(client));
-
         DiscordBot { username: username.to_string(), client }
     }
 
     pub async fn start_listener(&mut self) {
         let client = Arc::clone(&self.client);
         let mut client_guard = client.lock().await;
-
         client_guard.start().await.expect("Error starting client");
     }
 
     pub async fn run_bot(&mut self) {
         println!("Running discord bot for {}", self.username);
-
         self.start_listener().await;
     }
 }

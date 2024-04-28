@@ -2,12 +2,21 @@ use chrono::Duration;
 use serenity::all::{Context, CreateMessage, EditMessage, Interaction, Mention, MessageId, MessageReference};
 use std::ops::Deref;
 
+use crate::database::{BotStatus, ContentInfo, QueuedContent, RejectedContent};
 use crate::discord_bot::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
-use crate::discord_bot::database::{ContentInfo, QueuedContent, RejectedContent};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::{generate_full_caption, get_edit_buttons, get_pending_buttons, now_in_my_timezone};
+use crate::discord_bot::view::handle_content_deletion;
 
 impl Handler {
+    
+    pub async fn interaction_resume_from_halt(&self, bot_status: &mut BotStatus) {
+        let mut tx = self.database.begin_transaction().await.unwrap();
+        bot_status.status = 0;
+        bot_status.status_message = "Resuming...".to_string();
+        bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        tx.save_bot_status(&bot_status).unwrap()
+    }
     pub async fn interaction_publish_now(&self, content_info: &mut ContentInfo) {
         let mut tx = self.database.begin_transaction().await.unwrap();
         let user_settings = tx.load_user_settings().unwrap();
@@ -94,16 +103,11 @@ impl Handler {
 
     pub async fn interaction_remove_from_view(&self, ctx: &Context, content_id: MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
-
-        content_info.status = ContentStatus::RemovedFromView;
-
-        ctx.http.delete_message(channel_id, content_id, None).await.unwrap();
+        handle_content_deletion(ctx, &content_id, content_info, channel_id).await;
     }
 
     pub async fn interaction_remove_from_view_failed(&self, ctx: &Context, content_id: MessageId, content_info: &mut ContentInfo) {
-        content_info.status = ContentStatus::RemovedFromView;
-
-        ctx.http.delete_message(POSTED_CHANNEL_ID, content_id, None).await.unwrap();
+        handle_content_deletion(ctx, &content_id, content_info, POSTED_CHANNEL_ID).await;
     }
 
     pub async fn interaction_go_back(&self, ctx: &Context, content_id: MessageId, content_info: &mut ContentInfo) {

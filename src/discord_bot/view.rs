@@ -2,12 +2,40 @@ use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
 use serenity::all::{ChannelId, Context, CreateActionRow, CreateAttachment, CreateMessage, EditMessage, MessageId};
 
-use crate::discord_bot::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
-use crate::discord_bot::database::{ContentInfo, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
+use crate::database::{ContentInfo, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
+use crate::discord_bot::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::{generate_full_caption, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, now_in_my_timezone, randomize_now, should_update_buttons, should_update_caption};
+use crate::discord_bot::utils::{generate_full_caption, get_bot_status_buttons, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, now_in_my_timezone, randomize_now, should_update_buttons, should_update_caption};
+use crate::s3::s3_helper::delete_from_s3;
 
 impl Handler {
+    
+    pub async fn process_bot_status(&self, ctx: &Context, tx: &mut DatabaseTransaction) {
+        
+        let user_settings = tx.load_user_settings().unwrap();
+        let now = now_in_my_timezone(&user_settings);
+
+        let mut bot_status = tx.load_bot_status().unwrap();
+        
+        let msg_caption = format!("Bot is {}.\n\nLast updated at: {}", bot_status.status_message, now.to_rfc3339());
+        let msg_buttons = get_bot_status_buttons(&bot_status);
+        
+        if bot_status.message_id.get() == 1 {
+            let msg = CreateMessage::new().content(msg_caption).components(msg_buttons);
+            let msg = STATUS_CHANNEL_ID.send_message(&ctx.http, msg).await.unwrap();
+            bot_status.message_id = msg.id;
+            bot_status.last_updated_at = now.to_rfc3339();
+        } else {
+            let last_updated_at = DateTime::parse_from_rfc3339(&bot_status.last_updated_at).unwrap();
+            if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
+                update_message_if_needed(&ctx, bot_status.message_id, STATUS_CHANNEL_ID, &msg_caption, msg_buttons).await;
+                bot_status.last_updated_at = now.to_rfc3339();
+            }
+        }
+        
+        tx.save_bot_status(&bot_status).unwrap();
+        
+    }
     pub async fn process_pending(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
         let user_settings = tx.load_user_settings().unwrap();
@@ -21,7 +49,7 @@ impl Handler {
         if content_info.status == (ContentStatus::Pending { shown: true }) {
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+                content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Pending { shown: true };
@@ -30,7 +58,7 @@ impl Handler {
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+            content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -78,7 +106,7 @@ impl Handler {
         if content_info.status == (ContentStatus::Queued { shown: true }) {
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+                content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Queued { shown: true };
@@ -88,7 +116,7 @@ impl Handler {
 
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+            content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -117,12 +145,10 @@ impl Handler {
 
         if content_info.status == (ContentStatus::Rejected { shown: true }) {
             if will_expire_at.with_timezone(&Utc) < now {
-                content_info.status = ContentStatus::RemovedFromView;
-
-                ctx.http.delete_message(channel_id, *content_id, None).await.unwrap();
+                handle_content_deletion(ctx, content_id, content_info, channel_id).await;
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
                 update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+                content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Rejected { shown: true };
@@ -132,7 +158,7 @@ impl Handler {
 
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+            content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -155,21 +181,10 @@ impl Handler {
 
         if content_info.status == (ContentStatus::Published { shown: true }) {
             if will_expire_at.with_timezone(&Utc) < now {
-                content_info.status = ContentStatus::RemovedFromView;
-                match ctx.http.delete_message(POSTED_CHANNEL_ID, *content_id, None).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        let e = format!("{:?}", e);
-                        if e.contains("10008") && e.contains("Unknown Message") {
-                            // Message was already deleted
-                        } else {
-                            tracing::error!("Error deleting message: {}", e);
-                        }
-                    }
-                }
+                handle_content_deletion(ctx, content_id, content_info, channel_id).await;
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
                 update_message_if_needed(&ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+                content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Published { shown: true };
@@ -189,7 +204,7 @@ impl Handler {
                 }
             }
             *content_id = msg.id;
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+            content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -211,11 +226,10 @@ impl Handler {
 
         if content_info.status == (ContentStatus::Failed { shown: true }) {
             if will_expire_at.with_timezone(&Utc) < now {
-                content_info.status = ContentStatus::RemovedFromView;
-                ctx.http.delete_message(POSTED_CHANNEL_ID, *content_id, None).await.unwrap();
+                handle_content_deletion(ctx, content_id, content_info, channel_id).await;
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
                 update_message_if_needed(&ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
-                content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+                content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
             content_info.status = ContentStatus::Failed { shown: true };
@@ -236,8 +250,7 @@ impl Handler {
                 }
             }
             *content_id = msg.id;
-
-            content_info.last_updated_at = randomize_now(tx).to_rfc3339();
+            content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
@@ -270,6 +283,32 @@ async fn update_message_if_needed(ctx: &Context, content_id: MessageId, channel_
                 let e = format!("{:?}", e);
                 tracing::error!("Error editing message: {}", e);
             }
+        }
+    }
+}
+
+pub async fn handle_content_deletion(ctx: &Context, content_id: &MessageId, content_info: &mut ContentInfo, channel_id: ChannelId) {
+    content_info.status = ContentStatus::RemovedFromView;
+
+    match ctx.http.delete_message(channel_id, *content_id, None).await {
+        Ok(_) => {}
+        Err(e) => {
+            let e = format!("{:?}", e);
+            if e.contains("10008") && e.contains("Unknown Message") {
+                // Message was already deleted
+            } else {
+                tracing::error!("Error deleting message from discord: {}", e);
+            }
+        }
+    };
+
+    let re = regex::Regex::new(r"https?:\/\/[^\/]+\/([^?]+)").unwrap();
+    let filename = re.captures(&content_info.url).unwrap().get(1).unwrap().as_str();
+    match delete_from_s3(filename.to_string()).await {
+        Ok(_) => {}
+        Err(e) => {
+            let e = format!("{:?}", e);
+            tracing::error!("Error deleting video from s3: {}", e);
         }
     }
 }
