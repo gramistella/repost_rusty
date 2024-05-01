@@ -2,8 +2,8 @@ use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum ContentStatus {

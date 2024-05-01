@@ -15,7 +15,7 @@ impl Handler {
         bot_status.status = 0;
         bot_status.status_message = "resuming...".to_string();
         bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-        tx.save_bot_status(&bot_status).unwrap()
+        tx.save_bot_status(bot_status).unwrap()
     }
     pub async fn interaction_publish_now(&self, content_info: &mut ContentInfo) {
         let mut tx = self.database.begin_transaction().await.unwrap();

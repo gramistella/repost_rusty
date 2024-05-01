@@ -5,9 +5,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
-use rand::{Rng, SeedableRng};
 use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
+use rand::{Rng, SeedableRng};
 use serenity::all::MessageId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -16,13 +16,13 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;
 
-use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 use crate::database::{ContentInfo, Database, DatabaseTransaction, FailedContent, PublishedContent, QueuedContent};
 use crate::discord_bot::bot::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::now_in_my_timezone;
 use crate::s3::s3_helper::upload_to_s3;
 use crate::video_processing::video_processing::process_video;
+use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
 #[derive(Clone)]
 pub struct ScraperPoster {
@@ -240,7 +240,7 @@ impl ScraperPoster {
             // Send the URL through the channel
             if post.is_video {
                 let mut transaction = self.database.begin_transaction().await.unwrap();
-                if transaction.does_content_exist_with_shortcode(post.shortcode.clone()) == false {
+                if !transaction.does_content_exist_with_shortcode(post.shortcode.clone()) {
                     let filename;
                     let caption;
                     {

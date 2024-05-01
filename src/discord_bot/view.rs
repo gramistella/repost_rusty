@@ -30,7 +30,7 @@ impl Handler {
         } else {
             let last_updated_at = DateTime::parse_from_rfc3339(&bot_status.last_updated_at).unwrap();
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                update_message_if_needed(&ctx, bot_status.message_id, STATUS_CHANNEL_ID, &msg_caption, msg_buttons).await;
+                update_message_if_needed(ctx, bot_status.message_id, STATUS_CHANNEL_ID, &msg_caption, msg_buttons).await;
                 bot_status.last_updated_at = now.to_rfc3339();
             }
         }
@@ -41,12 +41,10 @@ impl Handler {
             let msg_caption = format!("Hey {mention}, the content queue is about to run out!");
             let msg = CreateMessage::new().content(msg_caption);
             bot_status.queue_alert_message_id = channel_id.send_message(&ctx.http, msg).await.unwrap().id;
-        } else {
-            if content_queue_len > 2 && bot_status.queue_alert_message_id.get() != 1 {
-                let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_message_id).await;
-                handle_msg_deletion(delete_msg_result);
-                bot_status.queue_alert_message_id = MessageId::new(1);
-            }
+        } else if content_queue_len > 2 && bot_status.queue_alert_message_id.get() != 1 {
+            let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_message_id).await;
+            handle_msg_deletion(delete_msg_result);
+            bot_status.queue_alert_message_id = MessageId::new(1);
         }
 
         // Notify the user if the bot is halted
@@ -55,12 +53,10 @@ impl Handler {
             let msg_caption = format!("Hey {mention}, the bot is halted!");
             let msg = CreateMessage::new().content(msg_caption);
             bot_status.halt_alert_message_id = STATUS_CHANNEL_ID.send_message(&ctx.http, msg).await.unwrap().id;
-        } else {
-            if bot_status.status != 1 && bot_status.halt_alert_message_id.get() != 1 {
-                let delete_msg_result = STATUS_CHANNEL_ID.delete_message(&ctx.http, bot_status.halt_alert_message_id).await;
-                handle_msg_deletion(delete_msg_result);
-                bot_status.halt_alert_message_id = MessageId::new(1);
-            }
+        } else if bot_status.status != 1 && bot_status.halt_alert_message_id.get() != 1 {
+            let delete_msg_result = STATUS_CHANNEL_ID.delete_message(&ctx.http, bot_status.halt_alert_message_id).await;
+            handle_msg_deletion(delete_msg_result);
+            bot_status.halt_alert_message_id = MessageId::new(1);
         }
 
         tx.save_bot_status(&bot_status).unwrap();
@@ -78,7 +74,7 @@ impl Handler {
 
         if content_info.status == (ContentStatus::Pending { shown: true }) {
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
+                update_message_if_needed(ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
                 content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
@@ -144,7 +140,7 @@ impl Handler {
 
         if content_info.status == (ContentStatus::Queued { shown: true }) {
             if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
+                update_message_if_needed(ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
                 content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
@@ -186,7 +182,7 @@ impl Handler {
             if will_expire_at.with_timezone(&Utc) < now {
                 handle_content_deletion(ctx, content_id, content_info, channel_id).await;
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                update_message_if_needed(&ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
+                update_message_if_needed(ctx, *content_id, channel_id, &msg_caption, msg_buttons).await;
                 content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
@@ -222,7 +218,7 @@ impl Handler {
             if will_expire_at.with_timezone(&Utc) < now {
                 handle_content_deletion(ctx, content_id, content_info, channel_id).await;
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                update_message_if_needed(&ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
+                update_message_if_needed(ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
                 content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {
@@ -259,7 +255,7 @@ impl Handler {
             if will_expire_at.with_timezone(&Utc) < now {
                 handle_content_deletion(ctx, content_id, content_info, channel_id).await;
             } else if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
-                update_message_if_needed(&ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
+                update_message_if_needed(ctx, *content_id, POSTED_CHANNEL_ID, &msg_caption, msg_buttons).await;
                 content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
             }
         } else {

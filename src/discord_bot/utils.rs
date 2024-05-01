@@ -7,9 +7,10 @@ use regex::Regex;
 use serenity::all::{ChannelId, CreateActionRow, CreateButton, Http, Message};
 use serenity::prelude::SerenityError;
 
-use crate::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION, UserSettings};
+use crate::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord_bot::bot::UiDefinitions;
 use crate::discord_bot::state::ContentStatus;
+use crate::s3::s3_helper::S3_EXPIRATION_TIME;
 
 pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
     // let upper_spacer = "^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^";
@@ -245,4 +246,14 @@ pub fn handle_msg_deletion(delete_msg_result: Result<(), SerenityError>) {
             }
         }
     }
+}
+
+pub fn prune_expired_content(tx: &mut DatabaseTransaction, mut content: &mut ContentInfo) -> bool {
+    let added_at = DateTime::parse_from_rfc3339(&content.added_at).unwrap();
+    let user_settings = tx.load_user_settings().unwrap();
+    if added_at > (now_in_my_timezone(&user_settings) - Duration::seconds(S3_EXPIRATION_TIME as i64)) {
+        tx.remove_content_info_with_shortcode(content.original_shortcode.clone()).unwrap();
+        return true;
+    }
+    false
 }

@@ -8,10 +8,10 @@ use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing_subscriber::{Layer, layer::SubscriberExt, Registry};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
 use crate::database::Database;
 use crate::discord_bot::bot::DiscordBot;

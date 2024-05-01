@@ -6,6 +6,8 @@ use tokio::io::AsyncReadExt;
 
 use crate::IS_OFFLINE;
 
+pub const S3_EXPIRATION_TIME: u32 = 60 * 60 * 24 * 7;
+
 //noinspection ALL
 pub async fn upload_to_s3(video_path: String, path_to_file: String, delete_from_local_storage: bool) -> Result<String, Box<dyn std::error::Error>> {
     let access_key = Some("AKIAYS2NP32W7GLE6U57");
@@ -25,7 +27,7 @@ pub async fn upload_to_s3(video_path: String, path_to_file: String, delete_from_
     }
 
     bucket.put_object_with_content_type(final_path.clone(), &file_content, "video/mp4").await.unwrap();
-    let url = bucket.presign_get(final_path.clone(), 60 * 60 * 24 * 7, None).await.unwrap();
+    let url = bucket.presign_get(final_path.clone(), S3_EXPIRATION_TIME, None).await.unwrap();
 
     if delete_from_local_storage {
         tokio::fs::remove_file(file_path).await.unwrap();

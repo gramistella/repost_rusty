@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use chrono::DateTime;
 
 use indexmap::IndexMap;
+
 use serde::{Deserialize, Serialize};
 use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, MessageId, RatelimitInfo, UserId};
 use serenity::async_trait;
@@ -10,15 +12,16 @@ use serenity::model::channel::Message;
 use serenity::prelude::*;
 use tokio::time::sleep;
 
-use crate::database::{Database, DatabaseTransaction};
-use crate::discord_bot::commands::{Data, edit_caption};
+use crate::database::{ContentInfo, Database, DatabaseTransaction};
+use crate::discord_bot::commands::{edit_caption, Data};
 use crate::discord_bot::interactions::{EditedContent, EditedContentKind};
 use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::clear_all_messages;
+use crate::discord_bot::utils::{clear_all_messages, now_in_my_timezone, prune_expired_content};
+use crate::s3::s3_helper::S3_EXPIRATION_TIME;
 
 pub(crate) const REFRESH_RATE: Duration = Duration::from_millis(500);
 
-pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
+pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(120);
 
 pub(crate) const MY_DISCORD_ID: UserId = UserId::new(465494062275756032);
 pub(crate) const GUILD_ID: GuildId = GuildId::new(1090413253592612917);
@@ -210,12 +213,16 @@ impl Handler {
             }
         }
 
-        self.process_bot_status(&ctx, tx).await;
-        let content_mapping = tx.load_page().unwrap();
+        self.process_bot_status(ctx, tx).await;
+        let content_mapping = tx.load_content_mapping().unwrap();
 
         for (mut content_id, mut content) in content_mapping {
+            
+            if prune_expired_content(tx, &mut content) { 
+                continue; 
+            }
+            
             // Check if the bot is currently handling an interaction
-
             let mut tx = self.database.begin_transaction().await.unwrap();
             let is_handling_interaction = self.interaction_mutex.try_lock();
             match is_handling_interaction {
@@ -231,20 +238,21 @@ impl Handler {
             match content.status {
                 ContentStatus::Waiting => {}
                 ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(content.original_shortcode).unwrap(),
-                ContentStatus::Pending { .. } => self.process_pending(&ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Queued { .. } => self.process_queued(&ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Published { .. } => self.process_published(&ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Rejected { .. } => self.process_rejected(&ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Failed { .. } => self.process_failed(&ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Pending { .. } => self.process_pending(ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Queued { .. } => self.process_queued(ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Published { .. } => self.process_published(ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Rejected { .. } => self.process_rejected(ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Failed { .. } => self.process_failed(ctx, &mut tx, &mut content_id, &mut content).await,
             }
         }
     }
+    
 }
 
 impl DiscordBot {
     pub async fn new(database: Database, credentials: HashMap<String, String>, is_first_run: bool) -> Self {
         let ui_definitions_yaml_data = include_str!("../../config/ui_definitions.yaml");
-        let ui_definitions: UiDefinitions = serde_yaml::from_str(&ui_definitions_yaml_data).expect("Error parsing config file");
+        let ui_definitions: UiDefinitions = serde_yaml::from_str(ui_definitions_yaml_data).expect("Error parsing config file");
 
         // Login with a bot token from the environment
         let username = credentials.get("username").expect("No username found in credentials");
@@ -265,7 +273,7 @@ impl DiscordBot {
 
         // let interaction_shard = Shard::new();
         // Create a new instance of the Client, logging in as a bot.
-        let client = Client::builder(&token, intents)
+        let client = Client::builder(token, intents)
             .event_handler(Handler {
                 database: database.clone(),
                 ui_definitions: ui_definitions.clone(),
