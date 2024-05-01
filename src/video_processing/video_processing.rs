@@ -1,5 +1,9 @@
-use std::process::{Stdio};
+use std::process::Command;
+use std::process::Stdio;
 
+use image_hasher::HasherConfig;
+
+use crate::database::{DatabaseTransaction, HashedVideo};
 
 fn divide_number(n: i32) -> [i32; 4] {
     let part1 = 0;
@@ -10,10 +14,6 @@ fn divide_number(n: i32) -> [i32; 4] {
     [part1, part2, part3, part4]
 }
 
-use crate::database::{DatabaseTransaction, HashedVideo};
-use image_hasher::HasherConfig;
-use std::process::Command;
-
 /// Returns whether the video already exists in the database
 
 pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
@@ -23,12 +23,12 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str) -> Re
     let total_frames = get_total_frames(&path).unwrap();
 
     let [frame1, frame2, frame3, frame4] = divide_number(total_frames);
-    
+
     let frame_1_path = format!("temp/{}1.png", video_path);
     let frame_2_path = format!("temp/{}2.png", video_path);
     let frame_3_path = format!("temp/{}3.png", video_path);
     let frame_4_path = format!("temp/{}4.png", video_path);
-    
+
     // Extract frames using ffmpeg command line
     extract_frame(&path, frame1, &frame_1_path)?;
     extract_frame(&path, frame2, &frame_2_path)?;
@@ -51,7 +51,6 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str) -> Re
 
     let mut video_exists = false;
     for hashed_video in hashed_videos {
-        
         if hashed_video.duration != duration_seconds {
             continue;
         }
@@ -67,7 +66,7 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str) -> Re
             video_exists = true;
         }
     }
-    
+
     if !video_exists {
         let video_hash = HashedVideo {
             duration: duration_seconds,
@@ -79,19 +78,17 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str) -> Re
 
         tx.save_hashed_video(video_hash).unwrap();
     }
-    
+
     // Delete the extracted frames
     tokio::fs::remove_file(&frame_1_path).await.unwrap();
     tokio::fs::remove_file(&frame_2_path).await.unwrap();
     tokio::fs::remove_file(&frame_3_path).await.unwrap();
     tokio::fs::remove_file(&frame_4_path).await.unwrap();
-    
+
     Ok(video_exists)
 }
 
 fn get_total_frames(video_path: &str) -> Result<i32, Box<dyn std::error::Error>> {
-    
-    
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
@@ -112,7 +109,6 @@ fn get_total_frames(video_path: &str) -> Result<i32, Box<dyn std::error::Error>>
 }
 
 fn get_video_duration(video_path: &str) -> Result<f64, Box<dyn std::error::Error>> {
-    
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")

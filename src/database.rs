@@ -1,3 +1,6 @@
+use std::fmt;
+use std::sync::Arc;
+
 use chrono::{DateTime, Duration, Timelike, Utc};
 use image_hasher::ImageHash;
 use indexmap::IndexMap;
@@ -7,8 +10,6 @@ use rand::Rng;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
 use serenity::all::MessageId;
-use std::fmt;
-use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::discord_bot::bot::INTERFACE_UPDATE_INTERVAL;
@@ -119,6 +120,8 @@ pub struct BotStatus {
     pub status: i32,
     pub status_message: String,
     pub last_updated_at: String,
+    pub queue_alert_message_id: MessageId,
+    pub halt_alert_message_id: MessageId,
 }
 
 pub(crate) struct Database {
@@ -175,7 +178,7 @@ impl Database {
         let default_current_page = 1;
 
         let user_settings_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_settings WHERE username = ?1)", params![username], |row| row.get(0)).unwrap_or(false);
-        
+
         if !user_settings_exists {
             if IS_OFFLINE {
                 let default_is_posting = 1;
@@ -295,14 +298,15 @@ impl Database {
             [],
         )?;
 
-
         conn.execute(
             "CREATE TABLE IF NOT EXISTS bot_status (
             username TEXT NOT NULL,
             message_id INTEGER NOT NULL,
             status INTEGER NOT NULL,
             status_message TEXT NOT NULL,
-            last_updated_at TEXT NOT NULL
+            last_updated_at TEXT NOT NULL,
+            queue_alert_message_id INTEGER NOT NULL,
+            halt_alert_message_id INTEGER NOT NULL
         )",
             [],
         )?;
@@ -310,7 +314,11 @@ impl Database {
         let bot_status_exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM bot_status WHERE username = ?1)", params![username], |row| row.get(0)).unwrap_or(false);
 
         if !bot_status_exists {
-            let query = format!("INSERT INTO bot_status (username, message_id, status, status_message, last_updated_at) VALUES ('{}', 1, 0, 'operational', '{}')", username, Utc::now().to_rfc3339());
+            let query = format!(
+                "INSERT INTO bot_status (username, message_id, status, status_message, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES ('{}', 1, 0, 'operational  🟢', '{}', 1, 1)",
+                username,
+                Utc::now().to_rfc3339()
+            );
             conn.execute(&query, [])?;
         }
 
@@ -374,7 +382,7 @@ impl DatabaseTransaction {
         Ok(user_settings)
     }
 
-    pub fn save_user_settings(&mut self, user_settings: &UserSettings) -> Result<()> {
+    pub fn _save_user_settings(&mut self, user_settings: &UserSettings) -> Result<()> {
         let tx = self.conn.transaction()?;
 
         // Remove all the user settings
@@ -400,25 +408,25 @@ impl DatabaseTransaction {
 
         Ok(())
     }
-    
+
     pub fn load_bot_status(&mut self) -> Result<BotStatus> {
         let mut message_id: Option<u64> = None;
         let mut status: Option<i32> = None;
         let mut status_message: Option<String> = None;
         let mut last_updated_at: Option<String> = None;
+        let mut queue_alert_message_id: Option<u64> = None;
+        let mut halt_alert_message_id: Option<u64> = None;
         let tx = self.conn.transaction()?;
 
-        tx.query_row(
-            "SELECT message_id, status, status_message, last_updated_at FROM bot_status WHERE username = ?1",
-            [self.username.clone()],
-            |row| {
-                message_id = Some(row.get(0)?);
-                status = Some(row.get(1)?);
-                status_message = Some(row.get(2)?);
-                last_updated_at = Some(row.get(3)?);
-                Ok(())
-            },
-        )?;
+        tx.query_row("SELECT message_id, status, status_message, last_updated_at, queue_alert_message_id, halt_alert_message_id FROM bot_status WHERE username = ?1", [self.username.clone()], |row| {
+            message_id = Some(row.get(0)?);
+            status = Some(row.get(1)?);
+            status_message = Some(row.get(2)?);
+            last_updated_at = Some(row.get(3)?);
+            queue_alert_message_id = Some(row.get(4)?);
+            halt_alert_message_id = Some(row.get(5)?);
+            Ok(())
+        })?;
 
         let bot_status = BotStatus {
             username: self.username.clone(),
@@ -426,27 +434,37 @@ impl DatabaseTransaction {
             status: status.unwrap(),
             status_message: status_message.unwrap(),
             last_updated_at: last_updated_at.unwrap(),
+            queue_alert_message_id: MessageId::new(queue_alert_message_id.unwrap()),
+            halt_alert_message_id: MessageId::new(halt_alert_message_id.unwrap()),
         };
 
         Ok(bot_status)
     }
-    
+
     pub fn save_bot_status(&mut self, bot_status: &BotStatus) -> Result<()> {
         let tx = self.conn.transaction()?;
-        
+
         tx.execute("DELETE FROM bot_status WHERE username = ?1", [self.username.clone()])?;
-        
+
         tx.execute(
-            "INSERT INTO bot_status (username, message_id, status, status_message, last_updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![bot_status.username, bot_status.message_id.get(), bot_status.status, bot_status.status_message, bot_status.last_updated_at],
+            "INSERT INTO bot_status (username, message_id, status, status_message, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                bot_status.username,
+                bot_status.message_id.get(),
+                bot_status.status,
+                bot_status.status_message,
+                bot_status.last_updated_at,
+                bot_status.queue_alert_message_id.get(),
+                bot_status.halt_alert_message_id.get()
+            ],
         )?;
 
         tx.commit()?;
 
         Ok(())
     }
-    
-    pub fn get_content_info_by_message_id(&mut self, message_id: MessageId) -> Option<ContentInfo> {
+
+    pub fn _get_content_info_by_message_id(&mut self, message_id: MessageId) -> Option<ContentInfo> {
         let video_mapping = self.load_content_mapping().unwrap();
 
         match video_mapping.get(&message_id) {
@@ -503,7 +521,7 @@ impl DatabaseTransaction {
         let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM content_info WHERE username = ?1", params![self.username], |row| row.get(0))?;
         Ok(count)
     }
-    pub fn get_total_pages(&mut self) -> Result<i32> {
+    pub fn _get_total_pages(&mut self) -> Result<i32> {
         Ok((self.get_max_records_in_content_info().unwrap() as i32 - 1) / self.load_user_settings().unwrap().page_size + 1)
     }
 
@@ -582,17 +600,17 @@ impl DatabaseTransaction {
         Ok(())
     }
 
-    pub fn load_next_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
+    pub fn _load_next_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let mut user_settings = self.load_user_settings().unwrap();
         user_settings.current_page += 1;
-        self.save_user_settings(&user_settings).unwrap();
+        self._save_user_settings(&user_settings).unwrap();
         self.load_page()
     }
 
-    pub fn load_previous_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
+    pub fn _load_previous_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let mut user_settings = self.load_user_settings().unwrap();
         user_settings.current_page -= 1;
-        self.save_user_settings(&user_settings).unwrap();
+        self._save_user_settings(&user_settings).unwrap();
         self.load_page()
     }
     pub fn load_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
@@ -1064,7 +1082,7 @@ impl DatabaseTransaction {
     }
 
     /// This function updates a matching failed content with the new failed content
-    pub fn update_failed_content(&mut self, failed_content: FailedContent) -> Result<()> {
+    pub fn _update_failed_content(&mut self, failed_content: FailedContent) -> Result<()> {
         let tx = self.conn.transaction()?;
         let username = self.username.clone();
         tx.execute(
@@ -1271,6 +1289,13 @@ impl DatabaseTransaction {
         // Save the updated content info back to the database
         self.save_content_mapping(new_content_info)?;
 
+        Ok(())
+    }
+
+    pub async fn clear_all_other_bot_statuses(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM bot_status WHERE username != ?1", [&self.username])?;
+        tx.commit()?;
         Ok(())
     }
 }

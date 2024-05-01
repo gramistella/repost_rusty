@@ -7,5 +7,6 @@
 /cookies
 /logs
 /temp
+/instagram-scraper-rs
 cargo-flamegraph.stacks
 flamegraph.svg

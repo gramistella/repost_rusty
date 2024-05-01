@@ -1,11 +1,13 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serenity::all::{ChannelId, CreateActionRow, CreateButton, Http, Message};
-use std::sync::Arc;
+use serenity::prelude::SerenityError;
 
-use crate::database::{ContentInfo, Database, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION, BotStatus};
+use crate::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION, UserSettings};
 use crate::discord_bot::bot::UiDefinitions;
 use crate::discord_bot::state::ContentStatus;
 
@@ -185,10 +187,7 @@ pub fn get_published_buttons(_ui_definitions: &UiDefinitions) -> Vec<CreateActio
 
 pub fn get_bot_status_buttons(bot_status: &BotStatus) -> Vec<CreateActionRow> {
     if bot_status.status == 1 {
-        vec![CreateActionRow::Buttons(vec![
-            CreateButton::new("resume_from_halt").label("Resume"),
-            
-        ])]
+        vec![CreateActionRow::Buttons(vec![CreateButton::new("resume_from_halt").label("Resume")])]
     } else {
         vec![]
     }
@@ -226,28 +225,24 @@ pub async fn should_update_buttons(old_msg: Message, new_buttons: Vec<CreateActi
         }
     }
 
-    if old_custom_ids == new_custom_ids {
-        false
-    } else {
-        true
-    }
+    !old_custom_ids.eq(&new_custom_ids)
 }
 
 pub async fn should_update_caption(old_msg: Message, new_content: String) -> bool {
     let old_content = old_msg.content.clone();
-    if old_content == new_content {
-        false
-    } else {
-        true
-    }
+    !old_content.eq(&new_content)
 }
 
-pub fn randomize_now(tx: &mut DatabaseTransaction) -> DateTime<Utc> {
-    let content_mapping = tx.load_content_mapping().unwrap();
-    let all_update_times = content_mapping.iter().map(|(_id, content)| DateTime::parse_from_rfc3339(&content.last_updated_at).unwrap().with_timezone(&Utc)).collect::<Vec<DateTime<Utc>>>();
-
-    let max_time = *all_update_times.iter().max().unwrap();
-
-    // 5 seconds is the minimum time between updates to avoid discord rate limiting
-    max_time + Duration::seconds(6)
+pub fn handle_msg_deletion(delete_msg_result: Result<(), SerenityError>) {
+    match delete_msg_result {
+        Ok(_) => {}
+        Err(e) => {
+            let e = format!("{:?}", e);
+            if e.contains("10008") && e.contains("Unknown Message") {
+                // Message was already deleted
+            } else {
+                tracing::error!("Error deleting message: {}", e);
+            }
+        }
+    }
 }

@@ -1,16 +1,17 @@
 extern crate r2d2;
 extern crate r2d2_sqlite;
 
-use std::{backtrace, env};
 use std::collections::HashMap;
+use std::env;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
+
+use tracing_subscriber::{Layer, layer::SubscriberExt, Registry};
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
 use crate::database::Database;
 use crate::discord_bot::bot::DiscordBot;
@@ -32,9 +33,9 @@ const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 20);
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 60 * 12);
 
 fn main() -> anyhow::Result<()> {
-    let (_file_guard, _stdout_guard) = init_logging();
+    env::set_var("RUST_BACKTRACE", "full");
 
-    env::set_var("RUST_BACKTRACE", "1");
+    let (_file_guard, _stdout_guard) = init_logging();
 
     let all_credentials = read_credentials("config/credentials.yaml");
     let mut all_handles = Vec::new();
@@ -108,7 +109,7 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
     //let logger = Registry::default().with(file_layer).with(layer2);
     //LogWrapper::new(multi.clone(), logger).try_init().unwrap();
     Registry::default().with(file_layer).with(layer2).init();
-    
+
     (file_guard, stdout_guard)
 }
 

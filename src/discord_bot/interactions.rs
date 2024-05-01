@@ -1,6 +1,7 @@
+use std::ops::Deref;
+
 use chrono::Duration;
 use serenity::all::{Context, CreateMessage, EditMessage, Interaction, Mention, MessageId, MessageReference};
-use std::ops::Deref;
 
 use crate::database::{BotStatus, ContentInfo, QueuedContent, RejectedContent};
 use crate::discord_bot::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
@@ -9,11 +10,10 @@ use crate::discord_bot::utils::{generate_full_caption, get_edit_buttons, get_pen
 use crate::discord_bot::view::handle_content_deletion;
 
 impl Handler {
-    
     pub async fn interaction_resume_from_halt(&self, bot_status: &mut BotStatus) {
         let mut tx = self.database.begin_transaction().await.unwrap();
         bot_status.status = 0;
-        bot_status.status_message = "Resuming...".to_string();
+        bot_status.status_message = "resuming...".to_string();
         bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         tx.save_bot_status(&bot_status).unwrap()
     }

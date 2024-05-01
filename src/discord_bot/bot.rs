@@ -1,16 +1,17 @@
-use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, RatelimitInfo};
-use serenity::async_trait;
-use serenity::model::channel::Message;
-use serenity::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, MessageId, RatelimitInfo, UserId};
+use serenity::async_trait;
+use serenity::model::channel::Message;
+use serenity::prelude::*;
 use tokio::time::sleep;
 
 use crate::database::{Database, DatabaseTransaction};
-use crate::discord_bot::commands::{edit_caption, Data};
+use crate::discord_bot::commands::{Data, edit_caption};
 use crate::discord_bot::interactions::{EditedContent, EditedContentKind};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::clear_all_messages;
@@ -19,6 +20,7 @@ pub(crate) const REFRESH_RATE: Duration = Duration::from_millis(500);
 
 pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(90);
 
+pub(crate) const MY_DISCORD_ID: UserId = UserId::new(465494062275756032);
 pub(crate) const GUILD_ID: GuildId = GuildId::new(1090413253592612917);
 pub(crate) const POSTED_CHANNEL_ID: ChannelId = ChannelId::new(1228041627898216469);
 pub(crate) const STATUS_CHANNEL_ID: ChannelId = ChannelId::new(1233547564880498688);
@@ -131,7 +133,6 @@ impl EventHandler for Handler {
         if found_content.is_none() {
             let mut bot_status = tx.load_bot_status().unwrap();
             if bot_status.message_id == original_message_id {
-                
                 match interaction_type.as_str() {
                     "resume_from_halt" => {
                         self.interaction_resume_from_halt(&mut bot_status).await;
@@ -147,7 +148,6 @@ impl EventHandler for Handler {
         } else {
             let mut content = found_content.clone().unwrap();
 
-            
             match interaction_type.as_str() {
                 "publish_now" => {
                     self.interaction_publish_now(&mut content).await;
@@ -209,7 +209,7 @@ impl Handler {
                 return;
             }
         }
-        
+
         self.process_bot_status(&ctx, tx).await;
         let content_mapping = tx.load_page().unwrap();
 
@@ -300,10 +300,9 @@ impl DiscordBot {
         clear_all_messages(&database, &client.http, channel_id, true).await;
 
         if is_first_run {
-            
-            // Setup the posted channel
+            // Set up the posted channel
             let messages = POSTED_CHANNEL_ID.messages(&client.http, GetMessages::new()).await.unwrap();
-            
+
             let mut is_message_there = false;
             for (i, message) in messages.iter().enumerate() {
                 if i == 0 && message.author.bot && message.content.contains("Welcome back! 🦀") {
@@ -313,27 +312,41 @@ impl DiscordBot {
                     message.delete(&client.http).await.unwrap();
                 }
             }
-            
+
             if !is_message_there {
                 let msg = CreateMessage::new().content("Welcome back! 🦀");
                 let _ = client.http.send_message(POSTED_CHANNEL_ID, vec![], &msg).await;
             }
-            
-            // Setup the status channel
+
+            // Set up the status channel
+            let mut tx = database.begin_transaction().await.unwrap();
+            tx.clear_all_other_bot_statuses().await.unwrap();
+
             let messages = STATUS_CHANNEL_ID.messages(&client.http, GetMessages::new()).await.unwrap();
-            
+
+            let mut tx = database.begin_transaction().await.unwrap();
+            let mut bot_status = tx.load_bot_status().unwrap();
+            let mut is_message_there = false;
             for message in messages {
-                 if message.author.name == *username && message.author.bot && message.content.contains("Bot is") {
-                     let mut tx = database.begin_transaction().await.unwrap();
-                     let mut bot_status = tx.load_bot_status().unwrap();
-                     if bot_status.message_id == message.id {
-                     } else {
-                         bot_status.message_id = message.id;
-                         tx.save_bot_status(&bot_status).unwrap();
-                     }
-                 }
+                if message.author.name == *username && message.author.bot && message.content.contains("Bot is") {
+                    if bot_status.message_id == message.id {
+                        is_message_there = true;
+                    } else {
+                        is_message_there = true;
+                        bot_status.message_id = message.id;
+                        tx.save_bot_status(&bot_status).unwrap();
+                    }
+                } else {
+                    message.delete(&client.http).await.unwrap();
+                }
             }
-            
+
+            // If the message not is there, and the message id is not 1, then reset the message id
+            // so that it will be sent by view.rs
+            if !is_message_there && bot_status.message_id.get() != 1 {
+                bot_status.message_id = MessageId::new(1);
+                tx.save_bot_status(&bot_status).unwrap();
+            }
         }
 
         let msg = CreateMessage::new().content("Welcome back! 🦀");

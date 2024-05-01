@@ -1,13 +1,14 @@
-use chrono::{DateTime, Utc};
-use indexmap::IndexMap;
-use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
-use rand::prelude::SliceRandom;
-use rand::rngs::{OsRng, StdRng};
-use rand::{Rng, SeedableRng};
-use serenity::all::MessageId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use indexmap::IndexMap;
+use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
+use rand::{Rng, SeedableRng};
+use rand::prelude::SliceRandom;
+use rand::rngs::{OsRng, StdRng};
+use serenity::all::MessageId;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
@@ -15,13 +16,13 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;
 
-use crate::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, FailedContent, PublishedContent, QueuedContent};
+use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
+use crate::database::{ContentInfo, Database, DatabaseTransaction, FailedContent, PublishedContent, QueuedContent};
 use crate::discord_bot::bot::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::now_in_my_timezone;
 use crate::s3::s3_helper::upload_to_s3;
 use crate::video_processing::video_processing::process_video;
-use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
 #[derive(Clone)]
 pub struct ScraperPoster {
@@ -96,9 +97,7 @@ impl ScraperPoster {
                     }
 
                     if let Some((video_file_name, caption, author, shortcode)) = content_tuple {
-                        
-                        if !transaction.does_content_exist_with_shortcode(shortcode.clone()) && shortcode != "halted"{
-
+                        if !transaction.does_content_exist_with_shortcode(shortcode.clone()) && shortcode != "halted" {
                             // Process video to check if it already exists
                             let video_exists = process_video(&mut transaction, &video_file_name).await.unwrap();
 
@@ -106,7 +105,7 @@ impl ScraperPoster {
                                 println!("The same video is already in the database with a different shortcode, skipping");
                                 continue;
                             }
-                            
+
                             let s3_filename = format!("{}/{}", username, video_file_name);
                             let url = upload_to_s3(video_file_name, s3_filename, true).await.unwrap();
                             //println!("Uploaded video to S3: {}", url);
@@ -257,28 +256,33 @@ impl ScraperPoster {
                             }
                             Err(e) => {
                                 self.println(&format!("Error while downloading reel | {}", e));
-                                Self::set_bot_status_halted(&mut transaction);
-                                
-                                loop {
-                                    let mut bot_status = transaction.load_bot_status().unwrap();
-                                    if bot_status.status == 0 {
-                                        self.println("Reattempting to download reel...");
-                                        let result = scraper_guard.download_reel(&post.shortcode, &filename).await;
-                                        match result {
-                                            Ok(caption) => {
-                                                actually_scraped += 1;
-                                                let base_print = format!("{flattened_posts_processed}/{flattened_posts_len} - {actually_scraped}/{MAX_CONTENT_PER_ITERATION}");
-                                                self.println(&format!("{base_print} Scraped content from {}: {}", author.username, post.shortcode));
-                                                Self::set_bot_status_operational(&mut transaction);
-                                                break caption;
-                                            }
-                                            Err(e) => {
-                                                self.println(&format!("Error while downloading reel | {}", e));
-                                                Self::set_bot_status_halted(&mut transaction);
+
+                                match e {
+                                    InstagramScraperError::MediaNotFound { .. } => continue,
+                                    _ => {
+                                        Self::set_bot_status_halted(&mut transaction);
+                                        loop {
+                                            let bot_status = transaction.load_bot_status().unwrap();
+                                            if bot_status.status == 0 {
+                                                self.println("Reattempting to download reel...");
+                                                let result = scraper_guard.download_reel(&post.shortcode, &filename).await;
+                                                match result {
+                                                    Ok(caption) => {
+                                                        actually_scraped += 1;
+                                                        let base_print = format!("{flattened_posts_processed}/{flattened_posts_len} - {actually_scraped}/{MAX_CONTENT_PER_ITERATION}");
+                                                        self.println(&format!("{base_print} Scraped content from {}: {}", author.username, post.shortcode));
+                                                        Self::set_bot_status_operational(&mut transaction);
+                                                        break caption;
+                                                    }
+                                                    Err(e) => {
+                                                        self.println(&format!("Error while downloading reel | {}", e));
+                                                        Self::set_bot_status_halted(&mut transaction);
+                                                    }
+                                                }
+                                            } else {
+                                                tokio::time::sleep(REFRESH_RATE).await;
                                             }
                                         }
-                                    } else {
-                                        tokio::time::sleep(REFRESH_RATE).await;
                                     }
                                 }
                             }
@@ -424,7 +428,7 @@ impl ScraperPoster {
                         bot_status.status = 1;
                         tx.save_bot_status(&bot_status).unwrap();
                         loop {
-                            let mut bot_status = tx.load_bot_status().unwrap();
+                            let bot_status = tx.load_bot_status().unwrap();
                             if bot_status.status == 0 {
                                 self.println("Reattempting to fetch posts...");
                                 let result = scraper_guard.scrape_posts(&user.id, 5).await;
@@ -477,7 +481,7 @@ impl ScraperPoster {
                             _ => {
                                 Self::set_bot_status_halted(&mut tx);
                                 loop {
-                                    let mut bot_status = tx.load_bot_status().unwrap();
+                                    let bot_status = tx.load_bot_status().unwrap();
                                     if bot_status.status == 0 {
                                         self.println("Reattempting to fetch user info...");
                                         let result = scraper_guard.scrape_userinfo(&profile).await;
@@ -525,9 +529,9 @@ impl ScraperPoster {
                     self.println(&format!(" Login failed: {}", e));
                     let mut tx = self.database.begin_transaction().await.unwrap();
                     Self::set_bot_status_halted(&mut tx);
-               
+
                     loop {
-                        let mut bot_status = tx.load_bot_status().unwrap();
+                        let bot_status = tx.load_bot_status().unwrap();
                         if bot_status.status == 0 {
                             self.println("Reattempting to log in...");
                             scraper_guard.authenticate_with_login(username.clone(), password.clone());
@@ -556,7 +560,7 @@ impl ScraperPoster {
     fn set_bot_status_halted(tx: &mut DatabaseTransaction) {
         let mut bot_status = tx.load_bot_status().unwrap();
         bot_status.status = 1;
-        bot_status.status_message = "halted".to_string();
+        bot_status.status_message = "halted  ⚠️".to_string();
         bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         tx.save_bot_status(&bot_status).unwrap();
     }
@@ -564,7 +568,7 @@ impl ScraperPoster {
     fn set_bot_status_operational(tx: &mut DatabaseTransaction) {
         let mut bot_status = tx.load_bot_status().unwrap();
         bot_status.status = 0;
-        bot_status.status_message = "operational".to_string();
+        bot_status.status_message = "operational  🟢".to_string();
         bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         tx.save_bot_status(&bot_status).unwrap();
     }
@@ -581,7 +585,7 @@ impl ScraperPoster {
             loop {
                 let mut transaction = cloned_self.database.begin_transaction().await.unwrap();
                 let content_mapping = transaction.load_content_mapping().unwrap();
-                let mut user_settings = transaction.load_user_settings().unwrap();
+                let user_settings = transaction.load_user_settings().unwrap();
 
                 for (_message_id, content_info) in content_mapping {
                     if content_info.status.to_string().contains("queued_") {
@@ -635,10 +639,29 @@ impl ScraperPoster {
                                                 match err {
                                                     InstagramScraperError::UploadFailedRecoverable(_) => {
                                                         drop(scraper_guard);
-                                                        if err.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted."){
-                                                            cloned_self.println(&format!("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.\n [WARNING] {}", err.to_string()));
-                                                            user_settings.can_post = false;
-                                                            transaction.save_user_settings(&user_settings).unwrap();
+                                                        if err.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
+                                                            cloned_self.println(&format!("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted."));
+                                                            Self::set_bot_status_halted(&mut transaction);
+                                                            loop {
+                                                                let bot_status = transaction.load_bot_status().unwrap();
+                                                                if bot_status.status == 0 {
+                                                                    cloned_self.println("Reattempting to upload content to instagram...");
+                                                                    let result = cloned_self.scraper.lock().await.upload_reel(user_id, access_token, &queued_post.url, &full_caption).await;
+                                                                    match result {
+                                                                        Ok(_) => {
+                                                                            cloned_self.println(&format!("[+] Published content successfully: {}", queued_post.original_shortcode));
+                                                                            Self::set_bot_status_operational(&mut transaction);
+                                                                            break;
+                                                                        }
+                                                                        Err(_e) => {
+                                                                            cloned_self.println(&format!("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted."));
+                                                                            Self::set_bot_status_halted(&mut transaction);
+                                                                        }
+                                                                    }
+                                                                } else {
+                                                                    tokio::time::sleep(REFRESH_RATE).await;
+                                                                }
+                                                            }
                                                         } else {
                                                             cloned_self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err.to_string()));
                                                             cloned_self.handle_recoverable_failed_content().await;

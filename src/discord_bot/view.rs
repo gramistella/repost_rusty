@@ -1,25 +1,27 @@
 use chrono::{DateTime, Duration, Utc};
 use indexmap::IndexMap;
-use serenity::all::{ChannelId, Context, CreateActionRow, CreateAttachment, CreateMessage, EditMessage, MessageId};
+use serenity::all::{ChannelId, Context, CreateActionRow, CreateAttachment, CreateMessage, EditMessage, Mention, MessageId};
 
 use crate::database::{ContentInfo, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
-use crate::discord_bot::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
+use crate::discord_bot::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::{generate_full_caption, get_bot_status_buttons, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, now_in_my_timezone, randomize_now, should_update_buttons, should_update_caption};
+use crate::discord_bot::state::ContentStatus::RemovedFromView;
+use crate::discord_bot::utils::{generate_full_caption, get_bot_status_buttons, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, handle_msg_deletion, now_in_my_timezone, should_update_buttons, should_update_caption};
 use crate::s3::s3_helper::delete_from_s3;
 
 impl Handler {
-    
     pub async fn process_bot_status(&self, ctx: &Context, tx: &mut DatabaseTransaction) {
-        
+        let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
         let user_settings = tx.load_user_settings().unwrap();
         let now = now_in_my_timezone(&user_settings);
 
         let mut bot_status = tx.load_bot_status().unwrap();
-        
-        let msg_caption = format!("Bot is {}.\n\nLast updated at: {}", bot_status.status_message, now.to_rfc3339());
+        let content_queue_len = tx.load_content_queue().unwrap().len();
+        let formatted_now = now.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        let msg_caption = format!("Bot is {}\n\nCurrently there are {} queued posts\n\nLast updated at: {}", bot_status.status_message, content_queue_len, formatted_now);
         let msg_buttons = get_bot_status_buttons(&bot_status);
-        
+
         if bot_status.message_id.get() == 1 {
             let msg = CreateMessage::new().content(msg_caption).components(msg_buttons);
             let msg = STATUS_CHANNEL_ID.send_message(&ctx.http, msg).await.unwrap();
@@ -32,10 +34,38 @@ impl Handler {
                 bot_status.last_updated_at = now.to_rfc3339();
             }
         }
-        
+
+        // Remind the user if the content queue is about to run out
+        if content_queue_len <= 2 && bot_status.queue_alert_message_id.get() == 1 {
+            let mention = Mention::from(MY_DISCORD_ID);
+            let msg_caption = format!("Hey {mention}, the content queue is about to run out!");
+            let msg = CreateMessage::new().content(msg_caption);
+            bot_status.queue_alert_message_id = channel_id.send_message(&ctx.http, msg).await.unwrap().id;
+        } else {
+            if content_queue_len > 2 && bot_status.queue_alert_message_id.get() != 1 {
+                let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_message_id).await;
+                handle_msg_deletion(delete_msg_result);
+                bot_status.queue_alert_message_id = MessageId::new(1);
+            }
+        }
+
+        // Notify the user if the bot is halted
+        if bot_status.status == 1 && bot_status.halt_alert_message_id.get() == 1 {
+            let mention = Mention::from(MY_DISCORD_ID);
+            let msg_caption = format!("Hey {mention}, the bot is halted!");
+            let msg = CreateMessage::new().content(msg_caption);
+            bot_status.halt_alert_message_id = STATUS_CHANNEL_ID.send_message(&ctx.http, msg).await.unwrap().id;
+        } else {
+            if bot_status.status != 1 && bot_status.halt_alert_message_id.get() != 1 {
+                let delete_msg_result = STATUS_CHANNEL_ID.delete_message(&ctx.http, bot_status.halt_alert_message_id).await;
+                handle_msg_deletion(delete_msg_result);
+                bot_status.halt_alert_message_id = MessageId::new(1);
+            }
+        }
+
         tx.save_bot_status(&bot_status).unwrap();
-        
     }
+
     pub async fn process_pending(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
         let user_settings = tx.load_user_settings().unwrap();
@@ -54,7 +84,17 @@ impl Handler {
         } else {
             content_info.status = ContentStatus::Pending { shown: true };
 
-            let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
+            let video_attachment = match CreateAttachment::url(&ctx.http, &content_info.url).await {
+                Ok(attachment) => attachment,
+                Err(e) => {
+                    tracing::error!("Error creating attachment for url {} {:?}", content_info.url, e);
+
+                    content_info.status = RemovedFromView;
+                    let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
+                    tx.save_content_mapping(content_mapping).unwrap();
+                    return;
+                }
+            };
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
@@ -62,7 +102,6 @@ impl Handler {
         }
 
         let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
-
         tx.save_content_mapping(content_mapping).unwrap();
     }
 
@@ -192,17 +231,9 @@ impl Handler {
             let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
-            match channel_id.delete_message(&ctx.http, *content_id).await {
-                Ok(_) => {}
-                Err(e) => {
-                    let e = format!("{:?}", e);
-                    if e.contains("10008") && e.contains("Unknown Message") {
-                        // Message was already deleted
-                    } else {
-                        tracing::error!("Error deleting message: {}", e);
-                    }
-                }
-            }
+
+            let delete_msg_result = channel_id.delete_message(&ctx.http, *content_id).await;
+            handle_msg_deletion(delete_msg_result);
             *content_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
@@ -238,17 +269,8 @@ impl Handler {
 
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
-            match channel_id.delete_message(&ctx.http, *content_id).await {
-                Ok(_) => {}
-                Err(e) => {
-                    let e = format!("{:?}", e);
-                    if e.contains("10008") && e.contains("Unknown Message") {
-                        // Message was already deleted
-                    } else {
-                        tracing::error!("Error deleting message: {}", e);
-                    }
-                }
-            }
+            let delete_msg_result = channel_id.delete_message(&ctx.http, *content_id).await;
+            handle_msg_deletion(delete_msg_result);
             *content_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
@@ -288,19 +310,10 @@ async fn update_message_if_needed(ctx: &Context, content_id: MessageId, channel_
 }
 
 pub async fn handle_content_deletion(ctx: &Context, content_id: &MessageId, content_info: &mut ContentInfo, channel_id: ChannelId) {
-    content_info.status = ContentStatus::RemovedFromView;
+    content_info.status = RemovedFromView;
 
-    match ctx.http.delete_message(channel_id, *content_id, None).await {
-        Ok(_) => {}
-        Err(e) => {
-            let e = format!("{:?}", e);
-            if e.contains("10008") && e.contains("Unknown Message") {
-                // Message was already deleted
-            } else {
-                tracing::error!("Error deleting message from discord: {}", e);
-            }
-        }
-    };
+    let delete_msg_result = ctx.http.delete_message(channel_id, *content_id, None).await;
+    handle_msg_deletion(delete_msg_result);
 
     let re = regex::Regex::new(r"https?:\/\/[^\/]+\/([^?]+)").unwrap();
     let filename = re.captures(&content_info.url).unwrap().get(1).unwrap().as_str();

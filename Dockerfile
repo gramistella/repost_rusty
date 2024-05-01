@@ -1,33 +1,40 @@
-# Use an official Rust runtime as a parent image
-FROM docker.io/rust:latest
-
-# Set the working directory in the container to /app
+# Use the lukemathwalker/cargo-chef image as the base
+FROM docker.io/lukemathwalker/cargo-chef:latest-rust-1 AS chef
 WORKDIR /repostrusty
 
-# Copy over your Manifest files
+FROM chef AS planner
 COPY ./Cargo.lock ./Cargo.lock
 COPY ./Cargo.toml ./Cargo.toml
-
-# Copy your local crate
 COPY ./instagram_scraper_rs ./instagram_scraper_rs
+COPY ./src ./src
+RUN cargo chef prepare --recipe-path recipe.json
 
-# This dummy build is to get the dependencies cached
-RUN mkdir src && \
-    echo "fn main() {println!(\"if you see this, the build broke\")}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src/
+FROM chef AS builder
+COPY --from=planner /repostrusty/recipe.json recipe.json
+# Build dependencies - this is the caching Docker layer!
+COPY ./instagram_scraper_rs ./instagram_scraper_rs
+RUN cargo chef cook --release --recipe-path recipe.json
 
-# Now that the dependencies are cached, copy your source code
-COPY . .
+# Copy the source code and configuration
+COPY ./Cargo.lock ./Cargo.lock
+COPY ./Cargo.toml ./Cargo.toml
+COPY ./src ./src
+COPY ./config ./config
 
 # Build the application
-RUN cargo build
+RUN cargo build --release
 
-# Start a new stage
-# FROM debian:bookworm-slim
+# Final stage
+FROM debian:bookworm-slim
 
-# Install necessary packages
+# Install ffmpeg
 RUN apt-get update && apt-get install -y ffmpeg
 
+# Copy the built executable and configuration from the builder stage
+COPY --from=builder /repostrusty/config/ /repostrusty/config
+COPY --from=builder /repostrusty/target/release/repost_rusty /repostrusty/target/release/repost_rusty
+
+WORKDIR /repostrusty
+
 # Set the startup command to run your binary
-CMD ["/repostrusty/target/debug/repost_rusty"]
+CMD ["/repostrusty/target/release/repost_rusty"]
