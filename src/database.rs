@@ -124,6 +124,12 @@ pub struct BotStatus {
     pub halt_alert_message_id: MessageId,
 }
 
+#[derive(Clone, PartialEq, Debug)]
+pub struct DuplicateContent {
+    pub username: String,
+    pub original_shortcode: String,
+}
+
 pub(crate) struct Database {
     pool: Arc<Mutex<Pool<SqliteConnectionManager>>>,
     username: String,
@@ -299,6 +305,14 @@ impl Database {
         )?;
 
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS duplicate_content (
+            username TEXT NOT NULL,
+            original_shortcode TEXT NOT NULL
+        )",
+            [],
+        )?;
+
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS bot_status (
             username TEXT NOT NULL,
             message_id INTEGER NOT NULL,
@@ -463,6 +477,19 @@ impl DatabaseTransaction {
 
         Ok(())
     }
+    
+    pub fn save_duplicate_content(&mut self, duplicate_content: DuplicateContent) -> Result<()> {
+        let tx = self.conn.transaction()?;
+
+        tx.execute(
+            "INSERT INTO duplicate_content (username, original_shortcode) VALUES (?1, ?2)",
+            params![duplicate_content.username, duplicate_content.original_shortcode],
+        )?;
+
+        tx.commit()?;
+
+        Ok(())
+    }
 
     pub fn _get_content_info_by_message_id(&mut self, message_id: MessageId) -> Option<ContentInfo> {
         let video_mapping = self.load_content_mapping().unwrap();
@@ -604,16 +631,16 @@ impl DatabaseTransaction {
         let mut user_settings = self.load_user_settings().unwrap();
         user_settings.current_page += 1;
         self._save_user_settings(&user_settings).unwrap();
-        self.load_page()
+        self._load_page()
     }
 
     pub fn _load_previous_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let mut user_settings = self.load_user_settings().unwrap();
         user_settings.current_page -= 1;
         self._save_user_settings(&user_settings).unwrap();
-        self.load_page()
+        self._load_page()
     }
-    pub fn load_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
+    pub fn _load_page(&mut self) -> Result<IndexMap<MessageId, ContentInfo>> {
         let user_settings = self.load_user_settings().unwrap();
         let current_page = user_settings.current_page as i64;
 
@@ -1253,7 +1280,15 @@ impl DatabaseTransaction {
 
     pub fn does_content_exist_with_shortcode(&mut self, shortcode: String) -> bool {
         // Execute each statement and check if the URL exists
-        let tables = ["content_info", "posted_content", "content_queue", "rejected_content", "failed_content"];
+        let tables = ["content_info", "posted_content", "content_queue", "rejected_content", "failed_content", "duplicate_content"];
+        let exists = tables.iter().any(|table| self.shortcode_exists_in_table(table, &shortcode));
+
+        exists
+    }
+
+    pub fn does_content_exist_with_shortcode_in_queue(&mut self, shortcode: String) -> bool {
+        // Execute each statement and check if the URL exists
+        let tables = ["content_queue"];
         let exists = tables.iter().any(|table| self.shortcode_exists_in_table(table, &shortcode));
 
         exists
@@ -1261,8 +1296,8 @@ impl DatabaseTransaction {
 
     fn shortcode_exists_in_table(&mut self, table_name: &str, shortcode: &str) -> bool {
         let tx = self.conn.transaction().unwrap();
-        let mut stmt = tx.prepare(&format!("SELECT url FROM {} WHERE original_shortcode = ?1 AND username = ?2", table_name)).unwrap();
-        let exists = stmt.query_map(params![shortcode, self.username], |row| Ok(row.get::<_, String>(0)?)).unwrap().next().is_some();
+        let mut stmt = tx.prepare(&format!("SELECT EXISTS(SELECT 1 FROM {} WHERE original_shortcode = ?1 AND username = ?2)", table_name)).unwrap();
+        let exists: bool = stmt.query_row(params![shortcode, self.username], |row| row.get(0)).unwrap();
         exists
     }
 

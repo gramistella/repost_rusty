@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;
 
-use crate::database::{ContentInfo, Database, DatabaseTransaction, FailedContent, PublishedContent, QueuedContent};
+use crate::database::{ContentInfo, Database, DatabaseTransaction, DuplicateContent, FailedContent, PublishedContent, QueuedContent};
 use crate::discord_bot::bot::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
 use crate::discord_bot::state::ContentStatus;
 use crate::discord_bot::utils::now_in_my_timezone;
@@ -29,7 +29,6 @@ pub struct ScraperPoster {
     username: String,
     scraper: Arc<Mutex<InstagramScraper>>,
     database: Database,
-    is_restricted: bool,
     is_offline: bool,
     cookie_store_path: String,
     credentials: HashMap<String, String>,
@@ -47,7 +46,6 @@ impl ScraperPoster {
             username,
             scraper,
             database,
-            is_restricted: false,
             is_offline,
             cookie_store_path,
             credentials,
@@ -102,15 +100,22 @@ impl ScraperPoster {
                             let video_exists = process_video(&mut transaction, &video_file_name).await.unwrap();
 
                             if video_exists {
-                                println!("The same video is already in the database with a different shortcode, skipping");
+                                
+                                println!("The same video is already in the database with a different shortcode, skipping! :)");
+                                
+                                let duplicate_content = DuplicateContent{
+                                    username: username.clone(),
+                                    original_shortcode: shortcode.clone(),
+                                };
+                                
+                                transaction.save_duplicate_content(duplicate_content).unwrap();
                                 continue;
                             }
 
+                            // Upload the video to S3
                             let s3_filename = format!("{}/{}", username, video_file_name);
                             let url = upload_to_s3(video_file_name, s3_filename, true).await.unwrap();
-                            //println!("Uploaded video to S3: {}", url);
 
-                            // https://repostrusty.s3.eu-north-1.amazonaws.com/repostrusty/l87JT2wtDw8l8rJT2wtDw8l8rJT2wsLw8l8rJT24sLw8.mp4?response-content-disposition=inline&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEDkaCmV1LW5vcnRoLTEiSDBGAiEAoisNDhlUd45arOMYG58kGHfWajpfkfXoGUR7QoSYGxMCIQDUrRFzx%2BzFTs%2F1QpOYEmVEscC%2BkLcX9EXGX%2BPiAbJK2irtAgiC%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAAaDDU5MDE4MzY1MzAzNyIMDaI7c6TWpw%2FK2hUgKsECKJGDTT2I6ienaogLn9rDW%2FW%2Fsfaan9Dlcf7ppwzcr2xR1XbcBQV5LpNnJBn7rVQVpuxPxzjqUIKBK1zelw3OgPCi0PVmrdv01uoaubPUL2bB3bUlMDzj%2F84uYTkUCOiktD8Z5Pp1TCCOWiXr3kCunJxnhXeUqA%2BnZh3pASqTsXGCX8VykiGhxEkHr%2BUtN%2FxkNtjNNq1x5N6dMouDp2wUgWW6iQ%2FbhUAtZc3qESLkmm%2F5u8nvyG2XwK%2Fx%2BP9K%2Bxs%2BiNqvyX0GqZoZxA%2FsM%2BdhWO6Mc27o6qenzzlcdxnKknG8PoHungl3tCBug3jQosk91YuoHq5qGTifFdnVkFvk%2BzY6fWErPVwk1twnZfbUKpndgPbqS7%2F%2FFUh%2BxoO0eBQTAPn8bnfr6xO9XPZxgJBsiSr3QJ8Pq4bQGLawt%2B21NpHcMMa4obEGOrICv8ZFDEh%2BjCIrKtaZ1HdqpljtfhGz0z3qz1Gm7y8PiTq%2BagF%2BWvGDk8GulTAxy%2F4CUxA5gEKWOdXyc8GHw5RHOxwvhq0QMhLveIrdCe1owdByMGSp9xhj3aWky9USwtsPi0Wv9UxdrVGNWnzUWxUXIAYjx7e298D9eFIKFQ2P%2FkdwYklMCBetHC%2F7jerHIHbVLAK4t3R%2BVy8SPc3KezQN3Qpuomv70%2Fphn8%2FG%2B14gJ1zX730fJOgOHBhUPfJGIXBGotXqKejLFRdTZoovSUHIkWMM7yc9d%2BAmFh606aYZttrwa73v4NkvdzPeaqzynS94nPzkqMW%2FhX0qwMVzFLUWcgt06aiJ8KwYZ3r80QaT9gyxsH7jDGXYx6v9sGDuEjLWEYCX%2BPI12GigFHmEd3TNB5RW&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20240424T014309Z&X-Amz-SignedHeaders=host&X-Amz-Expires=300&X-Amz-Credential=ASIAYS2NP32W6KBMYG53%2F20240424%2Feu-north-1%2Fs3%2Faws4_request&X-Amz-Signature=4eb4188047093c768d97ef242328307843f7a4551f1791cbc9c5a63b328b75da
                             let re = regex::Regex::new(r"#\w+").unwrap();
                             let cloned_caption = caption.clone();
                             let hashtags: Vec<&str> = re.find_iter(&cloned_caption).map(|mat| mat.as_str()).collect();
@@ -416,14 +421,15 @@ impl ScraperPoster {
             // get posts
             {
                 let mut scraper_guard = self.scraper.lock().await;
+                let mut tx = self.database.begin_transaction().await.unwrap();
+
                 match scraper_guard.scrape_posts(&user.id, 5).await {
                     Ok(scraped_posts) => {
-                        self.is_restricted = false;
+                        Self::set_bot_status_operational(&mut tx);
                         posts.insert(user.clone(), scraped_posts);
                     }
                     Err(e) => {
                         self.println(&format!("Error scraping posts: {}", e));
-                        let mut tx = self.database.begin_transaction().await.unwrap();
                         let mut bot_status = tx.load_bot_status().unwrap();
                         bot_status.status = 1;
                         tx.save_bot_status(&bot_status).unwrap();

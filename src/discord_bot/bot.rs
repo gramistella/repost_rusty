@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use chrono::DateTime;
 
 use indexmap::IndexMap;
-
 use serde::{Deserialize, Serialize};
 use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, MessageId, RatelimitInfo, UserId};
 use serenity::async_trait;
@@ -12,12 +10,11 @@ use serenity::model::channel::Message;
 use serenity::prelude::*;
 use tokio::time::sleep;
 
-use crate::database::{ContentInfo, Database, DatabaseTransaction};
+use crate::database::{Database, DatabaseTransaction};
 use crate::discord_bot::commands::{edit_caption, Data};
 use crate::discord_bot::interactions::{EditedContent, EditedContentKind};
 use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::{clear_all_messages, now_in_my_timezone, prune_expired_content};
-use crate::s3::s3_helper::S3_EXPIRATION_TIME;
+use crate::discord_bot::utils::{clear_all_messages, prune_expired_content};
 
 pub(crate) const REFRESH_RATE: Duration = Duration::from_millis(500);
 
@@ -63,7 +60,7 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
         let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
 
-        if msg.channel_id == channel_id && msg.author.bot == false {
+        if msg.channel_id == channel_id && !msg.author.bot {
             let edited_content = self.edited_content.lock().await;
             if edited_content.is_some() {
                 let mut edited_content = edited_content.clone().unwrap();
@@ -217,11 +214,10 @@ impl Handler {
         let content_mapping = tx.load_content_mapping().unwrap();
 
         for (mut content_id, mut content) in content_mapping {
-            
-            if prune_expired_content(tx, &mut content) { 
-                continue; 
+            if prune_expired_content(tx, &mut content) {
+                continue;
             }
-            
+
             // Check if the bot is currently handling an interaction
             let mut tx = self.database.begin_transaction().await.unwrap();
             let is_handling_interaction = self.interaction_mutex.try_lock();
@@ -246,7 +242,6 @@ impl Handler {
             }
         }
     }
-    
 }
 
 impl DiscordBot {
@@ -336,13 +331,12 @@ impl DiscordBot {
             let mut bot_status = tx.load_bot_status().unwrap();
             let mut is_message_there = false;
             for message in messages {
-                if message.author.name == *username && message.author.bot && message.content.contains("Bot is") {
+                if message.author.name == *username && message.author.bot && message.content.contains("Last updated at") {
                     if bot_status.message_id == message.id {
                         is_message_there = true;
                     } else {
                         is_message_there = true;
                         bot_status.message_id = message.id;
-                        tx.save_bot_status(&bot_status).unwrap();
                     }
                 } else {
                     message.delete(&client.http).await.unwrap();
@@ -353,8 +347,13 @@ impl DiscordBot {
             // so that it will be sent by view.rs
             if !is_message_there && bot_status.message_id.get() != 1 {
                 bot_status.message_id = MessageId::new(1);
-                tx.save_bot_status(&bot_status).unwrap();
             }
+            
+            // Reset the message ids for the alerts to function properly when restarting the bot
+            bot_status.halt_alert_message_id = MessageId::new(1);
+            bot_status.queue_alert_message_id = MessageId::new(1);
+
+            tx.save_bot_status(&bot_status).unwrap();
         }
 
         let msg = CreateMessage::new().content("Welcome back! 🦀");

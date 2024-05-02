@@ -248,11 +248,15 @@ pub fn handle_msg_deletion(delete_msg_result: Result<(), SerenityError>) {
     }
 }
 
-pub fn prune_expired_content(tx: &mut DatabaseTransaction, mut content: &mut ContentInfo) -> bool {
+pub fn prune_expired_content(tx: &mut DatabaseTransaction, content: &mut ContentInfo) -> bool {
     let added_at = DateTime::parse_from_rfc3339(&content.added_at).unwrap();
     let user_settings = tx.load_user_settings().unwrap();
-    if added_at > (now_in_my_timezone(&user_settings) - Duration::seconds(S3_EXPIRATION_TIME as i64)) {
+    if now_in_my_timezone(&user_settings) > (added_at + Duration::seconds(S3_EXPIRATION_TIME as i64)) {
         tx.remove_content_info_with_shortcode(content.original_shortcode.clone()).unwrap();
+        let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content.original_shortcode.clone());
+        if is_in_queue {
+            tx.remove_post_from_queue_with_shortcode(content.original_shortcode.clone()).unwrap();
+        }
         return true;
     }
     false
