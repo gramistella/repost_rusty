@@ -31,7 +31,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ffmpeg
 
 # Copy the built executable and configuration from the builder stage
-COPY --from=builder /repostrusty/config/ /repostrusty/config
+# COPY --from=builder /repostrusty/config/ /repostrusty/config
 COPY --from=builder /repostrusty/target/release/repost_rusty /repostrusty/target/release/repost_rusty
 
 WORKDIR /repostrusty

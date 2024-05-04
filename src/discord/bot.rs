@@ -11,10 +11,10 @@ use serenity::prelude::*;
 use tokio::time::sleep;
 
 use crate::database::{Database, DatabaseTransaction};
-use crate::discord_bot::commands::{edit_caption, Data};
-use crate::discord_bot::interactions::{EditedContent, EditedContentKind};
-use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::{clear_all_messages, prune_expired_content};
+use crate::discord::commands::{edit_caption, Data};
+use crate::discord::interactions::{EditedContent, EditedContentKind};
+use crate::discord::state::ContentStatus;
+use crate::discord::utils::{clear_all_messages, prune_expired_content};
 
 pub(crate) const REFRESH_RATE: Duration = Duration::from_millis(500);
 
@@ -27,7 +27,9 @@ pub(crate) const STATUS_CHANNEL_ID: ChannelId = ChannelId::new(12335475648804986
 
 #[derive(Clone)]
 pub struct Handler {
+    pub username: String,
     pub database: Database,
+    pub credentials: HashMap<String, String>,
     pub ui_definitions: UiDefinitions,
     pub edited_content: Arc<Mutex<Option<EditedContent>>>,
     pub interaction_mutex: Arc<Mutex<()>>,
@@ -45,11 +47,7 @@ pub struct DiscordBot {
     client: Arc<Mutex<Client>>,
 }
 
-// Not sure why but the IDE is not recognizing this as being read
-#[allow(dead_code)]
-pub(crate) struct ChannelIdMap {
-    channel_id: ChannelId,
-}
+pub(crate) struct ChannelIdMap {}
 
 impl TypeMapKey for ChannelIdMap {
     type Value = ChannelId;
@@ -58,17 +56,15 @@ impl TypeMapKey for ChannelIdMap {
 #[async_trait]
 impl EventHandler for Handler {
     async fn message(&self, ctx: Context, msg: Message) {
-        let channel_id = ctx.data.read().await.get::<ChannelIdMap>().unwrap().clone();
+        let channel_id = *ctx.data.read().await.get::<ChannelIdMap>().unwrap();
 
         if msg.channel_id == channel_id && !msg.author.bot {
             let edited_content = self.edited_content.lock().await;
             if edited_content.is_some() {
                 let mut edited_content = edited_content.clone().unwrap();
 
-                let received_edit;
-                if msg.content == "!" {
-                    received_edit = "".to_string();
-                } else {
+                let mut received_edit = "".to_string();
+                if msg.content != "!" {
                     received_edit = msg.content.clone();
                 }
 
@@ -92,24 +88,31 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
-        let mut tx = self.database.begin_transaction().await.unwrap();
-        let self_clone = Arc::new(Mutex::new(self.clone()));
-        // Assuming `self` is an instance of `DiscordBot`
+        let mut first_run = true;
+        loop {
+            let mut tx = self.database.begin_transaction().await.unwrap();
+            let self_clone = self.clone();
+            let ctx_clone = ctx.clone();
 
-        tokio::spawn(async move {
-            loop {
-                {
-                    let self_clone = self_clone.lock().await;
-                    self_clone.ready_loop(&ctx, &mut tx).await;
-                }
-                sleep(REFRESH_RATE).await;
+            let task = tokio::spawn(async move {
+                self_clone.ready_loop(&ctx_clone, &mut tx).await;
+            });
+
+            task.await.unwrap();
+
+            if first_run {
+                let mut tx = self.database.begin_transaction().await.unwrap();
+                println!(" [{}] Discord bot finished warming up.", self.username);
+                let mut bot_status = tx.load_bot_status().unwrap();
+                bot_status.is_discord_warmed_up = true;
+                tx.save_bot_status(&bot_status).unwrap();
+                first_run = false;
             }
-        });
+
+            sleep(REFRESH_RATE).await;
+        }
     }
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        //let _guard = self.inner_event_handler.execution_mutex.lock().await;
-        //println!("Interaction received: {:?}", interaction);
-
         let response = CreateInteractionResponse::Acknowledge;
         response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
 
@@ -135,7 +138,7 @@ impl EventHandler for Handler {
             if bot_status.message_id == original_message_id {
                 match interaction_type.as_str() {
                     "resume_from_halt" => {
-                        self.interaction_resume_from_halt(&mut bot_status).await;
+                        self.interaction_resume_from_halt(&mut bot_status, &mut tx).await;
                     }
                     _ => {
                         tracing::error!("Unhandled interaction type: {:?}", interaction_type);
@@ -150,19 +153,19 @@ impl EventHandler for Handler {
 
             match interaction_type.as_str() {
                 "publish_now" => {
-                    self.interaction_publish_now(&mut content).await;
+                    self.interaction_publish_now(&mut content, &mut tx).await;
                 }
                 "accept" => {
-                    self.interaction_accepted(&mut content).await;
+                    self.interaction_accepted(&mut content, &mut tx).await;
                 }
                 "remove_from_queue" => {
-                    self.interaction_remove_from_queue(&mut content).await;
+                    self.interaction_remove_from_queue(&mut content, &mut tx).await;
                 }
                 "reject" => {
-                    self.interaction_rejected(&mut content).await;
+                    self.interaction_rejected(&mut content, &mut tx).await;
                 }
                 "undo_rejected" => {
-                    self.interaction_undo_rejected(&mut content).await;
+                    self.interaction_undo_rejected(&mut content, &mut tx).await;
                 }
                 "remove_from_view" => {
                     self.interaction_remove_from_view(&ctx, original_message_id, &mut content).await;
@@ -204,7 +207,6 @@ impl Handler {
         // Check if the bot is currently editing a message
         {
             let is_editing = self.edited_content.lock().await;
-
             if is_editing.is_some() {
                 return;
             }
@@ -219,7 +221,6 @@ impl Handler {
             }
 
             // Check if the bot is currently handling an interaction
-            let mut tx = self.database.begin_transaction().await.unwrap();
             let is_handling_interaction = self.interaction_mutex.try_lock();
             match is_handling_interaction {
                 Ok(_) => {}
@@ -230,15 +231,14 @@ impl Handler {
                 }
             }
 
-            //println!("Processing content: {}", content_id);
             match content.status {
                 ContentStatus::Waiting => {}
                 ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(content.original_shortcode).unwrap(),
-                ContentStatus::Pending { .. } => self.process_pending(ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Queued { .. } => self.process_queued(ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Published { .. } => self.process_published(ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Rejected { .. } => self.process_rejected(ctx, &mut tx, &mut content_id, &mut content).await,
-                ContentStatus::Failed { .. } => self.process_failed(ctx, &mut tx, &mut content_id, &mut content).await,
+                ContentStatus::Pending { .. } => self.process_pending(ctx, tx, &mut content_id, &mut content).await,
+                ContentStatus::Queued { .. } => self.process_queued(ctx, tx, &mut content_id, &mut content).await,
+                ContentStatus::Published { .. } => self.process_published(ctx, tx, &mut content_id, &mut content).await,
+                ContentStatus::Rejected { .. } => self.process_rejected(ctx, tx, &mut content_id, &mut content).await,
+                ContentStatus::Failed { .. } => self.process_failed(ctx, tx, &mut content_id, &mut content).await,
             }
         }
     }
@@ -270,6 +270,8 @@ impl DiscordBot {
         // Create a new instance of the Client, logging in as a bot.
         let client = Client::builder(token, intents)
             .event_handler(Handler {
+                username: username.clone(),
+                credentials: credentials.clone(),
                 database: database.clone(),
                 ui_definitions: ui_definitions.clone(),
                 edited_content: Arc::new(Mutex::new(None)),
@@ -348,7 +350,7 @@ impl DiscordBot {
             if !is_message_there && bot_status.message_id.get() != 1 {
                 bot_status.message_id = MessageId::new(1);
             }
-            
+
             // Reset the message ids for the alerts to function properly when restarting the bot
             bot_status.halt_alert_message_id = MessageId::new(1);
             bot_status.queue_alert_message_id = MessageId::new(1);

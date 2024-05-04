@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use serenity::all::MessageId;
 use tokio::sync::Mutex;
 
-use crate::discord_bot::bot::INTERFACE_UPDATE_INTERVAL;
-use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::now_in_my_timezone;
+use crate::discord::bot::INTERFACE_UPDATE_INTERVAL;
+use crate::discord::state::ContentStatus;
+use crate::discord::utils::now_in_my_timezone;
 use crate::IS_OFFLINE;
 
 const PROD_DB: &str = "db/prod.db";
@@ -119,6 +119,7 @@ pub struct BotStatus {
     /// 0 = all good, 1 = account awaiting manual intervention, 2 = Other
     pub status: i32,
     pub status_message: String,
+    pub is_discord_warmed_up: bool,
     pub last_updated_at: String,
     pub queue_alert_message_id: MessageId,
     pub halt_alert_message_id: MessageId,
@@ -318,6 +319,7 @@ impl Database {
             message_id INTEGER NOT NULL,
             status INTEGER NOT NULL,
             status_message TEXT NOT NULL,
+            is_discord_warmed_up BOOL NOT NULL,
             last_updated_at TEXT NOT NULL,
             queue_alert_message_id INTEGER NOT NULL,
             halt_alert_message_id INTEGER NOT NULL
@@ -329,7 +331,7 @@ impl Database {
 
         if !bot_status_exists {
             let query = format!(
-                "INSERT INTO bot_status (username, message_id, status, status_message, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES ('{}', 1, 0, 'operational  🟢', '{}', 1, 1)",
+                "INSERT INTO bot_status (username, message_id, status, status_message, is_discord_warmed_up, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES ('{}', 1, 0, 'operational  🟢', false, '{}', 1, 1)",
                 username,
                 Utc::now().to_rfc3339()
             );
@@ -427,26 +429,33 @@ impl DatabaseTransaction {
         let mut message_id: Option<u64> = None;
         let mut status: Option<i32> = None;
         let mut status_message: Option<String> = None;
+        let mut is_discord_warmed_up: Option<bool> = None;
         let mut last_updated_at: Option<String> = None;
         let mut queue_alert_message_id: Option<u64> = None;
         let mut halt_alert_message_id: Option<u64> = None;
         let tx = self.conn.transaction()?;
 
-        tx.query_row("SELECT message_id, status, status_message, last_updated_at, queue_alert_message_id, halt_alert_message_id FROM bot_status WHERE username = ?1", [self.username.clone()], |row| {
-            message_id = Some(row.get(0)?);
-            status = Some(row.get(1)?);
-            status_message = Some(row.get(2)?);
-            last_updated_at = Some(row.get(3)?);
-            queue_alert_message_id = Some(row.get(4)?);
-            halt_alert_message_id = Some(row.get(5)?);
-            Ok(())
-        })?;
+        tx.query_row(
+            "SELECT message_id, status, status_message, is_discord_warmed_up, last_updated_at, queue_alert_message_id, halt_alert_message_id FROM bot_status WHERE username = ?1",
+            [self.username.clone()],
+            |row| {
+                message_id = Some(row.get(0)?);
+                status = Some(row.get(1)?);
+                status_message = Some(row.get(2)?);
+                is_discord_warmed_up = Some(row.get(3)?);
+                last_updated_at = Some(row.get(4)?);
+                queue_alert_message_id = Some(row.get(5)?);
+                halt_alert_message_id = Some(row.get(6)?);
+                Ok(())
+            },
+        )?;
 
         let bot_status = BotStatus {
             username: self.username.clone(),
             message_id: MessageId::new(message_id.unwrap()),
             status: status.unwrap(),
             status_message: status_message.unwrap(),
+            is_discord_warmed_up: is_discord_warmed_up.unwrap(),
             last_updated_at: last_updated_at.unwrap(),
             queue_alert_message_id: MessageId::new(queue_alert_message_id.unwrap()),
             halt_alert_message_id: MessageId::new(halt_alert_message_id.unwrap()),
@@ -461,12 +470,13 @@ impl DatabaseTransaction {
         tx.execute("DELETE FROM bot_status WHERE username = ?1", [self.username.clone()])?;
 
         tx.execute(
-            "INSERT INTO bot_status (username, message_id, status, status_message, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO bot_status (username, message_id, status, status_message, is_discord_warmed_up, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 bot_status.username,
                 bot_status.message_id.get(),
                 bot_status.status,
                 bot_status.status_message,
+                bot_status.is_discord_warmed_up,
                 bot_status.last_updated_at,
                 bot_status.queue_alert_message_id.get(),
                 bot_status.halt_alert_message_id.get()
@@ -477,27 +487,40 @@ impl DatabaseTransaction {
 
         Ok(())
     }
-    
+
     pub fn save_duplicate_content(&mut self, duplicate_content: DuplicateContent) -> Result<()> {
         let tx = self.conn.transaction()?;
 
-        tx.execute(
-            "INSERT INTO duplicate_content (username, original_shortcode) VALUES (?1, ?2)",
-            params![duplicate_content.username, duplicate_content.original_shortcode],
-        )?;
+        tx.execute("INSERT INTO duplicate_content (username, original_shortcode) VALUES (?1, ?2)", params![duplicate_content.username, duplicate_content.original_shortcode])?;
 
         tx.commit()?;
 
         Ok(())
     }
 
+    pub fn load_duplicate_content(&mut self) -> Result<Vec<DuplicateContent>> {
+        let mut duplicate_content = Vec::new();
+        let tx = self.conn.transaction()?;
+
+        let mut stmt = tx.prepare("SELECT username, original_shortcode FROM duplicate_content")?;
+        let duplicate_content_iter = stmt.query_map([], |row| {
+            let username: String = row.get(0)?;
+            let original_shortcode: String = row.get(1)?;
+
+            Ok(DuplicateContent { username, original_shortcode })
+        })?;
+
+        for content in duplicate_content_iter {
+            duplicate_content.push(content?);
+        }
+
+        Ok(duplicate_content)
+    }
+
     pub fn _get_content_info_by_message_id(&mut self, message_id: MessageId) -> Option<ContentInfo> {
         let video_mapping = self.load_content_mapping().unwrap();
 
-        match video_mapping.get(&message_id) {
-            Some(content_info) => Some(content_info.clone()),
-            None => None,
-        }
+        video_mapping.get(&message_id).cloned()
     }
 
     pub fn get_content_info_by_shortcode(&mut self, shortcode: String) -> Option<(MessageId, ContentInfo)> {
@@ -717,12 +740,10 @@ impl DatabaseTransaction {
             max_message_id = max_message_id.map_or(Some(message_id), |max: i64| Some(max.max(message_id)));
         }
 
-        let max_message_id = match max_message_id {
+        match max_message_id {
             Some(max) => max + 1000,
             None => now_in_my_timezone(&user_settings).num_seconds_from_midnight() as i64,
-        };
-
-        max_message_id
+        }
     }
 
     pub fn remove_post_from_queue_with_shortcode(&mut self, shortcode: String) -> Result<()> {
@@ -851,45 +872,25 @@ impl DatabaseTransaction {
     pub fn get_queued_content_by_shortcode(&mut self, shortcode: String) -> Option<QueuedContent> {
         let content_queue = self.load_content_queue().unwrap();
 
-        for content in content_queue {
-            if content.original_shortcode == shortcode {
-                return Some(content);
-            }
-        }
-        None
+        content_queue.iter().find(|&content| content.original_shortcode == shortcode).cloned()
     }
 
     pub fn get_rejected_content_by_shortcode(&mut self, shortcode: String) -> Option<RejectedContent> {
         let rejected_content = self.load_rejected_content().unwrap();
 
-        for content in rejected_content {
-            if content.original_shortcode == shortcode {
-                return Some(content);
-            }
-        }
-        None
+        rejected_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
     }
 
     pub fn get_failed_content_by_shortcode(&mut self, shortcode: String) -> Option<FailedContent> {
         let failed_content = self.load_failed_content().unwrap();
 
-        for content in failed_content {
-            if content.original_shortcode == shortcode {
-                return Some(content);
-            }
-        }
-        None
+        failed_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
     }
 
     pub fn get_published_content_by_shortcode(&mut self, shortcode: String) -> Option<PublishedContent> {
-        let failed_content = self.load_posted_content().unwrap();
+        let published_content = self.load_posted_content().unwrap();
 
-        for content in failed_content {
-            if content.original_shortcode == shortcode {
-                return Some(content);
-            }
-        }
-        None
+        published_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
     }
 
     pub fn remove_rejected_content_with_shortcode(&mut self, shortcode: String) -> Result<()> {
@@ -970,11 +971,7 @@ impl DatabaseTransaction {
     ///
     /// Will automatically remove the content from the content_queue
     pub fn save_published_content(&mut self, posted_content: PublishedContent) -> Result<()> {
-        let queued_content = match self.get_queued_content_by_shortcode(posted_content.original_shortcode.clone()) {
-            None => None,
-            Some(post) => Some(post),
-        };
-
+        let queued_content = self.get_queued_content_by_shortcode(posted_content.original_shortcode.clone());
         let mut removed = false;
 
         if let Some(queued_content) = queued_content {
@@ -1194,7 +1191,7 @@ impl DatabaseTransaction {
 
         let posting_interval = Duration::try_seconds(user_settings.posting_interval * 60).unwrap();
         // Filter out the post times that are before the current time
-        post_times = post_times.into_iter().filter(|&time| time >= current_time - posting_interval).collect();
+        post_times.retain(|time| *time >= current_time - posting_interval);
 
         let random_interval = user_settings.random_interval_variance * 60;
         let mut rng = rand::thread_rng();
@@ -1313,12 +1310,10 @@ impl DatabaseTransaction {
 
         // Recalculate page numbers
         let mut new_content_info = IndexMap::new();
-        let mut index = 0;
-        for (message_id, mut info) in content_mapping {
+        for (index, (message_id, mut info)) in content_mapping.into_iter().enumerate() {
             let correct_page_num = ((index as f64 / page_size as f64) + 0.5).floor() as i32;
             info.page_num = correct_page_num;
             new_content_info.insert(message_id, info);
-            index += 1;
         }
 
         // Save the updated content info back to the database

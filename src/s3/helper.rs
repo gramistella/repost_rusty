@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use s3::bucket::Bucket;
 use s3::creds::Credentials;
 use s3::Region;
@@ -9,10 +11,11 @@ use crate::IS_OFFLINE;
 pub const S3_EXPIRATION_TIME: u32 = 60 * 60 * 24 * 7;
 
 //noinspection ALL
-pub async fn upload_to_s3(video_path: String, path_to_file: String, delete_from_local_storage: bool) -> Result<String, Box<dyn std::error::Error>> {
-    let access_key = Some("AKIAYS2NP32W7GLE6U57");
-    let secret_access_key = Some("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");
-    let creds = Credentials::new(access_key, secret_access_key, None, None, None).unwrap();
+pub async fn upload_to_s3(credentials: &HashMap<String, String>, video_path: String, path_to_file: String, delete_from_local_storage: bool) -> Result<String, Box<dyn std::error::Error>> {
+    let access_key = Some(credentials.get("s3_access_key").unwrap().as_str());
+    let secret_key = Some(credentials.get("s3_secret_key").unwrap().as_str());
+
+    let creds = Credentials::new(access_key, secret_key, None, None, None).unwrap();
     let bucket = s3::bucket::Bucket::new("repostrusty", Region::EuNorth1, creds).unwrap();
 
     let file_path = format!("temp/{}", video_path);
@@ -36,10 +39,11 @@ pub async fn upload_to_s3(video_path: String, path_to_file: String, delete_from_
     Ok(url)
 }
 
-pub async fn delete_from_s3(path_to_file: String) -> Result<(), Box<dyn std::error::Error>> {
-    let access_key = Some("AKIAYS2NP32W7GLE6U57");
-    let secret_access_key = Some("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");
-    let creds = Credentials::new(access_key, secret_access_key, None, None, None).unwrap();
+pub async fn delete_from_s3(credentials: &HashMap<String, String>, path_to_file: String) -> Result<(), Box<dyn std::error::Error>> {
+    let access_key = Some(credentials.get("s3_access_key").unwrap().as_str());
+    let secret_key = Some(credentials.get("s3_secret_key").unwrap().as_str());
+
+    let creds = Credentials::new(access_key, secret_key, None, None, None).unwrap();
     let bucket = Bucket::new("repostrusty", Region::EuNorth1, creds).unwrap();
 
     let mut final_path = path_to_file;

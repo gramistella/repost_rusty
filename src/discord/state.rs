@@ -58,9 +58,9 @@ impl FromStr for ContentStatus {
     }
 }
 
-impl ContentStatus {
-    pub fn to_string(&self) -> String {
-        get_status_string(self.clone())
+impl fmt::Display for ContentStatus {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", get_status_string(self.clone()))
     }
 }
 

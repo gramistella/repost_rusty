@@ -17,11 +17,11 @@ use tokio::time::sleep;
 use tracing::Instrument;
 
 use crate::database::{ContentInfo, Database, DatabaseTransaction, DuplicateContent, FailedContent, PublishedContent, QueuedContent};
-use crate::discord_bot::bot::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
-use crate::discord_bot::state::ContentStatus;
-use crate::discord_bot::utils::now_in_my_timezone;
-use crate::s3::s3_helper::upload_to_s3;
-use crate::video_processing::video_processing::process_video;
+use crate::discord::bot::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
+use crate::discord::state::ContentStatus;
+use crate::discord::utils::now_in_my_timezone;
+use crate::s3::helper::upload_to_s3;
+use crate::video::processing::process_video;
 use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
 #[derive(Clone)]
@@ -75,6 +75,7 @@ impl ScraperPoster {
 
         let mut transaction = self.database.begin_transaction().await.unwrap();
         let username = self.username.clone();
+        let credentials = self.credentials.clone();
         let sender_latest_content = Arc::clone(&self.latest_content_mutex);
         let sender_loop = tokio::spawn(async move {
             loop {
@@ -100,21 +101,20 @@ impl ScraperPoster {
                             let video_exists = process_video(&mut transaction, &video_file_name).await.unwrap();
 
                             if video_exists {
-                                
                                 println!("The same video is already in the database with a different shortcode, skipping! :)");
-                                
-                                let duplicate_content = DuplicateContent{
+
+                                let duplicate_content = DuplicateContent {
                                     username: username.clone(),
                                     original_shortcode: shortcode.clone(),
                                 };
-                                
+
                                 transaction.save_duplicate_content(duplicate_content).unwrap();
                                 continue;
                             }
 
                             // Upload the video to S3
                             let s3_filename = format!("{}/{}", username, video_file_name);
-                            let url = upload_to_s3(video_file_name, s3_filename, true).await.unwrap();
+                            let url = upload_to_s3(&credentials, video_file_name, s3_filename, true).await.unwrap();
 
                             let re = regex::Regex::new(r"#\w+").unwrap();
                             let cloned_caption = caption.clone();
@@ -169,12 +169,11 @@ impl ScraperPoster {
                     let mut inner_loop_iterations = 0;
                     for url in &testing_urls {
                         inner_loop_iterations += 1;
-                        let caption_string;
-                        if inner_loop_iterations == 2 {
-                            caption_string = format!("Video {}, loop {} #meme, will_fail", inner_loop_iterations, loop_iterations);
+                        let caption_string = if inner_loop_iterations == 2 {
+                            format!("Video {}, loop {} #meme, will_fail", inner_loop_iterations, loop_iterations)
                         } else {
-                            caption_string = format!("Video {}, loop {} #meme", inner_loop_iterations, loop_iterations);
-                        }
+                            format!("Video {}, loop {} #meme", inner_loop_iterations, loop_iterations)
+                        };
 
                         let mut latest_content_guard = scraper_latest_content.lock().await;
                         *latest_content_guard = Some((url.to_string(), caption_string.clone(), "local".to_string(), format!("shortcode{}", inner_loop_iterations)));
@@ -197,7 +196,7 @@ impl ScraperPoster {
 
                 loop {
                     let mut posts: HashMap<User, Vec<Post>> = HashMap::new();
-                    cloned_self.fetch_posts(&accounts_being_scraped, &mut posts).await;
+                    cloned_self.fetch_posts(accounts_being_scraped.clone(), &mut posts).await;
 
                     // Scrape the posts
                     cloned_self.scrape_posts(&accounts_to_scrape, &hashtag_mapping, &mut posts).await;
@@ -310,6 +309,7 @@ impl ScraperPoster {
                     let existing_posted_shortcodes: Vec<String> = transaction.load_posted_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
                     let existing_failed_shortcodes: Vec<String> = transaction.load_failed_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
                     let existing_rejected_shortcodes: Vec<String> = transaction.load_rejected_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                    let existing_duplicate_shortcodes: Vec<String> = transaction.load_duplicate_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
 
                     match existing_content_shortcodes.iter().position(|x| x == &post.shortcode) {
                         Some(_) => {
@@ -323,6 +323,8 @@ impl ScraperPoster {
                                 self.println(&format!("{base_print} Content already failed: {}", post.shortcode));
                             } else if existing_rejected_shortcodes.contains(&post.shortcode) {
                                 self.println(&format!("{base_print} Content already rejected: {}", post.shortcode));
+                            } else if existing_duplicate_shortcodes.contains(&post.shortcode) {
+                                self.println(&format!("{base_print} Content already scraped (dupe): {}", post.shortcode));
                             } else {
                                 let error_message = format!("{base_print} Content not found in any mapping: {}", post.shortcode);
                                 tracing::error!(error_message);
@@ -346,7 +348,7 @@ impl ScraperPoster {
             "\n-\n-\n-\n- credit: unknown (We do not claim ownership of this video, all rights are reserved and belong to their respective owners, no copyright infringement intended. Please DM us for credit/removal) tags:",
             "",
         );
-        let caption = caption.replace("-", "");
+        let caption = caption.replace('-', "");
         let caption = caption.replace("credit: unknown", "");
         let caption = caption.replace("(We do not claim ownership of this video, all rights are reserved and belong to their respective owners, no copyright infringement intended. Please DM us for credit/removal)", "");
         let caption = caption.replace("tags:", "");
@@ -354,7 +356,7 @@ impl ScraperPoster {
         let caption = caption.replace("#softcatmemes", "");
 
         // Catvibenow
-        let caption = caption.replace("•", "");
+        let caption = caption.replace('•', "");
         let caption = caption.replace("Follow @catvibenow for your cuteness update 🧐", "");
         let caption = caption.replace("Credit📸:", "");
         let caption = caption.replace("(We don’t own this picture/photo. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for removal.)", "");
@@ -371,14 +373,12 @@ impl ScraperPoster {
         let caption = caption.replace("Follow @gatosforyou for more", "");
 
         // kingcattos
-        let caption = caption.replace("-", "");
+        let caption = caption.replace('-', "");
 
         let mut hashtags = caption.split_whitespace().filter(|s| s.starts_with('#')).collect::<Vec<&str>>();
-        let selected_hashtags;
-        if hashtags.len() > 0 {
+        let selected_hashtags = if !hashtags.is_empty() {
             hashtags.shuffle(&mut rng);
-            let hashtags = hashtags.join(" ");
-            selected_hashtags = hashtags;
+            hashtags.join(" ")
         } else {
             let hashtag_type = accounts_to_scrape.get(&author.username.clone()).unwrap().clone();
             let specific_hashtags = hashtag_mapping.get(&hashtag_type).unwrap().clone();
@@ -397,11 +397,11 @@ impl ScraperPoster {
             let random_general_hashtag = general_hashtags.choose(&mut rng).unwrap().to_string();
 
             // Select three random specific hashtags
-            let random_specific_hashtags: Vec<&str> = specific_hashtags.choose_multiple(&mut rng, 3).map(|s| *s).collect();
+            let random_specific_hashtags: Vec<&str> = specific_hashtags.choose_multiple(&mut rng, 3).copied().collect();
 
             // Join the selected hashtags into a single string
-            selected_hashtags = format!("{} {} {} {}", random_general_hashtag, random_specific_hashtags.get(0).unwrap(), random_specific_hashtags.get(1).unwrap(), random_specific_hashtags.get(2).unwrap());
-        }
+            format!("{} {} {} {}", random_general_hashtag, random_specific_hashtags.first().unwrap(), random_specific_hashtags.get(1).unwrap(), random_specific_hashtags.get(2).unwrap())
+        };
 
         // Remove the hashtags from the caption
         let caption = caption.split_whitespace().filter(|s| !s.starts_with('#')).collect::<Vec<&str>>().join(" ");
@@ -410,7 +410,7 @@ impl ScraperPoster {
         caption
     }
 
-    async fn fetch_posts(&mut self, accounts_being_scraped: &Vec<User>, posts: &mut HashMap<User, Vec<Post>>) {
+    async fn fetch_posts(&mut self, accounts_being_scraped: Vec<User>, posts: &mut HashMap<User, Vec<Post>>) {
         let mut accounts_scraped = 0;
         let accounts_being_scraped_len = accounts_being_scraped.len();
         self.println("Fetching posts...");
@@ -583,7 +583,7 @@ impl ScraperPoster {
         let span = tracing::span!(tracing::Level::INFO, "poster_loop");
         let _enter = span.enter();
         let mut cloned_self = self.clone();
-        let poster_loop = tokio::spawn(async move {
+        tokio::spawn(async move {
             cloned_self.amend_queue().await;
             // Allow the scraper_poster to login
             sleep(Duration::from_secs(30)).await;
@@ -617,11 +617,11 @@ impl ScraperPoster {
                                         let big_spacer = "\n\n\n•\n•\n•\n•\n•\n";
                                         let small_spacer = "\n•\n";
                                         let disclaimer = "(We don’t own this content. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for credit/removal.)";
-                                        if queued_post.caption == "" && queued_post.hashtags == "" {
+                                        if queued_post.caption.is_empty() && queued_post.hashtags.is_empty() {
                                             full_caption = "".to_string();
-                                        } else if queued_post.caption == "" {
+                                        } else if queued_post.caption.is_empty() {
                                             full_caption = format!("{}", queued_post.hashtags);
-                                        } else if queued_post.hashtags == "" {
+                                        } else if queued_post.hashtags.is_empty() {
                                             full_caption = format!("{}", queued_post.caption);
                                         } else {
                                             full_caption = format!("{}{}{}{}{}", queued_post.caption, big_spacer, disclaimer, small_spacer, queued_post.hashtags);
@@ -646,7 +646,7 @@ impl ScraperPoster {
                                                     InstagramScraperError::UploadFailedRecoverable(_) => {
                                                         drop(scraper_guard);
                                                         if err.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
-                                                            cloned_self.println(&format!("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted."));
+                                                            cloned_self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
                                                             Self::set_bot_status_halted(&mut transaction);
                                                             loop {
                                                                 let bot_status = transaction.load_bot_status().unwrap();
@@ -660,7 +660,7 @@ impl ScraperPoster {
                                                                             break;
                                                                         }
                                                                         Err(_e) => {
-                                                                            cloned_self.println(&format!("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted."));
+                                                                            cloned_self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
                                                                             Self::set_bot_status_halted(&mut transaction);
                                                                         }
                                                                     }
@@ -669,12 +669,12 @@ impl ScraperPoster {
                                                                 }
                                                             }
                                                         } else {
-                                                            cloned_self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err.to_string()));
+                                                            cloned_self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err));
                                                             cloned_self.handle_recoverable_failed_content().await;
                                                         }
                                                     }
                                                     InstagramScraperError::UploadFailedNonRecoverable(_) => {
-                                                        cloned_self.println(&format!("[!] Couldn't upload content to instagram!\n [ERROR] {}\n{}", err.to_string(), queued_post.url));
+                                                        cloned_self.println(&format!("[!] Couldn't upload content to instagram!\n [ERROR] {}\n{}", err, queued_post.url));
                                                         drop(scraper_guard);
                                                         cloned_self.handle_failed_content(&mut queued_post).await;
                                                     }
@@ -683,15 +683,13 @@ impl ScraperPoster {
                                                 continue;
                                             }
                                         }
+                                    } else if queued_post.caption.contains("will_fail") {
+                                        cloned_self.println(&format!("[!] Failed to upload content offline: {}", queued_post.url));
+                                        drop(scraper_guard);
+                                        cloned_self.handle_failed_content(&mut queued_post).await;
+                                        continue;
                                     } else {
-                                        if queued_post.caption.contains("will_fail") {
-                                            cloned_self.println(&format!("[!] Failed to upload content offline: {}", queued_post.url));
-                                            drop(scraper_guard);
-                                            cloned_self.handle_failed_content(&mut queued_post).await;
-                                            continue;
-                                        } else {
-                                            cloned_self.println(&format!("[!] Uploaded content offline: {}", queued_post.url));
-                                        }
+                                        cloned_self.println(&format!("[!] Uploaded content offline: {}", queued_post.url));
                                     }
 
                                     let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
@@ -730,8 +728,7 @@ impl ScraperPoster {
                 // Don't remove this sleep, without it the bot becomes completely unresponsive
                 sleep(REFRESH_RATE).await;
             }
-        });
-        poster_loop
+        })
     }
 
     async fn handle_failed_content(&mut self, queued_post: &mut QueuedContent) {

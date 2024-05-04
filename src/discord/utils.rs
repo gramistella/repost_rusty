@@ -7,10 +7,10 @@ use regex::Regex;
 use serenity::all::{ChannelId, CreateActionRow, CreateButton, Http, Message};
 use serenity::prelude::SerenityError;
 
-use crate::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
-use crate::discord_bot::bot::UiDefinitions;
-use crate::discord_bot::state::ContentStatus;
-use crate::s3::s3_helper::S3_EXPIRATION_TIME;
+use crate::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, QueuedContent, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
+use crate::discord::bot::UiDefinitions;
+use crate::discord::state::ContentStatus;
+use crate::s3::helper::S3_EXPIRATION_TIME;
 
 pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
     // let upper_spacer = "^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^";
@@ -79,9 +79,56 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             format!("{base_caption}\n{}\n{}\n‎", failed_caption, countdown_caption)
         }
         _ => {
-            panic!("Invalid status {}", content_info.status.to_string());
+            panic!("Invalid status {}", content_info.status);
         }
     }
+}
+
+pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: Vec<ContentInfo>, content_queue: Vec<QueuedContent>, now: DateTime<Utc>) -> String {
+    let mut full_status_string = bot_status.status_message.clone();
+    if !bot_status.is_discord_warmed_up {
+        full_status_string = format!("{}, but discord is still warming up...", full_status_string);
+    }
+
+    //
+    let content_mapping_len = content_mapping.len();
+    let content_mapping_status_string;
+    if content_mapping_len == 0 {
+        content_mapping_status_string = "Not managing any content right now :3".to_string();
+    } else if content_mapping_len == 1 {
+        content_mapping_status_string = format!("Currently managing only {} piece of content", content_mapping_len);
+    } else {
+        content_mapping_status_string = format!("Currently managing {} pieces of content", content_mapping_len);
+    }
+
+    // Handle queue string
+    let queueable_content = content_mapping.iter().filter(|content| content.status == ContentStatus::Pending { shown: true }).count();
+    let content_queue_len = content_queue.len();
+    let last_post_time = content_queue.iter().max_by_key(|content| DateTime::parse_from_rfc3339(&content.will_post_at).unwrap()).map(|content| DateTime::parse_from_rfc3339(&content.will_post_at).unwrap());
+
+    let mut content_queue_string;
+    if content_queue_len > 0 {
+        if content_queue_len == 1 {
+            content_queue_string = format!("Currently there is {} queued post", 1);
+        } else {
+            content_queue_string = format!("Currently there are {} queued posts", content_queue_len);
+        }
+
+
+        if queueable_content > 0 {
+            content_queue_string = format!("{}, but you can add up to {} more!", content_queue_string, queueable_content);
+        }
+        content_queue_string = format!("{}\n\nLast post is scheduled on {}", content_queue_string, last_post_time.unwrap().format("%Y-%m-%d at %H:%M:%S"));
+    } else if content_queue_len == 0 && queueable_content == 0 {
+        content_queue_string = "Currently there are no queued posts!".to_string();
+    } else {
+        content_queue_string = "Currently there are no queued posts! You should probably add some because, you know, you can :3".to_string();
+    }
+
+    let formatted_now = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let msg_caption = format!("Bot is {}\n\n{}\n\n{}\n\nLast updated at: {}", full_status_string, content_mapping_status_string, content_queue_string, formatted_now);
+
+    msg_caption
 }
 
 /// Clears all messages in the chat and sets all content statuses to hidden.
@@ -202,9 +249,9 @@ pub async fn should_update_buttons(old_msg: Message, new_buttons: Vec<CreateActi
         CUSTOM_ID_REGEX.captures_iter(component_description).filter_map(|cap| cap.get(1).map(|match_| match_.as_str().to_string())).collect()
     }
 
-    let first_component_element = match old_msg.components.get(0) {
+    let first_component_element = match old_msg.components.first() {
         Some(component) => component,
-        None => return if new_buttons.is_empty() { false } else { true },
+        None => return !new_buttons.is_empty(),
     };
 
     let old_components = first_component_element.components.clone();

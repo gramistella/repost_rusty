@@ -14,14 +14,14 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
 use crate::database::Database;
-use crate::discord_bot::bot::DiscordBot;
+use crate::discord::bot::DiscordBot;
 use crate::scraper_poster::scraper::ScraperPoster;
 
 mod database;
-mod discord_bot;
+mod discord;
 mod s3;
 mod scraper_poster;
-mod video_processing;
+mod video;
 
 // Main configuration
 const IS_OFFLINE: bool = false;
