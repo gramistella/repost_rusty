@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
+use serenity::all::{ChannelId, GuildId, UserId};
 
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -23,14 +24,28 @@ mod s3;
 mod scraper_poster;
 mod video;
 
-// Main configuration
-const IS_OFFLINE: bool = false;
 
-// Scraper configuration
+// Constants that can be changed
+pub(crate) const MY_DISCORD_ID: UserId = UserId::new(465494062275756032);
+pub(crate) const GUILD_ID: GuildId = GuildId::new(1090413253592612917);
+pub(crate) const POSTED_CHANNEL_ID: ChannelId = ChannelId::new(1228041627898216469);
+pub(crate) const STATUS_CHANNEL_ID: ChannelId = ChannelId::new(1233547564880498688);
+
+// Internal configuration, don't change the constants below
+const IS_OFFLINE: bool = false;
+pub(crate) const REFRESH_RATE: Duration = Duration::from_millis(500);
+
+// Internal scraper configuration
 const MAX_CONTENT_PER_ITERATION: usize = 8;
 const FETCH_SLEEP_LEN: Duration = Duration::from_secs(60);
 const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 20);
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 60 * 12);
+
+// Internal S3 configuration
+pub const S3_EXPIRATION_TIME: u32 = 60 * 60 * 24 * 7;
+
+// Internal Discord configuration
+pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(120);
 
 fn main() -> anyhow::Result<()> {
     env::set_var("RUST_BACKTRACE", "full");

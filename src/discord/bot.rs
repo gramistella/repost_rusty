@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, GuildId, Interaction, MessageId, RatelimitInfo, UserId};
+use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, Interaction, MessageId, RatelimitInfo};
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::prelude::*;
@@ -15,15 +14,7 @@ use crate::discord::commands::{edit_caption, Data};
 use crate::discord::interactions::{EditedContent, EditedContentKind};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{clear_all_messages, prune_expired_content};
-
-pub(crate) const REFRESH_RATE: Duration = Duration::from_millis(500);
-
-pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(120);
-
-pub(crate) const MY_DISCORD_ID: UserId = UserId::new(465494062275756032);
-pub(crate) const GUILD_ID: GuildId = GuildId::new(1090413253592612917);
-pub(crate) const POSTED_CHANNEL_ID: ChannelId = ChannelId::new(1228041627898216469);
-pub(crate) const STATUS_CHANNEL_ID: ChannelId = ChannelId::new(1233547564880498688);
+use crate::{GUILD_ID, POSTED_CHANNEL_ID, REFRESH_RATE, STATUS_CHANNEL_ID};
 
 #[derive(Clone)]
 pub struct Handler {

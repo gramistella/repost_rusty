@@ -6,11 +6,12 @@ use serenity::all::{ChannelId, Context, CreateActionRow, CreateAttachment, Creat
 use tokio::time::sleep;
 
 use crate::database::{ContentInfo, DatabaseTransaction, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
-use crate::discord::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
+use crate::discord::bot::{ChannelIdMap, Handler};
 use crate::discord::state::ContentStatus;
 use crate::discord::state::ContentStatus::RemovedFromView;
 use crate::discord::utils::{generate_bot_status_caption, generate_full_caption, get_bot_status_buttons, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, handle_msg_deletion, now_in_my_timezone, should_update_buttons, should_update_caption};
 use crate::s3::helper::delete_from_s3;
+use crate::{INTERFACE_UPDATE_INTERVAL, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 
 impl Handler {
     pub async fn process_bot_status(&self, ctx: &Context, tx: &mut DatabaseTransaction) {
@@ -78,17 +79,7 @@ impl Handler {
         } else {
             content_info.status = ContentStatus::Pending { shown: true };
 
-            let video_attachment = match CreateAttachment::url(&ctx.http, &content_info.url).await {
-                Ok(attachment) => attachment,
-                Err(e) => {
-                    tracing::error!("Error creating attachment for url {} {:?}", content_info.url, e);
-
-                    content_info.status = RemovedFromView;
-                    let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
-                    tx.save_content_mapping(content_mapping).unwrap();
-                    return;
-                }
-            };
+            let video_attachment= get_video_attachment(ctx, content_info).await;
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
@@ -139,19 +130,7 @@ impl Handler {
         } else {
             content_info.status = ContentStatus::Queued { shown: true };
 
-            let video_attachment = match CreateAttachment::url(&ctx.http, &content_info.url).await {
-                Ok(attachment) => attachment,
-                Err(_) => {
-                    sleep(Duration::seconds(1).to_std().unwrap()).await;
-                    match CreateAttachment::url(&ctx.http, &content_info.url).await {
-                        Ok(attachment) => attachment,
-                        Err(e) => {
-                            tracing::error!("Error creating attachment for url {} {:?}", content_info.url, e);
-                            panic!("Error creating attachment for url {} {:?}", content_info.url, e);
-                        }
-                    }
-                }
-            };
+            let video_attachment= get_video_attachment(ctx, content_info).await;
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
 
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
@@ -188,7 +167,7 @@ impl Handler {
         } else {
             content_info.status = ContentStatus::Rejected { shown: true };
 
-            let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
+            let video_attachment= get_video_attachment(ctx, content_info).await;
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
 
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
@@ -219,7 +198,8 @@ impl Handler {
         } else {
             content_info.status = ContentStatus::Published { shown: true };
 
-            let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
+            let video_attachment= get_video_attachment(ctx, content_info).await;
+            
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
 
@@ -250,7 +230,7 @@ impl Handler {
         } else {
             content_info.status = ContentStatus::Failed { shown: true };
 
-            let video_attachment = CreateAttachment::url(&ctx.http, &content_info.url).await.unwrap();
+            let video_attachment= get_video_attachment(ctx, content_info).await;
 
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
@@ -324,5 +304,21 @@ async fn handle_shown_message_update(ctx: &Context, channel_id: ChannelId, conte
 async fn handle_deletion_due_to_expiration(credentials: &HashMap<String, String>, ctx: &Context, content_id: &mut MessageId, content_info: &mut ContentInfo, channel_id: ChannelId, now: DateTime<Utc>, will_expire_at: DateTime<FixedOffset>) {
     if will_expire_at.with_timezone(&Utc) < now {
         handle_content_deletion(credentials, ctx, content_id, content_info, channel_id).await;
+    }
+}
+
+async fn get_video_attachment(ctx: &Context, content_info: &ContentInfo) -> CreateAttachment {
+    match CreateAttachment::url(&ctx.http, &content_info.url).await {
+        Ok(attachment) => attachment,
+        Err(_) => {
+            sleep(Duration::seconds(1).to_std().unwrap()).await;
+            match CreateAttachment::url(&ctx.http, &content_info.url).await {
+                Ok(attachment) => attachment,
+                Err(e) => {
+                    tracing::error!("Error creating attachment for url {} {:?}", content_info.url, e);
+                    panic!("Error creating attachment for url {} {:?}", content_info.url, e);
+                }
+            }
+        }
     }
 }

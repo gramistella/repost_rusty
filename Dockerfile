@@ -19,7 +19,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY ./Cargo.lock ./Cargo.lock
 COPY ./Cargo.toml ./Cargo.toml
 COPY ./src ./src
-COPY ./config ./config
+COPY ./config/ui_definitions.yaml ./config/ui_definitions.yaml
 
 # Build the application
 RUN cargo build --release

@@ -4,10 +4,11 @@ use chrono::Duration;
 use serenity::all::{Context, CreateMessage, EditMessage, Interaction, Mention, MessageId, MessageReference};
 
 use crate::database::{BotStatus, ContentInfo, DatabaseTransaction, QueuedContent, RejectedContent};
-use crate::discord::bot::{ChannelIdMap, Handler, INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
+use crate::discord::bot::{ChannelIdMap, Handler};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{generate_full_caption, get_edit_buttons, get_pending_buttons, now_in_my_timezone};
 use crate::discord::view::handle_content_deletion;
+use crate::{INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
 
 impl Handler {
     pub async fn interaction_resume_from_halt(&self, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {

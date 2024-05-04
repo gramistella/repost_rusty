@@ -10,7 +10,7 @@ use serenity::prelude::SerenityError;
 use crate::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, QueuedContent, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord::bot::UiDefinitions;
 use crate::discord::state::ContentStatus;
-use crate::s3::helper::S3_EXPIRATION_TIME;
+use crate::S3_EXPIRATION_TIME;
 
 pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
     // let upper_spacer = "^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^";

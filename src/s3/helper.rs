@@ -6,9 +6,8 @@ use s3::Region;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
-use crate::IS_OFFLINE;
+use crate::{IS_OFFLINE, S3_EXPIRATION_TIME};
 
-pub const S3_EXPIRATION_TIME: u32 = 60 * 60 * 24 * 7;
 
 //noinspection ALL
 pub async fn upload_to_s3(credentials: &HashMap<String, String>, video_path: String, path_to_file: String, delete_from_local_storage: bool) -> Result<String, Box<dyn std::error::Error>> {

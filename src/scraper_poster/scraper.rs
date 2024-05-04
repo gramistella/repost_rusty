@@ -17,7 +17,7 @@ use tokio::time::sleep;
 use tracing::Instrument;
 
 use crate::database::{ContentInfo, Database, DatabaseTransaction, DuplicateContent, FailedContent, PublishedContent, QueuedContent};
-use crate::discord::bot::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
+use crate::{INTERFACE_UPDATE_INTERVAL, REFRESH_RATE};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::s3::helper::upload_to_s3;

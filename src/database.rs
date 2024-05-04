@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serenity::all::MessageId;
 use tokio::sync::Mutex;
 
-use crate::discord::bot::INTERFACE_UPDATE_INTERVAL;
+use crate::INTERFACE_UPDATE_INTERVAL;
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::IS_OFFLINE;
