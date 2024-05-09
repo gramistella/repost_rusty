@@ -17,6 +17,21 @@ impl Handler {
         bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         tx.save_bot_status(bot_status).unwrap()
     }
+
+    pub async fn interaction_enable_manual_mode(&self, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
+        bot_status.manual_mode = true;
+        bot_status.status_message = "manual mode  🟡".to_string();
+        bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        tx.save_bot_status(bot_status).unwrap()
+    }
+
+    pub async fn interaction_disable_manual_mode(&self, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
+        bot_status.manual_mode = false;
+        bot_status.status_message = "disabling manual mode...".to_string();
+        bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        tx.save_bot_status(bot_status).unwrap()
+    }
+
     pub async fn interaction_publish_now(&self, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
         let user_settings = tx.load_user_settings().unwrap();
         let now = now_in_my_timezone(&user_settings);

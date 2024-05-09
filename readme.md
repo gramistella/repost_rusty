@@ -81,8 +81,9 @@ These two constants are totally arbitrary numbers, but they seem to work well en
 - Multiple accounts management
   - Each one is isolated from the others, and offers the following features
 - Content queue, which uses a predefined interval +- a random factor to repost reels
+- Automatically leave a comment on the reels with custom text
 - Scrape reels from a specified set of instagram accounts
-- Discord bot with three channels:
+- Discord bot with the following features:
   - Employs 3 different channels
     - "status" to show the current status of the bot, this channel is shared between all accounts
     - "posted" to show the reels that have been reposted in the last 24 hours, this channel is also shared between all accounts
@@ -92,6 +93,8 @@ These two constants are totally arbitrary numbers, but they seem to work well en
   - Notification system:
     - When the content queue is about to run out
     - When the instagram account is restricted and needs to be manually unlocked (as in, logging in to the instagram account and dismissing/solving the captcha), a convenient "Resume" button is then displayed on the bot status to easily resume the bot
+  - Manual mode:
+    - The user can press a button in the channel status to temporarily halt all interactions with instagram, and then press another button to resume them
 - Advanced video duplication detection
   - Using perceptual hashing, the bot can detect if a video has already been reposted, and will not even show it to the user if it has
 - AWS S3 integration

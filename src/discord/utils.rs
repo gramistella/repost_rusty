@@ -114,7 +114,6 @@ pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: Vec<
             content_queue_string = format!("Currently there are {} queued posts", content_queue_len);
         }
 
-
         if queueable_content > 0 {
             content_queue_string = format!("{}, but you can add up to {} more!", content_queue_string, queueable_content);
         }
@@ -236,8 +235,10 @@ pub fn get_published_buttons(_ui_definitions: &UiDefinitions) -> Vec<CreateActio
 pub fn get_bot_status_buttons(bot_status: &BotStatus) -> Vec<CreateActionRow> {
     if bot_status.status == 1 {
         vec![CreateActionRow::Buttons(vec![CreateButton::new("resume_from_halt").label("Resume")])]
+    } else if bot_status.manual_mode {
+        vec![CreateActionRow::Buttons(vec![CreateButton::new("disable_manual_mode").label("Disable manual mode")])]
     } else {
-        vec![]
+        vec![CreateActionRow::Buttons(vec![CreateButton::new("enable_manual_mode").label("Enable manual mode")])]
     }
 }
 

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use indexmap::IndexMap;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, Interaction, MessageId, RatelimitInfo};
 use serenity::async_trait;
@@ -14,7 +16,9 @@ use crate::discord::commands::{edit_caption, Data};
 use crate::discord::interactions::{EditedContent, EditedContentKind};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{clear_all_messages, prune_expired_content};
-use crate::{GUILD_ID, POSTED_CHANNEL_ID, REFRESH_RATE, STATUS_CHANNEL_ID};
+use crate::{GUILD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
+
+pub(crate) const DISCORD_REFRESH_RATE: Duration = Duration::from_millis(333);
 
 #[derive(Clone)]
 pub struct Handler {
@@ -42,6 +46,10 @@ pub(crate) struct ChannelIdMap {}
 
 impl TypeMapKey for ChannelIdMap {
     type Value = ChannelId;
+}
+
+lazy_static! {
+    static ref IS_FIRST_ITERATION: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
 }
 
 #[async_trait]
@@ -79,9 +87,9 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
-        let mut first_run = true;
         loop {
             let mut tx = self.database.begin_transaction().await.unwrap();
+
             let self_clone = self.clone();
             let ctx_clone = ctx.clone();
 
@@ -91,21 +99,33 @@ impl EventHandler for Handler {
 
             task.await.unwrap();
 
-            if first_run {
+            let mut is_first_iteration = IS_FIRST_ITERATION.lock().await;
+            if is_first_iteration.clone() {
                 let mut tx = self.database.begin_transaction().await.unwrap();
                 println!(" [{}] Discord bot finished warming up.", self.username);
                 let mut bot_status = tx.load_bot_status().unwrap();
                 bot_status.is_discord_warmed_up = true;
                 tx.save_bot_status(&bot_status).unwrap();
-                first_run = false;
+                *is_first_iteration = false;
             }
 
-            sleep(REFRESH_RATE).await;
+            sleep(DISCORD_REFRESH_RATE).await;
         }
     }
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         let response = CreateInteractionResponse::Acknowledge;
-        response.execute(&ctx.http, (interaction.id(), interaction.token())).await.unwrap();
+
+        match response.execute(&ctx.http, (interaction.id(), interaction.token())).await {
+            Ok(_) => {}
+            Err(e) => {
+                let e = format!("{:?}", e);
+                if e.contains("Unknown Interaction") {
+                } else {
+                    tracing::warn!("Failed to acknowledge interaction!");
+                }
+                return;
+            }
+        };
 
         let _is_handling_interaction = self.interaction_mutex.lock().await;
 
@@ -130,6 +150,12 @@ impl EventHandler for Handler {
                 match interaction_type.as_str() {
                     "resume_from_halt" => {
                         self.interaction_resume_from_halt(&mut bot_status, &mut tx).await;
+                    }
+                    "enable_manual_mode" => {
+                        self.interaction_enable_manual_mode(&mut bot_status, &mut tx).await;
+                    }
+                    "disable_manual_mode" => {
+                        self.interaction_disable_manual_mode(&mut bot_status, &mut tx).await;
                     }
                     _ => {
                         tracing::error!("Unhandled interaction type: {:?}", interaction_type);
@@ -206,6 +232,10 @@ impl Handler {
         self.process_bot_status(ctx, tx).await;
         let content_mapping = tx.load_content_mapping().unwrap();
 
+        if content_mapping.is_empty() {
+            sleep(DISCORD_REFRESH_RATE).await;
+        }
+
         for (mut content_id, mut content) in content_mapping {
             if prune_expired_content(tx, &mut content) {
                 continue;
@@ -224,13 +254,50 @@ impl Handler {
 
             match content.status {
                 ContentStatus::Waiting => {}
-                ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(content.original_shortcode).unwrap(),
+                ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(content.original_shortcode.clone()).unwrap(),
                 ContentStatus::Pending { .. } => self.process_pending(ctx, tx, &mut content_id, &mut content).await,
                 ContentStatus::Queued { .. } => self.process_queued(ctx, tx, &mut content_id, &mut content).await,
                 ContentStatus::Published { .. } => self.process_published(ctx, tx, &mut content_id, &mut content).await,
                 ContentStatus::Rejected { .. } => self.process_rejected(ctx, tx, &mut content_id, &mut content).await,
                 ContentStatus::Failed { .. } => self.process_failed(ctx, tx, &mut content_id, &mut content).await,
             }
+
+            // This is not pretty, but it's a stop gap until I finally decide to use postgres
+            // instead of sqlite
+            match tx.save_content_mapping(IndexMap::from([(content_id, content.clone())])) {
+                Ok(_) => {}
+                Err(e) => {
+                    let e = format!("{:?}", e);
+                    if e.contains("database is locked") {
+                        let mut retries = 10;
+                        let mut success = false;
+                        loop {
+                            if retries == 0 {
+                                break;
+                            }
+                            tracing::warn!("Database is locked!, Retrying in 100 milliseconds");
+                            sleep(Duration::from_millis(100)).await;
+                            match tx.save_content_mapping(IndexMap::from([(content_id, content.clone())])) {
+                                Ok(_) => {
+                                    success = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Error saving content mapping: {:?}", e);
+                                }
+                            }
+                            retries -= 1;
+                        }
+
+                        if !success {
+                            tracing::error!("Failed to save content mapping after 10 retries");
+                            panic!("Failed to save content mapping after 10 retries");
+                        }
+                    } else {
+                        tracing::error!("Error saving content mapping: {:?}", e);
+                    }
+                }
+            };
         }
     }
 }

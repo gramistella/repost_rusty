@@ -8,7 +8,6 @@ use tokio::io::AsyncReadExt;
 
 use crate::{IS_OFFLINE, S3_EXPIRATION_TIME};
 
-
 //noinspection ALL
 pub async fn upload_to_s3(credentials: &HashMap<String, String>, video_path: String, path_to_file: String, delete_from_local_storage: bool) -> Result<String, Box<dyn std::error::Error>> {
     let access_key = Some(credentials.get("s3_access_key").unwrap().as_str());

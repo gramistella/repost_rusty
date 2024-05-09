@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use serenity::all::MessageId;
 use tokio::sync::Mutex;
 
-use crate::INTERFACE_UPDATE_INTERVAL;
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
+use crate::INTERFACE_UPDATE_INTERVAL;
 use crate::IS_OFFLINE;
 
 const PROD_DB: &str = "db/prod.db";
@@ -120,6 +120,7 @@ pub struct BotStatus {
     pub status: i32,
     pub status_message: String,
     pub is_discord_warmed_up: bool,
+    pub manual_mode: bool,
     pub last_updated_at: String,
     pub queue_alert_message_id: MessageId,
     pub halt_alert_message_id: MessageId,
@@ -320,6 +321,7 @@ impl Database {
             status INTEGER NOT NULL,
             status_message TEXT NOT NULL,
             is_discord_warmed_up BOOL NOT NULL,
+            manual_mode BOOL NOT NULL,
             last_updated_at TEXT NOT NULL,
             queue_alert_message_id INTEGER NOT NULL,
             halt_alert_message_id INTEGER NOT NULL
@@ -331,7 +333,7 @@ impl Database {
 
         if !bot_status_exists {
             let query = format!(
-                "INSERT INTO bot_status (username, message_id, status, status_message, is_discord_warmed_up, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES ('{}', 1, 0, 'operational  🟢', false, '{}', 1, 1)",
+                "INSERT INTO bot_status (username, message_id, status, status_message, is_discord_warmed_up, manual_mode, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES ('{}', 1, 0, 'operational  🟢', false, false, '{}', 1, 1)",
                 username,
                 Utc::now().to_rfc3339()
             );
@@ -430,22 +432,24 @@ impl DatabaseTransaction {
         let mut status: Option<i32> = None;
         let mut status_message: Option<String> = None;
         let mut is_discord_warmed_up: Option<bool> = None;
+        let mut manual_mode: Option<bool> = None;
         let mut last_updated_at: Option<String> = None;
         let mut queue_alert_message_id: Option<u64> = None;
         let mut halt_alert_message_id: Option<u64> = None;
         let tx = self.conn.transaction()?;
 
         tx.query_row(
-            "SELECT message_id, status, status_message, is_discord_warmed_up, last_updated_at, queue_alert_message_id, halt_alert_message_id FROM bot_status WHERE username = ?1",
+            "SELECT message_id, status, status_message, is_discord_warmed_up, manual_mode, last_updated_at, queue_alert_message_id, halt_alert_message_id FROM bot_status WHERE username = ?1",
             [self.username.clone()],
             |row| {
                 message_id = Some(row.get(0)?);
                 status = Some(row.get(1)?);
                 status_message = Some(row.get(2)?);
                 is_discord_warmed_up = Some(row.get(3)?);
-                last_updated_at = Some(row.get(4)?);
-                queue_alert_message_id = Some(row.get(5)?);
-                halt_alert_message_id = Some(row.get(6)?);
+                manual_mode = Some(row.get(4)?);
+                last_updated_at = Some(row.get(5)?);
+                queue_alert_message_id = Some(row.get(6)?);
+                halt_alert_message_id = Some(row.get(7)?);
                 Ok(())
             },
         )?;
@@ -456,6 +460,7 @@ impl DatabaseTransaction {
             status: status.unwrap(),
             status_message: status_message.unwrap(),
             is_discord_warmed_up: is_discord_warmed_up.unwrap(),
+            manual_mode: manual_mode.unwrap(),
             last_updated_at: last_updated_at.unwrap(),
             queue_alert_message_id: MessageId::new(queue_alert_message_id.unwrap()),
             halt_alert_message_id: MessageId::new(halt_alert_message_id.unwrap()),
@@ -470,13 +475,14 @@ impl DatabaseTransaction {
         tx.execute("DELETE FROM bot_status WHERE username = ?1", [self.username.clone()])?;
 
         tx.execute(
-            "INSERT INTO bot_status (username, message_id, status, status_message, is_discord_warmed_up, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO bot_status (username, message_id, status, status_message, is_discord_warmed_up, manual_mode, last_updated_at, queue_alert_message_id, halt_alert_message_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 bot_status.username,
                 bot_status.message_id.get(),
                 bot_status.status,
                 bot_status.status_message,
                 bot_status.is_discord_warmed_up,
+                bot_status.manual_mode,
                 bot_status.last_updated_at,
                 bot_status.queue_alert_message_id.get(),
                 bot_status.halt_alert_message_id.get()
@@ -797,6 +803,7 @@ impl DatabaseTransaction {
                     self.save_queued_content(new_post)?;
 
                     let (message_id, mut content_info) = self.get_content_info_by_shortcode(post.original_shortcode.clone()).unwrap();
+                    content_info.last_updated_at = post.last_updated_at.clone();
                     if content_info.status.to_string().contains("shown") {
                         content_info.status = ContentStatus::Queued { shown: true };
                     } else {

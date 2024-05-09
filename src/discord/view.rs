@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, FixedOffset, Utc};
-use indexmap::IndexMap;
+use lazy_static::lazy_static;
+use regex::Regex;
 use serenity::all::{ChannelId, Context, CreateActionRow, CreateAttachment, CreateMessage, EditMessage, Mention, MessageId};
 use tokio::time::sleep;
 
@@ -79,15 +81,12 @@ impl Handler {
         } else {
             content_info.status = ContentStatus::Pending { shown: true };
 
-            let video_attachment= get_video_attachment(ctx, content_info).await;
+            let video_attachment = get_video_attachment(ctx, content_info).await;
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
-
-        let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
-        tx.save_content_mapping(content_mapping).unwrap();
     }
 
     pub async fn process_queued(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
@@ -130,16 +129,13 @@ impl Handler {
         } else {
             content_info.status = ContentStatus::Queued { shown: true };
 
-            let video_attachment= get_video_attachment(ctx, content_info).await;
+            let video_attachment = get_video_attachment(ctx, content_info).await;
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
 
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
-
-        let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
-        tx.save_content_mapping(content_mapping).unwrap();
     }
 
     pub async fn process_rejected(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
@@ -160,24 +156,20 @@ impl Handler {
 
         let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::try_seconds(user_settings.rejected_content_lifespan * 60).unwrap();
 
-        handle_deletion_due_to_expiration(&self.credentials, ctx, content_id, content_info, channel_id, now, will_expire_at).await;
-
-        if content_info.status == (ContentStatus::Rejected { shown: true }) {
+        if handle_deletion_due_to_expiration(&self.credentials, ctx, content_id, content_info, channel_id, now, will_expire_at).await {
+            // If the content was deleted, there is no need to process it further
+        } else if content_info.status == (ContentStatus::Rejected { shown: true }) {
             handle_shown_message_update(ctx, channel_id, content_id, content_info, &user_settings, &msg_caption, msg_buttons).await;
         } else {
             content_info.status = ContentStatus::Rejected { shown: true };
 
-            let video_attachment= get_video_attachment(ctx, content_info).await;
+            let video_attachment = get_video_attachment(ctx, content_info).await;
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
 
             let msg = channel_id.send_message(&ctx.http, video_message).await.unwrap();
             *content_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
-
-        let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
-        tx.save_content_mapping(content_mapping).unwrap();
-        //println!("Finished processing pending content");
     }
 
     pub async fn process_published(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
@@ -191,15 +183,15 @@ impl Handler {
         let published_content = tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
         let will_expire_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap() + DEFAULT_POSTED_EXPIRATION;
 
-        handle_deletion_due_to_expiration(&self.credentials, ctx, content_id, content_info, channel_id, now, will_expire_at).await;
-
-        if content_info.status == (ContentStatus::Published { shown: true }) {
+        if handle_deletion_due_to_expiration(&self.credentials, ctx, content_id, content_info, channel_id, now, will_expire_at).await {
+            // If the content was deleted, there is no need to process it further
+        } else if content_info.status == (ContentStatus::Published { shown: true }) {
             handle_shown_message_update(ctx, POSTED_CHANNEL_ID, content_id, content_info, &user_settings, &msg_caption, msg_buttons).await;
         } else {
             content_info.status = ContentStatus::Published { shown: true };
 
-            let video_attachment= get_video_attachment(ctx, content_info).await;
-            
+            let video_attachment = get_video_attachment(ctx, content_info).await;
+
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
 
@@ -208,9 +200,6 @@ impl Handler {
             *content_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
-
-        let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
-        tx.save_content_mapping(content_mapping).unwrap();
     }
 
     pub async fn process_failed(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_id: &mut MessageId, content_info: &mut ContentInfo) {
@@ -224,13 +213,14 @@ impl Handler {
         let failed_content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
         let will_expire_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap() + DEFAULT_FAILURE_EXPIRATION;
 
-        handle_deletion_due_to_expiration(&self.credentials, ctx, content_id, content_info, channel_id, now, will_expire_at).await;
-        if content_info.status == (ContentStatus::Failed { shown: true }) {
+        if handle_deletion_due_to_expiration(&self.credentials, ctx, content_id, content_info, channel_id, now, will_expire_at).await {
+            // If the content was deleted, there is no need to process it further
+        } else if content_info.status == (ContentStatus::Failed { shown: true }) {
             handle_shown_message_update(ctx, POSTED_CHANNEL_ID, content_id, content_info, &user_settings, &msg_caption, msg_buttons).await;
         } else {
             content_info.status = ContentStatus::Failed { shown: true };
 
-            let video_attachment= get_video_attachment(ctx, content_info).await;
+            let video_attachment = get_video_attachment(ctx, content_info).await;
 
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap();
@@ -239,9 +229,6 @@ impl Handler {
             *content_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
-
-        let content_mapping = IndexMap::from([(*content_id, content_info.clone())]);
-        tx.save_content_mapping(content_mapping).unwrap();
     }
 }
 
@@ -274,14 +261,18 @@ async fn update_message_if_needed(ctx: &Context, content_id: MessageId, channel_
     }
 }
 
+lazy_static! {
+    static ref CONTENT_DELETION_REGEX: Regex = Regex::new(r"https?:\/\/[^\/]+\/([^?]+)").unwrap();
+    static ref LAST_UPDATED_AT: Arc<Mutex<DateTime<Utc>>> = Arc::new(Mutex::new(Utc::now()));
+}
+
 pub async fn handle_content_deletion(credentials: &HashMap<String, String>, ctx: &Context, content_id: &MessageId, content_info: &mut ContentInfo, channel_id: ChannelId) {
     content_info.status = RemovedFromView;
 
     let delete_msg_result = ctx.http.delete_message(channel_id, *content_id, None).await;
     handle_msg_deletion(delete_msg_result);
 
-    let re = regex::Regex::new(r"https?:\/\/[^\/]+\/([^?]+)").unwrap();
-    let filename = re.captures(&content_info.url).unwrap().get(1).unwrap().as_str();
+    let filename = CONTENT_DELETION_REGEX.captures(&content_info.url).unwrap().get(1).unwrap().as_str();
     match delete_from_s3(credentials, filename.to_string()).await {
         Ok(_) => {}
         Err(e) => {
@@ -296,14 +287,29 @@ async fn handle_shown_message_update(ctx: &Context, channel_id: ChannelId, conte
     let now = now_in_my_timezone(user_settings);
 
     if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
+        // Get the last_updated_at of the last updated message
+        let last_updated_at_last_message = *LAST_UPDATED_AT.lock().unwrap();
+
+        // Check if the time difference between now and last_updated_at_last_message is less than half a second
+        if (now - last_updated_at_last_message).num_milliseconds() < 333 {
+            // If it is, skip the update for this iteration
+            return;
+        }
+
         update_message_if_needed(ctx, *content_id, channel_id, msg_caption, msg_buttons).await;
-        content_info.last_updated_at = now_in_my_timezone(user_settings).to_rfc3339();
+        let instant_after_update = now_in_my_timezone(user_settings);
+
+        *LAST_UPDATED_AT.lock().unwrap() = instant_after_update;
+        content_info.last_updated_at = instant_after_update.to_rfc3339();
     }
 }
 
-async fn handle_deletion_due_to_expiration(credentials: &HashMap<String, String>, ctx: &Context, content_id: &mut MessageId, content_info: &mut ContentInfo, channel_id: ChannelId, now: DateTime<Utc>, will_expire_at: DateTime<FixedOffset>) {
+async fn handle_deletion_due_to_expiration(credentials: &HashMap<String, String>, ctx: &Context, content_id: &mut MessageId, content_info: &mut ContentInfo, channel_id: ChannelId, now: DateTime<Utc>, will_expire_at: DateTime<FixedOffset>) -> bool {
     if will_expire_at.with_timezone(&Utc) < now {
         handle_content_deletion(credentials, ctx, content_id, content_info, channel_id).await;
+        true
+    } else {
+        false
     }
 }
 
