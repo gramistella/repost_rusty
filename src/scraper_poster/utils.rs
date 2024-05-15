@@ -4,8 +4,8 @@ use std::sync::Arc;
 use instagram_scraper_rs::User;
 use rand::prelude::{SliceRandom, StdRng};
 use reqwest_cookie_store::CookieStoreMutex;
+use crate::database::database::DatabaseTransaction;
 
-use crate::database::DatabaseTransaction;
 use crate::discord::utils::now_in_my_timezone;
 use crate::scraper_poster::scraper::SCRAPER_REFRESH_RATE;
 use crate::INTERFACE_UPDATE_INTERVAL;

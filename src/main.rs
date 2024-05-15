@@ -1,5 +1,5 @@
-extern crate r2d2;
-extern crate r2d2_sqlite;
+#[macro_use]
+extern crate diesel;
 
 use std::collections::HashMap;
 use std::env;
@@ -13,16 +13,19 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
+use crate::database::database::Database;
 
-use crate::database::Database;
+
 use crate::discord::bot::DiscordBot;
 use crate::scraper_poster::scraper::ScraperPoster;
 
-mod database;
+
 mod discord;
 mod s3;
 mod scraper_poster;
 mod video;
+
+mod database;
 
 // Constants that can be changed
 pub(crate) const MY_DISCORD_ID: UserId = UserId::new(465494062275756032);
@@ -35,7 +38,7 @@ const IS_OFFLINE: bool = false;
 
 // Internal scraper configuration
 const MAX_CONTENT_PER_ITERATION: usize = 8;
-const MAX_CONTENT_HANDLED: usize = 30;
+pub(crate) const MAX_CONTENT_HANDLED: usize = 50;
 const FETCH_SLEEP_LEN: Duration = Duration::from_secs(60);
 const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 20);
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 60 * 12);
@@ -44,7 +47,7 @@ const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 60 * 12);
 pub const S3_EXPIRATION_TIME: u32 = 60 * 60 * 24 * 7;
 
 // Internal Discord configuration
-pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
 
 fn main() -> anyhow::Result<()> {
     env::set_var("RUST_BACKTRACE", "full");
@@ -64,13 +67,7 @@ fn main() -> anyhow::Result<()> {
             let rt_scraper_poster = Arc::new(tokio::runtime::Runtime::new().unwrap());
             let rt_discord_bot = Arc::new(tokio::runtime::Runtime::new().unwrap());
 
-            let db = Database::new(username.clone()).unwrap();
-            match rt_discord_bot.block_on(async { db.begin_transaction().await.unwrap().reorder_pages() }) {
-                Ok(_) => (),
-                Err(e) => {
-                    tracing::error!("Error reordering pages: {:?}", e);
-                }
-            }
+            let db = Database::new(username.clone(), credentials.clone()).unwrap();
 
             let mut discord_bot_manager = rt_discord_bot.block_on(async { DiscordBot::new(db.clone(), credentials.clone(), is_first_run).await });
 

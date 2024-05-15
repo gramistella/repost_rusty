@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use indexmap::IndexMap;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serenity::all::{ChannelId, CreateActionRow, CreateButton, Http, Message};
 use serenity::prelude::SerenityError;
 
-use crate::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, QueuedContent, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
+use crate::database::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION, QueuedContent, UserSettings};
 use crate::discord::bot::UiDefinitions;
 use crate::discord::state::ContentStatus;
 use crate::S3_EXPIRATION_TIME;
@@ -27,10 +26,10 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             let mut countdown_caption;
             let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
             match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()) {
-                None => {
+                Err(_) => {
                     format!("{base_caption}\n{}\n‎\nPosting now...\n\n{}‎", queued_caption, formatted_will_post_at)
                 }
-                Some(queued_content) => {
+                Ok(queued_content) => {
                     let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
                     formatted_will_post_at = will_post_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -49,12 +48,12 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
         ContentStatus::Rejected { .. } => {
             let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
             let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()) {
-                Some(rejected_content) => rejected_content,
-                None => {
+                Ok(rejected_content) => rejected_content,
+                Err(_) => {
                     return format!("{base_caption}\n{}\n‎", rejected_caption);
                 }
             };
-            let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::seconds(user_settings.rejected_content_lifespan * 60);
+            let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::seconds((user_settings.rejected_content_lifespan * 60) as i64);
 
             let countdown_caption = countdown_until_expiration(&mut tx, will_expire_at.with_timezone(&Utc)).await;
 
@@ -84,7 +83,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
     }
 }
 
-pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: Vec<ContentInfo>, content_queue: Vec<QueuedContent>, now: DateTime<Utc>) -> String {
+pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: &Vec<ContentInfo>, content_queue: Vec<QueuedContent>, now: DateTime<Utc>) -> String {
     let mut full_status_string = bot_status.status_message.clone();
     if !bot_status.is_discord_warmed_up {
         full_status_string = format!("{}, but discord is still warming up...", full_status_string);
@@ -142,7 +141,7 @@ pub async fn clear_all_messages(database: &Database, http: &Arc<Http>, channel_i
     }
 
     let mut tx = database.begin_transaction().await.unwrap();
-    for (id, mut content) in tx.load_content_mapping().unwrap() {
+    for mut content in tx.load_content_mapping().unwrap() {
         if content.status == (ContentStatus::Pending { shown: true }) {
             content.status = ContentStatus::Pending { shown: false };
         } else if content.status == (ContentStatus::Queued { shown: true }) {
@@ -155,7 +154,7 @@ pub async fn clear_all_messages(database: &Database, http: &Arc<Http>, channel_i
             content.status = ContentStatus::Failed { shown: false };
         }
 
-        tx.save_content_mapping(IndexMap::from([(id, content)])).unwrap();
+        tx.save_content_info(&content).unwrap();
     }
 }
 
@@ -300,7 +299,7 @@ pub fn prune_expired_content(tx: &mut DatabaseTransaction, content: &mut Content
     let added_at = DateTime::parse_from_rfc3339(&content.added_at).unwrap();
     let user_settings = tx.load_user_settings().unwrap();
     if now_in_my_timezone(&user_settings) > (added_at + Duration::seconds(S3_EXPIRATION_TIME as i64)) {
-        tx.remove_content_info_with_shortcode(content.original_shortcode.clone()).unwrap();
+        tx.remove_content_info_with_shortcode(&content.original_shortcode).unwrap();
         let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content.original_shortcode.clone());
         if is_in_queue {
             tx.remove_post_from_queue_with_shortcode(content.original_shortcode.clone()).unwrap();

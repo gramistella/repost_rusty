@@ -3,27 +3,26 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use indexmap::IndexMap;
 use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
 use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, SeedableRng};
 use serenity::all::MessageId;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;
 
-use crate::database::{ContentInfo, Database, DuplicateContent, FailedContent, PublishedContent, QueuedContent};
+use crate::database::database::{ContentInfo, Database, DuplicateContent, FailedContent, PublishedContent, QueuedContent};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::s3::helper::upload_to_s3;
 use crate::scraper_poster::utils::{hold_if_manual_mode, process_caption, save_cookie_store_to_json, set_bot_status_halted, set_bot_status_operational};
 use crate::video::processing::process_video;
-use crate::INTERFACE_UPDATE_INTERVAL;
 use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
+use crate::{MAX_CONTENT_HANDLED};
 
 pub(crate) const SCRAPER_REFRESH_RATE: Duration = Duration::from_millis(1000);
 #[derive(Clone)]
@@ -100,7 +99,7 @@ impl ScraperPoster {
                     if let Some((video_file_name, caption, author, shortcode)) = content_tuple {
                         if !transaction.does_content_exist_with_shortcode(shortcode.clone()) && shortcode != "halted" {
                             // Process video to check if it already exists
-                            let video_exists = process_video(&mut transaction, &video_file_name).await.unwrap();
+                            let video_exists = process_video(&mut transaction, &video_file_name, author.clone(), shortcode.clone()).await.unwrap();
 
                             if video_exists {
                                 println!("The same video is already in the database with a different shortcode, skipping! :)");
@@ -125,8 +124,11 @@ impl ScraperPoster {
                             let caption = re.replace_all(&caption.clone(), "").to_string();
                             let now_string = now_in_my_timezone(&user_settings).to_rfc3339();
 
+                            let message_id = transaction.get_temp_message_id(&user_settings);
+                            
                             let video = ContentInfo {
                                 username: user_settings.username.clone(),
+                                message_id: MessageId::new(message_id),
                                 url: url.clone(),
                                 status: ContentStatus::Pending { shown: false },
                                 caption,
@@ -134,16 +136,13 @@ impl ScraperPoster {
                                 original_author: author.clone(),
                                 original_shortcode: shortcode.clone(),
                                 last_updated_at: now_string.clone(),
-                                url_last_updated_at: now_string.clone(),
                                 added_at: now_string,
-                                page_num: 1,
                                 encountered_errors: 0,
                             };
 
-                            let message_id = transaction.get_temp_message_id(user_settings);
-                            let content_mapping: IndexMap<MessageId, ContentInfo> = IndexMap::from([(MessageId::new(message_id as u64), video.clone())]);
+                
 
-                            transaction.save_content_mapping(content_mapping).unwrap();
+                            transaction.save_content_info(&video).unwrap();
                         }
                     } else {
                         //tx.send(("".to_string(), "".to_string(), "".to_string(), "ignore".to_string())).await.unwrap();
@@ -177,8 +176,14 @@ impl ScraperPoster {
                             format!("Video {}, loop {} #meme", inner_loop_iterations, loop_iterations)
                         };
 
+                        let path = format!("temp/shortcode{}.mp4", inner_loop_iterations);
+                        let response = reqwest::get(url.to_string()).await.unwrap();
+                        let bytes = response.bytes().await.unwrap();
+                        let mut file = File::create(path.clone()).await.unwrap();
+                        file.write_all(&bytes).await.unwrap();
+
                         let mut latest_content_guard = scraper_latest_content.lock().await;
-                        *latest_content_guard = Some((url.to_string(), caption_string.clone(), "local".to_string(), format!("shortcode{}", inner_loop_iterations)));
+                        *latest_content_guard = Some((format!("../{path}").to_string(), caption_string.clone(), "local".to_string(), format!("shortcode{}", inner_loop_iterations)));
                         sleep(Duration::from_secs(10)).await;
                     }
                 }
@@ -197,6 +202,14 @@ impl ScraperPoster {
                 cloned_self.fetch_user_info(&mut accounts_to_scrape, &mut accounts_being_scraped).await;
 
                 loop {
+                    let content_mapping_len = cloned_self.database.begin_transaction().await.unwrap().load_content_mapping().unwrap().len();
+                    
+                    if content_mapping_len >= MAX_CONTENT_HANDLED {
+                        cloned_self.println("Reached the maximum amount of handled content");
+                        cloned_self.randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;
+                        continue;
+                    }
+
                     let mut posts: HashMap<User, Vec<Post>> = HashMap::new();
                     cloned_self.fetch_posts(accounts_being_scraped.clone(), &mut posts).await;
 
@@ -310,7 +323,7 @@ impl ScraperPoster {
                         *lock = Some((filename, caption, author.username.clone(), post.shortcode.clone()));
                     }
                 } else {
-                    let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().values().map(|content_info| content_info.original_shortcode.clone()).collect();
+                    let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().unwrap().iter().map(|content_info| content_info.original_shortcode.clone()).collect();
                     let existing_posted_shortcodes: Vec<String> = transaction.load_posted_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
                     let existing_failed_shortcodes: Vec<String> = transaction.load_failed_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
                     let existing_rejected_shortcodes: Vec<String> = transaction.load_rejected_content().unwrap().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
@@ -519,7 +532,7 @@ impl ScraperPoster {
                 let content_mapping = transaction.load_content_mapping().unwrap();
                 let user_settings = transaction.load_user_settings().unwrap();
 
-                for (_message_id, content_info) in content_mapping {
+                for content_info in content_mapping {
                     if content_info.status.to_string().contains("queued_") {
                         let queued_posts = transaction.load_content_queue().unwrap();
                         for mut queued_post in queued_posts {
@@ -662,10 +675,10 @@ impl ScraperPoster {
                                         cloned_self.println(&format!("[!] Uploaded content offline: {}", queued_post.url));
                                     }
 
-                                    let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-                                    video_info.status = ContentStatus::Published { shown: false };
-                                    let index_map = IndexMap::from([(message_id, video_info.clone())]);
-                                    transaction.save_content_mapping(index_map).unwrap();
+                                    let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).unwrap();
+                                    content_info.status = ContentStatus::Published { shown: false };
+                                    
+                                    transaction.save_content_info(&content_info).unwrap();
 
                                     let published_content = PublishedContent {
                                         username: queued_post.username.clone(),
@@ -675,20 +688,16 @@ impl ScraperPoster {
                                         original_author: queued_post.original_author.clone(),
                                         original_shortcode: queued_post.original_shortcode.clone(),
                                         published_at: now_in_my_timezone(&user_settings).to_rfc3339(),
-                                        last_updated_at: now_in_my_timezone(&user_settings).to_rfc3339(),
-                                        expired: false,
                                     };
 
                                     transaction.save_published_content(published_content).unwrap();
                                 } else {
                                     let new_will_post_at = transaction.get_new_post_time().unwrap();
                                     queued_post.will_post_at = new_will_post_at;
-                                    transaction.save_queued_content(queued_post.clone()).unwrap();
-
-                                    let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
-                                    video_info.status = ContentStatus::Queued { shown: false };
-                                    let index_map = IndexMap::from([(message_id, video_info.clone())]);
-                                    transaction.save_content_mapping(index_map).unwrap();
+                                    transaction.save_queued_content(&queued_post).unwrap();
+                                    let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).unwrap();
+                                    content_info.status = ContentStatus::Queued { shown: false };
+                                    transaction.save_content_info(&content_info).unwrap();
                                 }
                             }
                         }
@@ -707,14 +716,12 @@ impl ScraperPoster {
 
         let mut transaction = self.database.begin_transaction().await.unwrap();
         let user_settings = transaction.load_user_settings().unwrap();
-        let (message_id, mut video_info) = transaction.get_content_info_by_shortcode(queued_post.original_shortcode.clone()).unwrap();
+        let mut video_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).unwrap();
         video_info.status = ContentStatus::Failed { shown: false };
 
-        let index_map = IndexMap::from([(message_id, video_info.clone())]);
-        transaction.save_content_mapping(index_map).unwrap();
+        transaction.save_content_info(&video_info).unwrap();
 
         let now = now_in_my_timezone(&user_settings).to_rfc3339();
-        let last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         let failed_content = FailedContent {
             username: queued_post.username.clone(),
             url: queued_post.url.clone(),
@@ -722,12 +729,10 @@ impl ScraperPoster {
             hashtags: queued_post.hashtags.clone(),
             original_author: queued_post.original_author.clone(),
             original_shortcode: queued_post.original_shortcode.clone(),
-            last_updated_at,
             failed_at: now,
-            expired: false,
         };
 
-        transaction.save_failed_content(failed_content.clone()).unwrap();
+        transaction.save_failed_content(failed_content).unwrap();
     }
 
     // Move all the queued content
@@ -740,9 +745,8 @@ impl ScraperPoster {
 
         for mut queued_post in transaction.load_content_queue().unwrap() {
             let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 60) as u64);
-            queued_post.last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
             queued_post.will_post_at = new_will_post_at.to_rfc3339();
-            transaction.save_queued_content(queued_post.clone()).unwrap();
+            transaction.save_queued_content(&queued_post).unwrap();
         }
     }
 
@@ -766,7 +770,7 @@ impl ScraperPoster {
         let content_queue = tx.load_content_queue().unwrap();
         let user_settings = tx.load_user_settings().unwrap();
         let mut content_to_post = 0;
-        for queued_post in content_queue.clone() {
+        for queued_post in content_queue.iter().clone() {
             if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(&user_settings) {
                 self.println(&format!("Amending queue: {}", queued_post.original_shortcode));
                 content_to_post += 1;
@@ -785,7 +789,7 @@ impl ScraperPoster {
                 let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + time_difference;
                 self.println(&format!("Changing post time for {}: {}", queued_post.original_shortcode, new_will_post_at));
                 queued_post.will_post_at = new_will_post_at.to_rfc3339();
-                tx.save_queued_content(queued_post.clone()).unwrap();
+                tx.save_queued_content(&queued_post).unwrap();
             }
         }
     }

@@ -3,7 +3,7 @@ use std::process::Stdio;
 
 use image_hasher::HasherConfig;
 
-use crate::database::{DatabaseTransaction, HashedVideo};
+use crate::database::database::{DatabaseTransaction, HashedVideo};
 
 fn divide_number(n: i32) -> [i32; 4] {
     let part1 = 0;
@@ -16,7 +16,8 @@ fn divide_number(n: i32) -> [i32; 4] {
 
 /// Returns whether the video already exists in the database
 
-pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str) -> Result<bool, Box<dyn std::error::Error>> {
+pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str, username: String, shortcode: String) -> Result<bool, Box<dyn std::error::Error>> {
+    //println!("Processing video: {}, shortcode {}, username {}", video_path, shortcode, username);
     let path = format!("temp/{video_path}");
 
     let duration_seconds = get_video_duration(&path).unwrap();
@@ -62,14 +63,16 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str) -> Re
 
         let avg_dist = (dist1 + dist2 + dist3 + dist4) / 4;
 
-        if avg_dist <= 2 {
+        if avg_dist <= 3 {
             video_exists = true;
         }
     }
 
     if !video_exists {
         let video_hash = HashedVideo {
+            username,
             duration: duration_seconds,
+            original_shortcode: shortcode,
             hash_frame_1: hash1.clone(),
             hash_frame_2: hash2.clone(),
             hash_frame_3: hash3.clone(),

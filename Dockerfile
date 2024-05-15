@@ -28,7 +28,7 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 
 # Install ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg
+RUN apt-get update && apt-get install -y ffmpeg libpq-dev
 
 # Copy the built executable and configuration from the builder stage
 # COPY --from=builder /repostrusty/config/ /repostrusty/config

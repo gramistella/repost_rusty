@@ -1,8 +1,9 @@
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
-use indexmap::IndexMap;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, Interaction, MessageId, RatelimitInfo};
@@ -11,12 +12,13 @@ use serenity::model::channel::Message;
 use serenity::prelude::*;
 use tokio::time::sleep;
 
-use crate::database::{Database, DatabaseTransaction};
+
 use crate::discord::commands::{edit_caption, Data};
 use crate::discord::interactions::{EditedContent, EditedContentKind};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{clear_all_messages, prune_expired_content};
 use crate::{GUILD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
+use crate::database::database::{Database, DatabaseTransaction};
 
 pub(crate) const DISCORD_REFRESH_RATE: Duration = Duration::from_millis(333);
 
@@ -28,6 +30,7 @@ pub struct Handler {
     pub ui_definitions: UiDefinitions,
     pub edited_content: Arc<Mutex<Option<EditedContent>>>,
     pub interaction_mutex: Arc<Mutex<()>>,
+    pub global_last_updated_at: Arc<Mutex<DateTime<Utc>>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -77,11 +80,11 @@ impl EventHandler for Handler {
                     }
                 }
 
-                let content_mapping = IndexMap::from([(edited_content.content_id, edited_content.content_info.clone())]);
-                tx.save_content_mapping(content_mapping).unwrap();
+                tx.save_content_info(&edited_content.content_info.clone()).unwrap();
                 msg.delete(&ctx.http).await.unwrap();
                 ctx.http.delete_message(channel_id, edited_content.message_to_delete.unwrap(), None).await.unwrap();
-                self.process_pending(&ctx, &mut tx, &mut edited_content.content_id, &mut edited_content.content_info).await;
+                
+                self.process_pending(&ctx, &mut tx, &mut edited_content.content_info, Arc::clone(&self.global_last_updated_at)).await;
             }
         }
     }
@@ -92,9 +95,10 @@ impl EventHandler for Handler {
 
             let self_clone = self.clone();
             let ctx_clone = ctx.clone();
+            let global_last_updated_at = Arc::clone(&self.global_last_updated_at);
 
             let task = tokio::spawn(async move {
-                self_clone.ready_loop(&ctx_clone, &mut tx).await;
+                self_clone.ready_loop(&ctx_clone, &mut tx, global_last_updated_at).await;
             });
 
             task.await.unwrap();
@@ -129,7 +133,7 @@ impl EventHandler for Handler {
 
         let _is_handling_interaction = self.interaction_mutex.lock().await;
 
-        let mut original_message_id = interaction.clone().message_component().unwrap().message.id;
+        let original_message_id = interaction.clone().message_component().unwrap().message.id;
 
         let mut tx = self.database.begin_transaction().await.unwrap();
 
@@ -138,8 +142,8 @@ impl EventHandler for Handler {
 
         // Check if the original message id is in the content mapping
         let mut found_content = None;
-        for (id, content) in tx.load_content_mapping().unwrap() {
-            if id == original_message_id {
+        for content in tx.load_content_mapping().unwrap() {
+            if content.message_id == original_message_id {
                 found_content = Some(content);
             }
         }
@@ -185,42 +189,42 @@ impl EventHandler for Handler {
                     self.interaction_undo_rejected(&mut content, &mut tx).await;
                 }
                 "remove_from_view" => {
-                    self.interaction_remove_from_view(&ctx, original_message_id, &mut content).await;
+                    self.interaction_remove_from_view(&ctx, &mut content).await;
                 }
                 "remove_from_view_failed" => {
-                    self.interaction_remove_from_view_failed(&ctx, original_message_id, &mut content).await;
+                    self.interaction_remove_from_view_failed(&ctx, &mut content).await;
                 }
                 "edit" => {
-                    self.interaction_edit(&ctx, &mut original_message_id, &mut content).await;
+                    self.interaction_edit(&ctx, &mut content).await;
                 }
                 "go_back" => {
-                    self.interaction_go_back(&ctx, original_message_id, &mut content).await;
+                    self.interaction_go_back(&ctx, &mut content).await;
                 }
                 "edit_caption" => {
                     if self.edited_content.lock().await.is_none() {
-                        self.interaction_edit_caption(&ctx, &interaction, &mut original_message_id, &mut content).await;
+                        self.interaction_edit_caption(&ctx, &interaction, &mut content).await;
                     }
                 }
                 "edit_hashtags" => {
                     if self.edited_content.lock().await.is_none() {
-                        self.interaction_edit_hashtags(&ctx, &interaction, &mut original_message_id, &mut content).await;
+                        self.interaction_edit_hashtags(&ctx, &interaction, &mut content).await;
                     }
                 }
                 _ => {
                     tracing::error!("Unhandled interaction type: {:?}", interaction_type);
                 }
             }
-            tx.save_content_mapping(IndexMap::from([(original_message_id, content)])).unwrap();
+            tx.save_content_info(&content).unwrap();
         }
     }
 
     async fn ratelimit(&self, data: RatelimitInfo) {
-        tracing::warn!("Rate limited: {:?}", data);
+        tracing::warn!(" [{}] Rate limited: {:?}", self.username, data);
     }
 }
 
 impl Handler {
-    async fn ready_loop(&self, ctx: &Context, tx: &mut DatabaseTransaction) {
+    async fn ready_loop(&self, ctx: &Context, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         // Check if the bot is currently editing a message
         {
             let is_editing = self.edited_content.lock().await;
@@ -236,7 +240,7 @@ impl Handler {
             sleep(DISCORD_REFRESH_RATE).await;
         }
 
-        for (mut content_id, mut content) in content_mapping {
+        for mut content in content_mapping {
             if prune_expired_content(tx, &mut content) {
                 continue;
             }
@@ -254,50 +258,15 @@ impl Handler {
 
             match content.status {
                 ContentStatus::Waiting => {}
-                ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(content.original_shortcode.clone()).unwrap(),
-                ContentStatus::Pending { .. } => self.process_pending(ctx, tx, &mut content_id, &mut content).await,
-                ContentStatus::Queued { .. } => self.process_queued(ctx, tx, &mut content_id, &mut content).await,
-                ContentStatus::Published { .. } => self.process_published(ctx, tx, &mut content_id, &mut content).await,
-                ContentStatus::Rejected { .. } => self.process_rejected(ctx, tx, &mut content_id, &mut content).await,
-                ContentStatus::Failed { .. } => self.process_failed(ctx, tx, &mut content_id, &mut content).await,
+                ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(&content.original_shortcode).unwrap(),
+                ContentStatus::Pending { .. } => self.process_pending(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::Queued { .. } => self.process_queued(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::Published { .. } => self.process_published(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::Rejected { .. } => self.process_rejected(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::Failed { .. } => self.process_failed(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
             }
 
-            // This is not pretty, but it's a stop gap until I finally decide to use postgres
-            // instead of sqlite
-            match tx.save_content_mapping(IndexMap::from([(content_id, content.clone())])) {
-                Ok(_) => {}
-                Err(e) => {
-                    let e = format!("{:?}", e);
-                    if e.contains("database is locked") {
-                        let mut retries = 10;
-                        let mut success = false;
-                        loop {
-                            if retries == 0 {
-                                break;
-                            }
-                            tracing::warn!("Database is locked!, Retrying in 100 milliseconds");
-                            sleep(Duration::from_millis(100)).await;
-                            match tx.save_content_mapping(IndexMap::from([(content_id, content.clone())])) {
-                                Ok(_) => {
-                                    success = true;
-                                    break;
-                                }
-                                Err(e) => {
-                                    tracing::error!("Error saving content mapping: {:?}", e);
-                                }
-                            }
-                            retries -= 1;
-                        }
-
-                        if !success {
-                            tracing::error!("Failed to save content mapping after 10 retries");
-                            panic!("Failed to save content mapping after 10 retries");
-                        }
-                    } else {
-                        tracing::error!("Error saving content mapping: {:?}", e);
-                    }
-                }
-            };
+            tx.save_content_info(&content).unwrap();
         }
     }
 }
@@ -334,6 +303,7 @@ impl DiscordBot {
                 ui_definitions: ui_definitions.clone(),
                 edited_content: Arc::new(Mutex::new(None)),
                 interaction_mutex: Arc::new(Mutex::new(())),
+                global_last_updated_at: Arc::new(Mutex::new(Utc::now())),
             })
             .framework(framework)
             .await
