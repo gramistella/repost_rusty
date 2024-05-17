@@ -12,15 +12,13 @@ use crate::discord::bot::UiDefinitions;
 use crate::discord::state::ContentStatus;
 use crate::{POSTED_CHANNEL_ID, S3_EXPIRATION_TIME};
 
-pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
+pub async fn generate_full_caption(tx: &mut DatabaseTransaction, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
     // let upper_spacer = "^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^";
     // let upper_spacer = "## nununununununununununununununu";
     let upper_spacer = "### ->->->->->->->->->->->->->->->->->->->->->->";
     let base_caption = format!("{upper_spacer}\n‎\n{}\n‎\n(from @{})\n‎\n{}\n", content_info.caption, content_info.original_author, content_info.hashtags);
 
-    let mut tx = database.begin_transaction().await;
     let user_settings = tx.load_user_settings();
-
     match content_info.status {
         ContentStatus::Queued { .. } => {
             let mut formatted_will_post_at = "".to_string();
@@ -34,7 +32,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
                     let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
                     formatted_will_post_at = will_post_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
-                    countdown_caption = countdown_until_expiration(&mut tx, will_post_at.with_timezone(&Utc)).await;
+                    countdown_caption = countdown_until_expiration(tx, will_post_at.with_timezone(&Utc)).await;
 
                     if countdown_caption.contains("0 hours, 0 minutes and 0 seconds") {
                         countdown_caption = "Posting now...".to_string();
@@ -56,7 +54,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             };
             let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::seconds((user_settings.rejected_content_lifespan * 60) as i64);
 
-            let countdown_caption = countdown_until_expiration(&mut tx, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(tx, will_expire_at.with_timezone(&Utc)).await;
 
             format!("{base_caption}\n{}\n{}\n‎", rejected_caption, countdown_caption)
         }
@@ -66,7 +64,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             let published_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap().format("%Y-%m-%d %H:%M:%S").to_string();
             let will_expire_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap() + DEFAULT_POSTED_EXPIRATION;
 
-            let countdown_caption = countdown_until_expiration(&mut tx, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(tx, will_expire_at.with_timezone(&Utc)).await;
 
             format!("{base_caption}\n{} at {}\n{}\n‎", published_caption, published_at, countdown_caption)
         }
@@ -75,7 +73,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             let failed_content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
             let will_expire_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap() + DEFAULT_FAILURE_EXPIRATION;
 
-            let countdown_caption = countdown_until_expiration(&mut tx, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(tx, will_expire_at.with_timezone(&Utc)).await;
             format!("{base_caption}\n{}\n{}\n‎", failed_caption, countdown_caption)
         }
         _ => {

@@ -12,7 +12,6 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 #[derive(Debug, PartialEq, FromSqlRow, AsExpression, Clone)]
 #[diesel(sql_type = ContentStatusType)]
 pub enum ContentStatus {
-    Waiting,
     RemovedFromView,
     Pending { shown: bool },
     Published { shown: bool },
@@ -46,7 +45,6 @@ impl FromStr for ContentStatus {
     type Err = ContentStatusParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "waiting" => Ok(ContentStatus::Waiting),
             "pending_shown" => Ok(ContentStatus::Pending { shown: true }),
             "pending_hidden" => Ok(ContentStatus::Pending { shown: false }),
             "published_shown" => Ok(ContentStatus::Published { shown: true }),
@@ -83,7 +81,6 @@ impl<'de> Visitor<'de> for ContentStatusVisitor {
         E: de::Error,
     {
         match value {
-            "waiting" => Ok(ContentStatus::Waiting),
             "pending_shown" => Ok(ContentStatus::Pending { shown: true }),
             "pending_hidden" => Ok(ContentStatus::Pending { shown: false }),
             "published_shown" => Ok(ContentStatus::Published { shown: true }),
@@ -113,7 +110,6 @@ impl<'de> Deserialize<'de> for ContentStatus {
 
 fn get_status_string(content_status: ContentStatus) -> String {
     match content_status {
-        ContentStatus::Waiting => "waiting".to_string(),
         ContentStatus::RemovedFromView => "removed_from_view".to_string(),
         ContentStatus::Pending { shown } => {
             if shown {

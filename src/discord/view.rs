@@ -80,7 +80,7 @@ impl Handler {
         let channel_id = *ctx.data.read().await.get::<ChannelIdMap>().unwrap();
         let user_settings = tx.load_user_settings();
 
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions, content_info).await;
+        let msg_caption = generate_full_caption(tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_pending_buttons(&self.ui_definitions);
 
         if content_info.status == (ContentStatus::Pending { shown: true }) {
@@ -96,6 +96,34 @@ impl Handler {
         }
     }
 
+    /*
+    pub async fn process_content<T: ProcessableContent + Sync + Send>(
+        &self,
+        user_settings: &UserSettings,
+        ctx: &Context,
+        tx: &mut DatabaseTransaction,
+        content: &mut T,
+        global_last_updated_at: Arc<Mutex<DateTime<Utc>>>,
+        channel_id: ChannelId,
+    ){
+        let content_caption = content.generate_caption(tx, &self.ui_definitions).await;
+        let content_buttons = content.generate_buttons(&self.ui_definitions).await;
+
+        if content.is_shown().await {
+            handle_shown_message_update(ctx, channel_id, content, user_settings, &content_caption, content_buttons, global_last_updated_at).await;
+        } else {
+            content.set_status(ContentStatus::Pending { shown: true }).await;
+
+            let video_attachment = get_video_attachment(ctx, conten).await;
+            let video_message = CreateMessage::new().add_file(video_attachment).content(content_caption).components(content_buttons);
+            let msg = send_message_with_retry(ctx, channel_id, video_message).await;
+            content.set_message_id(msg.id);
+            content.set_last_updated_at(now_in_my_timezone(user_settings).to_rfc3339());
+        }
+
+    }
+    */
+
     pub async fn process_queued(&self, ctx: &Context, tx: &mut DatabaseTransaction, content_info: &mut ContentInfo, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         //println!("Processing pending content");
 
@@ -103,7 +131,7 @@ impl Handler {
         let user_settings = tx.load_user_settings();
         let now = now_in_my_timezone(&user_settings);
 
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions, content_info).await;
+        let msg_caption = generate_full_caption(tx, &self.ui_definitions, content_info).await;
         let mut msg_buttons = get_queued_buttons(&self.ui_definitions);
 
         let queued_content = match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()) {
@@ -138,7 +166,6 @@ impl Handler {
 
             let video_attachment = get_video_attachment(ctx, content_info).await;
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
-
             let msg = send_message_with_retry(ctx, channel_id, video_message).await;
             content_info.message_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
@@ -150,7 +177,7 @@ impl Handler {
         let user_settings = tx.load_user_settings();
         let now = now_in_my_timezone(&user_settings);
 
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions, content_info).await;
+        let msg_caption = generate_full_caption(tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_rejected_buttons(&self.ui_definitions);
 
         let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()) {
@@ -172,9 +199,7 @@ impl Handler {
 
             let video_attachment = get_video_attachment(ctx, content_info).await;
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
-
             let msg = send_message_with_retry(ctx, channel_id, video_message).await;
-
             content_info.message_id = msg.id;
             content_info.last_updated_at = now_in_my_timezone(&user_settings).to_rfc3339();
         }
@@ -185,7 +210,7 @@ impl Handler {
         let user_settings = tx.load_user_settings();
         let now = now_in_my_timezone(&user_settings);
 
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions, content_info).await;
+        let msg_caption = generate_full_caption(tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_published_buttons(&self.ui_definitions);
 
         let published_content = match tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()) {
@@ -206,10 +231,8 @@ impl Handler {
             content_info.status = ContentStatus::Published { shown: true };
 
             let video_attachment = get_video_attachment(ctx, content_info).await;
-
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = send_message_with_retry(ctx, POSTED_CHANNEL_ID, video_message).await;
-
             let delete_msg_result = channel_id.delete_message(&ctx.http, content_info.message_id).await;
             handle_msg_deletion(delete_msg_result);
             content_info.message_id = msg.id;
@@ -222,7 +245,7 @@ impl Handler {
         let user_settings = tx.load_user_settings();
         let now = now_in_my_timezone(&user_settings);
 
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions, content_info).await;
+        let msg_caption = generate_full_caption(tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_failed_buttons(&self.ui_definitions);
 
         let failed_content = match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()) {
@@ -243,7 +266,6 @@ impl Handler {
             content_info.status = ContentStatus::Failed { shown: true };
 
             let video_attachment = get_video_attachment(ctx, content_info).await;
-
             let video_message = CreateMessage::new().add_file(video_attachment).content(msg_caption).components(msg_buttons);
             let msg = send_message_with_retry(ctx, POSTED_CHANNEL_ID, video_message).await;
             let delete_msg_result = channel_id.delete_message(&ctx.http, content_info.message_id).await;
@@ -304,7 +326,7 @@ pub async fn handle_content_deletion(credentials: &HashMap<String, String>, ctx:
 }
 
 async fn handle_shown_message_update<T: crate::discord::traits::Updatable>(ctx: &Context, channel_id: ChannelId, item: &mut T, user_settings: &UserSettings, msg_caption: &String, msg_buttons: Vec<CreateActionRow>, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
-    let last_updated_at = DateTime::parse_from_rfc3339(item.get_last_updated_at()).unwrap();
+    let last_updated_at = DateTime::parse_from_rfc3339(&item.get_last_updated_at()).unwrap();
     let now = now_in_my_timezone(user_settings);
 
     if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {

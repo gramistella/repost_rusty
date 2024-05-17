@@ -12,7 +12,6 @@ screen -dmS repostrusty
 
 # Run the container inside the screen session
 screen -S repostrusty -X stuff "podman run -d \
--v /home/john/repostrusty/db:/repostrusty/db \
 -v /home/john/repostrusty/temp:/repostrusty/temp \
 -v /home/john/repostrusty/config:/repostrusty/config \
 -v /home/john/repostrusty/cookies:/repostrusty/cookies \

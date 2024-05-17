@@ -722,7 +722,6 @@ impl ScraperPoster {
                         }
                     }
                 }
-
                 // Don't remove this sleep, without it the bot becomes completely unresponsive
                 sleep(SCRAPER_REFRESH_RATE).await;
             }

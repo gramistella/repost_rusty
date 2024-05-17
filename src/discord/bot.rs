@@ -191,10 +191,10 @@ impl EventHandler for Handler {
                     self.interaction_remove_from_view_failed(&ctx, &mut content).await;
                 }
                 "edit" => {
-                    self.interaction_edit(&ctx, &mut content).await;
+                    self.interaction_edit(&mut tx, &ctx, &mut content).await;
                 }
                 "go_back" => {
-                    self.interaction_go_back(&ctx, &mut content).await;
+                    self.interaction_go_back(&mut tx, &ctx, &mut content).await;
                 }
                 "edit_caption" => {
                     if self.edited_content.lock().await.is_none() {
@@ -242,7 +242,6 @@ impl Handler {
             }
 
             match content.status {
-                ContentStatus::Waiting => {}
                 ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(&content.original_shortcode),
                 ContentStatus::Pending { .. } => self.process_pending(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
                 ContentStatus::Queued { .. } => self.process_queued(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,

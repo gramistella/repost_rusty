@@ -109,10 +109,10 @@ impl Handler {
         handle_content_deletion(&self.credentials, ctx, content_info, POSTED_CHANNEL_ID).await;
     }
 
-    pub async fn interaction_go_back(&self, ctx: &Context, content_info: &mut ContentInfo) {
+    pub async fn interaction_go_back(&self, tx: &mut DatabaseTransaction, ctx: &Context, content_info: &mut ContentInfo) {
         let channel_id = *ctx.data.read().await.get::<ChannelIdMap>().unwrap();
 
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions.clone(), content_info).await;
+        let msg_caption = generate_full_caption(tx, &self.ui_definitions.clone(), content_info).await;
         let msg_buttons = get_pending_buttons(&self.ui_definitions);
 
         let edited_msg = EditMessage::new();
@@ -123,10 +123,10 @@ impl Handler {
         *self.edited_content.lock().await = None;
     }
 
-    pub async fn interaction_edit(&self, ctx: &Context, content_info: &mut ContentInfo) {
+    pub async fn interaction_edit(&self, tx: &mut DatabaseTransaction, ctx: &Context, content_info: &mut ContentInfo) {
         let channel_id = *ctx.data.read().await.get::<ChannelIdMap>().unwrap();
 
-        let msg_caption = generate_full_caption(&self.database, &self.ui_definitions.clone(), content_info).await;
+        let msg_caption = generate_full_caption(tx, &self.ui_definitions.clone(), content_info).await;
         let msg_buttons = get_edit_buttons(&self.ui_definitions);
 
         let edited_msg = EditMessage::new();
