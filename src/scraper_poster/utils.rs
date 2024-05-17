@@ -4,8 +4,8 @@ use std::sync::Arc;
 use instagram_scraper_rs::User;
 use rand::prelude::{SliceRandom, StdRng};
 use reqwest_cookie_store::CookieStoreMutex;
-use crate::database::database::DatabaseTransaction;
 
+use crate::database::database::DatabaseTransaction;
 use crate::discord::utils::now_in_my_timezone;
 use crate::scraper_poster::scraper::SCRAPER_REFRESH_RATE;
 use crate::INTERFACE_UPDATE_INTERVAL;
@@ -18,10 +18,10 @@ pub async fn save_cookie_store_to_json(cookie_store_path: &String, cookie_store_
     cookie_store_mutex.lock().unwrap().save_json(&mut writer).expect("ERROR in scraper utils, failed to save cookie_store!");
 }
 
-pub async fn hold_if_manual_mode(tx: &mut DatabaseTransaction) {
+pub async fn pause_scraper_if_needed(tx: &mut DatabaseTransaction) {
     loop {
-        let bot_status = tx.load_bot_status().unwrap();
-        if bot_status.manual_mode {
+        let bot_status = tx.load_bot_status();
+        if bot_status.manual_mode || bot_status.status != 0 {
             tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
         } else {
             break;
@@ -30,19 +30,19 @@ pub async fn hold_if_manual_mode(tx: &mut DatabaseTransaction) {
 }
 
 pub fn set_bot_status_halted(tx: &mut DatabaseTransaction) {
-    let mut bot_status = tx.load_bot_status().unwrap();
+    let mut bot_status = tx.load_bot_status();
     bot_status.status = 1;
     bot_status.status_message = "halted  ⚠️".to_string();
-    bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-    tx.save_bot_status(&bot_status).unwrap();
+    bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+    tx.save_bot_status(&bot_status);
 }
 
 pub fn set_bot_status_operational(tx: &mut DatabaseTransaction) {
-    let mut bot_status = tx.load_bot_status().unwrap();
+    let mut bot_status = tx.load_bot_status();
     bot_status.status = 0;
     bot_status.status_message = "operational  🟢".to_string();
-    bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings().unwrap()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-    tx.save_bot_status(&bot_status).unwrap();
+    bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+    tx.save_bot_status(&bot_status);
 }
 
 pub fn process_caption(accounts_to_scrape: &HashMap<String, String>, hashtag_mapping: &HashMap<String, String>, mut rng: &mut StdRng, author: &User, caption: String) -> String {

@@ -3,13 +3,14 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
-use serenity::all::{ChannelId, CreateActionRow, CreateButton, Http, Message};
+use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, CreateMessage, Http, Message};
 use serenity::prelude::SerenityError;
+use tokio::time::sleep;
 
-use crate::database::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION, QueuedContent, UserSettings};
+use crate::database::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, QueuedContent, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord::bot::UiDefinitions;
 use crate::discord::state::ContentStatus;
-use crate::S3_EXPIRATION_TIME;
+use crate::{POSTED_CHANNEL_ID, S3_EXPIRATION_TIME};
 
 pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
     // let upper_spacer = "^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^";
@@ -17,8 +18,8 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
     let upper_spacer = "### ->->->->->->->->->->->->->->->->->->->->->->";
     let base_caption = format!("{upper_spacer}\n‎\n{}\n‎\n(from @{})\n‎\n{}\n", content_info.caption, content_info.original_author, content_info.hashtags);
 
-    let mut tx = database.begin_transaction().await.unwrap();
-    let user_settings = tx.load_user_settings().unwrap();
+    let mut tx = database.begin_transaction().await;
+    let user_settings = tx.load_user_settings();
 
     match content_info.status {
         ContentStatus::Queued { .. } => {
@@ -26,10 +27,10 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
             let mut countdown_caption;
             let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
             match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()) {
-                Err(_) => {
+                None => {
                     format!("{base_caption}\n{}\n‎\nPosting now...\n\n{}‎", queued_caption, formatted_will_post_at)
                 }
-                Ok(queued_content) => {
+                Some(queued_content) => {
                     let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
                     formatted_will_post_at = will_post_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -48,8 +49,8 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
         ContentStatus::Rejected { .. } => {
             let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
             let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()) {
-                Ok(rejected_content) => rejected_content,
-                Err(_) => {
+                Some(rejected_content) => rejected_content,
+                None => {
                     return format!("{base_caption}\n{}\n‎", rejected_caption);
                 }
             };
@@ -86,7 +87,7 @@ pub async fn generate_full_caption(database: &Database, ui_definitions: &UiDefin
 pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: &Vec<ContentInfo>, content_queue: Vec<QueuedContent>, now: DateTime<Utc>) -> String {
     let mut full_status_string = bot_status.status_message.clone();
     if !bot_status.is_discord_warmed_up {
-        full_status_string = format!("{}, but discord is still warming up...", full_status_string);
+        full_status_string = format!("{}, discord is still warming up...", full_status_string);
     }
 
     //
@@ -140,8 +141,8 @@ pub async fn clear_all_messages(database: &Database, http: &Arc<Http>, channel_i
         http.delete_message(channel_id, message.id, None).await.unwrap();
     }
 
-    let mut tx = database.begin_transaction().await.unwrap();
-    for mut content in tx.load_content_mapping().unwrap() {
+    let mut tx = database.begin_transaction().await;
+    for mut content in tx.load_content_mapping() {
         if content.status == (ContentStatus::Pending { shown: true }) {
             content.status = ContentStatus::Pending { shown: false };
         } else if content.status == (ContentStatus::Queued { shown: true }) {
@@ -154,7 +155,7 @@ pub async fn clear_all_messages(database: &Database, http: &Arc<Http>, channel_i
             content.status = ContentStatus::Failed { shown: false };
         }
 
-        tx.save_content_info(&content).unwrap();
+        tx.save_content_info(&content);
     }
 }
 
@@ -165,7 +166,7 @@ pub fn now_in_my_timezone(user_settings: &UserSettings) -> DateTime<Utc> {
 }
 
 pub async fn countdown_until_expiration(tx: &mut DatabaseTransaction, expiration_datetime: DateTime<Utc>) -> String {
-    let user_settings = tx.load_user_settings().unwrap();
+    let user_settings = tx.load_user_settings();
     let now = now_in_my_timezone(&user_settings);
     let duration_until_expiration = expiration_datetime.signed_duration_since(now);
 
@@ -297,14 +298,30 @@ pub fn handle_msg_deletion(delete_msg_result: Result<(), SerenityError>) {
 
 pub fn prune_expired_content(tx: &mut DatabaseTransaction, content: &mut ContentInfo) -> bool {
     let added_at = DateTime::parse_from_rfc3339(&content.added_at).unwrap();
-    let user_settings = tx.load_user_settings().unwrap();
+    let user_settings = tx.load_user_settings();
     if now_in_my_timezone(&user_settings) > (added_at + Duration::seconds(S3_EXPIRATION_TIME as i64)) {
-        tx.remove_content_info_with_shortcode(&content.original_shortcode).unwrap();
+        tx.remove_content_info_with_shortcode(&content.original_shortcode);
         let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content.original_shortcode.clone());
         if is_in_queue {
-            tx.remove_post_from_queue_with_shortcode(content.original_shortcode.clone()).unwrap();
+            tx.remove_post_from_queue_with_shortcode(content.original_shortcode.clone());
         }
         return true;
     }
     false
+}
+
+pub async fn send_message_with_retry(ctx: &Context, channel_id: ChannelId, video_message: CreateMessage) -> Message {
+    let msg = match channel_id.send_message(&ctx.http, video_message.clone()).await {
+        Ok(msg) => msg,
+        Err(e) => {
+            let e = format!("{:?}", e);
+            if e.contains("ConnectionReset") {
+                sleep(Duration::seconds(1).to_std().unwrap()).await;
+                POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap()
+            } else {
+                panic!("Error sending message: {}", e);
+            }
+        }
+    };
+    msg
 }

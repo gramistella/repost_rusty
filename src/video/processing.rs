@@ -48,7 +48,7 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str, usern
     let hash3 = hasher.hash_image(&image3);
     let hash4 = hasher.hash_image(&image4);
 
-    let hashed_videos = tx.load_hashed_videos().unwrap();
+    let hashed_videos = tx.load_hashed_videos();
 
     let mut video_exists = false;
     for hashed_video in hashed_videos {
@@ -79,7 +79,7 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str, usern
             hash_frame_4: hash4.clone(),
         };
 
-        tx.save_hashed_video(video_hash).unwrap();
+        tx.save_hashed_video(video_hash);
     }
 
     // Delete the extracted frames

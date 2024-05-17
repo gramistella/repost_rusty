@@ -1,13 +1,13 @@
 use std::error::Error;
 use std::fmt;
+use std::io::Write;
 use std::str::FromStr;
-use serde::de::Visitor;
-use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+
 use diesel::deserialize::FromSql;
 use diesel::pg::Pg;
 use diesel::serialize::{IsNull, Output, ToSql};
-use std::io::Write;
-
+use serde::de::Visitor;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, PartialEq, FromSqlRow, AsExpression, Clone)]
 #[diesel(sql_type = ContentStatusType)]

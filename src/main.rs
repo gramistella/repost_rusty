@@ -13,12 +13,10 @@ use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
+
 use crate::database::database::Database;
-
-
 use crate::discord::bot::DiscordBot;
 use crate::scraper_poster::scraper::ScraperPoster;
-
 
 mod discord;
 mod s3;
