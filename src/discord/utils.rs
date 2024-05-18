@@ -5,20 +5,18 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serenity::all::{ChannelId, Context, CreateActionRow, CreateButton, CreateMessage, Http, Message};
 use serenity::prelude::SerenityError;
-use tokio::time::sleep;
 
-use crate::database::database::{BotStatus, ContentInfo, Database, DatabaseTransaction, QueuedContent, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
+use crate::database::database::{BotStatus, ContentInfo, DatabaseTransaction, QueuedContent, UserSettings, DEFAULT_FAILURE_EXPIRATION, DEFAULT_POSTED_EXPIRATION};
 use crate::discord::bot::UiDefinitions;
 use crate::discord::state::ContentStatus;
 use crate::{POSTED_CHANNEL_ID, S3_EXPIRATION_TIME};
 
-pub async fn generate_full_caption(tx: &mut DatabaseTransaction, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
+pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut DatabaseTransaction, ui_definitions: &UiDefinitions, content_info: &ContentInfo) -> String {
     // let upper_spacer = "^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^~^";
     // let upper_spacer = "## nununununununununununununununu";
     let upper_spacer = "### ->->->->->->->->->->->->->->->->->->->->->->";
     let base_caption = format!("{upper_spacer}\n‎\n{}\n‎\n(from @{})\n‎\n{}\n", content_info.caption, content_info.original_author, content_info.hashtags);
 
-    let user_settings = tx.load_user_settings();
     match content_info.status {
         ContentStatus::Queued { .. } => {
             let mut formatted_will_post_at = "".to_string();
@@ -32,7 +30,7 @@ pub async fn generate_full_caption(tx: &mut DatabaseTransaction, ui_definitions:
                     let will_post_at = DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap();
                     formatted_will_post_at = will_post_at.format("%Y-%m-%d %H:%M:%S").to_string();
 
-                    countdown_caption = countdown_until_expiration(tx, will_post_at.with_timezone(&Utc)).await;
+                    countdown_caption = countdown_until_expiration(user_settings, will_post_at.with_timezone(&Utc)).await;
 
                     if countdown_caption.contains("0 hours, 0 minutes and 0 seconds") {
                         countdown_caption = "Posting now...".to_string();
@@ -54,7 +52,7 @@ pub async fn generate_full_caption(tx: &mut DatabaseTransaction, ui_definitions:
             };
             let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::seconds((user_settings.rejected_content_lifespan * 60) as i64);
 
-            let countdown_caption = countdown_until_expiration(tx, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(user_settings, will_expire_at.with_timezone(&Utc)).await;
 
             format!("{base_caption}\n{}\n{}\n‎", rejected_caption, countdown_caption)
         }
@@ -64,7 +62,7 @@ pub async fn generate_full_caption(tx: &mut DatabaseTransaction, ui_definitions:
             let published_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap().format("%Y-%m-%d %H:%M:%S").to_string();
             let will_expire_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap() + DEFAULT_POSTED_EXPIRATION;
 
-            let countdown_caption = countdown_until_expiration(tx, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(user_settings, will_expire_at.with_timezone(&Utc)).await;
 
             format!("{base_caption}\n{} at {}\n{}\n‎", published_caption, published_at, countdown_caption)
         }
@@ -73,7 +71,7 @@ pub async fn generate_full_caption(tx: &mut DatabaseTransaction, ui_definitions:
             let failed_content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
             let will_expire_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap() + DEFAULT_FAILURE_EXPIRATION;
 
-            let countdown_caption = countdown_until_expiration(tx, will_expire_at.with_timezone(&Utc)).await;
+            let countdown_caption = countdown_until_expiration(user_settings, will_expire_at.with_timezone(&Utc)).await;
             format!("{base_caption}\n{}\n{}\n‎", failed_caption, countdown_caption)
         }
         _ => {
@@ -82,7 +80,7 @@ pub async fn generate_full_caption(tx: &mut DatabaseTransaction, ui_definitions:
     }
 }
 
-pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: &Vec<ContentInfo>, content_queue: Vec<QueuedContent>, now: DateTime<Utc>) -> String {
+pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: Vec<ContentInfo>, content_queue: Vec<QueuedContent>, now: DateTime<Utc>) -> String {
     let mut full_status_string = bot_status.status_message.clone();
     if !bot_status.is_discord_warmed_up {
         full_status_string = format!("{}, discord is still warming up...", full_status_string);
@@ -129,7 +127,7 @@ pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: &Vec
 }
 
 /// Clears all messages in the chat and sets all content statuses to hidden.
-pub async fn clear_all_messages(database: &Database, http: &Arc<Http>, channel_id: ChannelId, is_first_time: bool) {
+pub async fn clear_all_messages(tx: &mut DatabaseTransaction, http: &Arc<Http>, channel_id: ChannelId, is_first_time: bool) {
     let previous_messages = http.get_messages(channel_id, None, None).await.unwrap();
     for message in previous_messages {
         if message.author.bot && message.content.contains("Welcome back! 🦀") && !is_first_time {
@@ -139,7 +137,6 @@ pub async fn clear_all_messages(database: &Database, http: &Arc<Http>, channel_i
         http.delete_message(channel_id, message.id, None).await.unwrap();
     }
 
-    let mut tx = database.begin_transaction().await;
     for mut content in tx.load_content_mapping() {
         if content.status == (ContentStatus::Pending { shown: true }) {
             content.status = ContentStatus::Pending { shown: false };
@@ -163,9 +160,8 @@ pub fn now_in_my_timezone(user_settings: &UserSettings) -> DateTime<Utc> {
     utc_now + timezone_offset
 }
 
-pub async fn countdown_until_expiration(tx: &mut DatabaseTransaction, expiration_datetime: DateTime<Utc>) -> String {
-    let user_settings = tx.load_user_settings();
-    let now = now_in_my_timezone(&user_settings);
+pub async fn countdown_until_expiration(user_settings: &UserSettings, expiration_datetime: DateTime<Utc>) -> String {
+    let now = now_in_my_timezone(user_settings);
     let duration_until_expiration = expiration_datetime.signed_duration_since(now);
 
     let mut hours = duration_until_expiration.num_hours();
@@ -243,6 +239,7 @@ pub fn get_bot_status_buttons(bot_status: &BotStatus) -> Vec<CreateActionRow> {
 lazy_static! {
     static ref CUSTOM_ID_REGEX: Regex = Regex::new(r#"custom_id: "([^"]+)""#).unwrap();
 }
+
 pub async fn should_update_buttons(old_msg: Message, new_buttons: Vec<CreateActionRow>) -> bool {
     fn extract_custom_ids(component_description: &str) -> Vec<String> {
         CUSTOM_ID_REGEX.captures_iter(component_description).filter_map(|cap| cap.get(1).map(|match_| match_.as_str().to_string())).collect()
@@ -294,10 +291,9 @@ pub fn handle_msg_deletion(delete_msg_result: Result<(), SerenityError>) {
     }
 }
 
-pub fn prune_expired_content(tx: &mut DatabaseTransaction, content: &mut ContentInfo) -> bool {
+pub fn prune_expired_content(user_settings: &UserSettings, tx: &mut DatabaseTransaction, content: &mut ContentInfo) -> bool {
     let added_at = DateTime::parse_from_rfc3339(&content.added_at).unwrap();
-    let user_settings = tx.load_user_settings();
-    if now_in_my_timezone(&user_settings) > (added_at + Duration::seconds(S3_EXPIRATION_TIME as i64)) {
+    if now_in_my_timezone(user_settings) > (added_at + Duration::seconds(S3_EXPIRATION_TIME as i64)) {
         tx.remove_content_info_with_shortcode(&content.original_shortcode);
         let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content.original_shortcode.clone());
         if is_in_queue {
@@ -309,17 +305,12 @@ pub fn prune_expired_content(tx: &mut DatabaseTransaction, content: &mut Content
 }
 
 pub async fn send_message_with_retry(ctx: &Context, channel_id: ChannelId, video_message: CreateMessage) -> Message {
-    let msg = match channel_id.send_message(&ctx.http, video_message.clone()).await {
+    match channel_id.send_message(&ctx.http, video_message.clone()).await {
         Ok(msg) => msg,
         Err(e) => {
             let e = format!("{:?}", e);
-            if e.contains("ConnectionReset") {
-                sleep(Duration::seconds(1).to_std().unwrap()).await;
-                POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap()
-            } else {
-                panic!("Error sending message: {}", e);
-            }
+            tracing::warn!("Error sending message: {}", e);
+            POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap()
         }
-    };
-    msg
+    }
 }

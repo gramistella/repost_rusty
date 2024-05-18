@@ -27,7 +27,20 @@ pub async fn upload_to_s3(credentials: &HashMap<String, String>, video_path: Str
         final_path = format!("dev/{}", final_path);
     }
 
-    bucket.put_object_with_content_type(final_path.clone(), &file_content, "video/mp4").await.unwrap();
+    match bucket.put_object_with_content_type(final_path.clone(), &file_content, "video/mp4").await {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("Error uploading file to s3, retrying...\n{}", e);
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            match bucket.put_object_with_content_type(final_path.clone(), &file_content, "video/mp4").await {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Error uploading file to s3: {}", e);
+                    return Err(Box::new(e));
+                }
+            };
+        }
+    };
     let url = bucket.presign_get(final_path.clone(), S3_EXPIRATION_TIME, None).await.unwrap();
 
     if delete_from_local_storage {

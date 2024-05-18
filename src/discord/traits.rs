@@ -105,16 +105,17 @@ impl ProcessableContent for ContentInfo {
     }
 
     async fn generate_caption(&self, tx: &mut DatabaseTransaction, ui_definitions: &UiDefinitions) -> String {
-        generate_full_caption(tx, &ui_definitions, self).await
+        let user_settings = tx.load_user_settings();
+        generate_full_caption(&user_settings, tx, ui_definitions, self).await
     }
 
     async fn generate_buttons(&self, ui_definitions: &UiDefinitions) -> Vec<CreateActionRow> {
         match self.status {
-            ContentStatus::Pending { .. } => get_pending_buttons(&ui_definitions),
-            ContentStatus::Failed { .. } => get_failed_buttons(&ui_definitions),
-            ContentStatus::Published { .. } => get_published_buttons(&ui_definitions),
-            ContentStatus::Queued { .. } => get_queued_buttons(&ui_definitions),
-            ContentStatus::Rejected { .. } => get_rejected_buttons(&ui_definitions),
+            ContentStatus::Pending { .. } => get_pending_buttons(ui_definitions),
+            ContentStatus::Failed { .. } => get_failed_buttons(ui_definitions),
+            ContentStatus::Published { .. } => get_published_buttons(ui_definitions),
+            ContentStatus::Queued { .. } => get_queued_buttons(ui_definitions),
+            ContentStatus::Rejected { .. } => get_rejected_buttons(ui_definitions),
             ContentStatus::RemovedFromView => {
                 vec![]
             }

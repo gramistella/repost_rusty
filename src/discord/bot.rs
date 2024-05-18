@@ -11,14 +11,14 @@ use serenity::prelude::*;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
-use crate::database::database::{Database, DatabaseTransaction};
+use crate::database::database::{Database, DatabaseTransaction, UserSettings};
 use crate::discord::commands::{edit_caption, Data};
 use crate::discord::interactions::{EditedContent, EditedContentKind};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{clear_all_messages, prune_expired_content};
 use crate::{GUILD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 
-pub(crate) const DISCORD_REFRESH_RATE: Duration = Duration::from_millis(333);
+pub(crate) const DISCORD_REFRESH_RATE: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 pub struct Handler {
@@ -62,10 +62,12 @@ impl EventHandler for Handler {
 
                 let mut received_edit = "".to_string();
                 if msg.content != "!" {
-                    received_edit = msg.content.clone();
+                    received_edit.clone_from(&msg.content);
                 }
 
                 let mut tx = self.database.begin_transaction().await;
+                let user_settings = tx.load_user_settings();
+
                 match edited_content.kind {
                     EditedContentKind::Caption => {
                         edited_content.content_info.caption = received_edit;
@@ -76,10 +78,11 @@ impl EventHandler for Handler {
                 }
 
                 tx.save_content_info(&edited_content.content_info);
+
                 msg.delete(&ctx.http).await.unwrap();
                 ctx.http.delete_message(channel_id, edited_content.message_to_delete.unwrap(), None).await.unwrap();
 
-                self.process_pending(&ctx, &mut tx, &mut edited_content.content_info, Arc::clone(&self.global_last_updated_at)).await;
+                self.process_pending(&ctx, &user_settings, &mut tx, &mut edited_content.content_info, Arc::clone(&self.global_last_updated_at)).await;
             }
         }
     }
@@ -87,13 +90,14 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
         loop {
             let mut tx = self.database.begin_transaction().await;
+            let user_settings = tx.load_user_settings();
 
             let self_clone = self.clone();
             let ctx_clone = ctx.clone();
             let global_last_updated_at = Arc::clone(&self.global_last_updated_at);
 
             let task = tokio::spawn(async move {
-                self_clone.ready_loop(&ctx_clone, &mut tx, global_last_updated_at).await;
+                self_clone.ready_loop(&ctx_clone, &user_settings, &mut tx, global_last_updated_at).await;
             });
 
             task.await.unwrap();
@@ -191,10 +195,10 @@ impl EventHandler for Handler {
                     self.interaction_remove_from_view_failed(&ctx, &mut content).await;
                 }
                 "edit" => {
-                    self.interaction_edit(&mut tx, &ctx, &mut content).await;
+                    self.interaction_edit(&user_settings, &mut tx, &ctx, &mut content).await;
                 }
                 "go_back" => {
-                    self.interaction_go_back(&mut tx, &ctx, &mut content).await;
+                    self.interaction_go_back(&user_settings, &mut tx, &ctx, &mut content).await;
                 }
                 "edit_caption" => {
                     if self.edited_content.lock().await.is_none() {
@@ -220,12 +224,12 @@ impl EventHandler for Handler {
 }
 
 impl Handler {
-    async fn ready_loop(&self, ctx: &Context, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
+    async fn ready_loop(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         if self.is_bot_busy().await {
             return;
         }
 
-        self.process_bot_status(ctx, tx, Arc::clone(&global_last_updated_at)).await;
+        self.process_bot_status(ctx, user_settings, tx, Arc::clone(&global_last_updated_at)).await;
         let content_mapping = tx.load_content_mapping();
 
         if content_mapping.is_empty() {
@@ -233,7 +237,7 @@ impl Handler {
         }
 
         for mut content in content_mapping {
-            if prune_expired_content(tx, &mut content) {
+            if prune_expired_content(user_settings, tx, &mut content) {
                 continue;
             }
 
@@ -242,12 +246,15 @@ impl Handler {
             }
 
             match content.status {
-                ContentStatus::RemovedFromView => tx.remove_content_info_with_shortcode(&content.original_shortcode),
-                ContentStatus::Pending { .. } => self.process_pending(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
-                ContentStatus::Queued { .. } => self.process_queued(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
-                ContentStatus::Published { .. } => self.process_published(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
-                ContentStatus::Rejected { .. } => self.process_rejected(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
-                ContentStatus::Failed { .. } => self.process_failed(ctx, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::RemovedFromView => {
+                    tx.remove_content_info_with_shortcode(&content.original_shortcode);
+                    continue;
+                }
+                ContentStatus::Pending { .. } => self.process_pending(ctx, user_settings, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::Queued { .. } => self.process_queued(ctx, user_settings, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::Published { .. } => self.process_published(ctx, user_settings, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::Rejected { .. } => self.process_rejected(ctx, user_settings, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
+                ContentStatus::Failed { .. } => self.process_failed(ctx, user_settings, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
             }
 
             tx.save_content_info(&content);
@@ -339,7 +346,9 @@ impl DiscordBot {
             }
         };
 
-        clear_all_messages(&database, &client.http, channel_id, true).await;
+        let mut tx = database.begin_transaction().await;
+
+        clear_all_messages(&mut tx, &client.http, channel_id, true).await;
 
         if is_first_run {
             // Set up the posted channel
@@ -361,7 +370,6 @@ impl DiscordBot {
             }
 
             // Set up the status channel
-            let mut tx = database.begin_transaction().await;
             tx.clear_all_other_bot_statuses().await;
 
             let messages = STATUS_CHANNEL_ID.messages(&client.http, GetMessages::new()).await.unwrap();

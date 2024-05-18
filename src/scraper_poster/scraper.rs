@@ -204,7 +204,9 @@ impl ScraperPoster {
 
                     if content_mapping_len >= MAX_CONTENT_HANDLED {
                         cloned_self.println("Reached the maximum amount of handled content");
-                        cloned_self.randomized_sleep(SCRAPER_DOWNLOAD_SLEEP_LEN.as_secs()).await;
+                        cloned_self.println(&format!("Starting long sleep ({} minutes)", SCRAPER_LOOP_SLEEP_LEN.as_secs() / 60));
+                        cloned_self.randomized_sleep(SCRAPER_LOOP_SLEEP_LEN.as_secs()).await;
+                        
                         continue;
                     }
 
@@ -635,7 +637,7 @@ impl ScraperPoster {
                                                     InstagramScraperError::UploadSucceededButFailedToRetrieveId(e) => {
                                                         cloned_self.println(&format!("[!] Uploaded content to instagram, but failed to retrieve media id!\n [WARNING] {}\n{}", e, queued_post.url));
                                                         drop(scraper_guard);
-                                                        cloned_self.handle_posted_but_failed_content(&mut queued_post).await;
+                                                        cloned_self.handle_posted_but_failed_content(&queued_post).await;
                                                     }
                                                     _ => {}
                                                 }

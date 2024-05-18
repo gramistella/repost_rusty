@@ -14,26 +14,26 @@ impl Handler {
     pub async fn interaction_resume_from_halt(&self, user_settings: &UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
         bot_status.status = 0;
         bot_status.status_message = "resuming...".to_string();
-        bot_status.last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         tx.save_bot_status(bot_status)
     }
 
     pub async fn interaction_enable_manual_mode(&self, user_settings: &UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
         bot_status.manual_mode = true;
         bot_status.status_message = "manual mode  🟡".to_string();
-        bot_status.last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         tx.save_bot_status(bot_status)
     }
 
     pub async fn interaction_disable_manual_mode(&self, user_settings: &UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
         bot_status.manual_mode = false;
         bot_status.status_message = "disabling manual mode...".to_string();
-        bot_status.last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
         tx.save_bot_status(bot_status)
     }
 
     pub async fn interaction_publish_now(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
-        let now = now_in_my_timezone(&user_settings);
+        let now = now_in_my_timezone(user_settings);
 
         let mut queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
         queued_content.will_post_at = (now + Duration::seconds(30)).to_rfc3339();
@@ -44,7 +44,7 @@ impl Handler {
     pub async fn interaction_accepted(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
         content_info.status = ContentStatus::Queued { shown: true };
 
-        let now = now_in_my_timezone(&user_settings);
+        let now = now_in_my_timezone(user_settings);
         let will_post_at = tx.get_new_post_time();
         let queued_content = QueuedContent {
             username: content_info.username.clone(),
@@ -64,7 +64,7 @@ impl Handler {
     pub async fn interaction_rejected(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
         content_info.status = ContentStatus::Rejected { shown: true };
 
-        let now = now_in_my_timezone(&user_settings);
+        let now = now_in_my_timezone(user_settings);
         let rejected_content = RejectedContent {
             username: content_info.username.clone(),
             url: content_info.url.clone(),
@@ -87,7 +87,7 @@ impl Handler {
             tx.remove_post_from_queue_with_shortcode(content_info.original_shortcode.clone());
         }
 
-        let now = now_in_my_timezone(&user_settings);
+        let now = now_in_my_timezone(user_settings);
         content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     }
 
@@ -96,7 +96,7 @@ impl Handler {
 
         tx.remove_rejected_content_with_shortcode(content_info.original_shortcode.clone());
 
-        let now = now_in_my_timezone(&user_settings);
+        let now = now_in_my_timezone(user_settings);
         content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     }
 
@@ -109,10 +109,10 @@ impl Handler {
         handle_content_deletion(&self.credentials, ctx, content_info, POSTED_CHANNEL_ID).await;
     }
 
-    pub async fn interaction_go_back(&self, tx: &mut DatabaseTransaction, ctx: &Context, content_info: &mut ContentInfo) {
+    pub async fn interaction_go_back(&self, user_settings: &UserSettings, tx: &mut DatabaseTransaction, ctx: &Context, content_info: &mut ContentInfo) {
         let channel_id = *ctx.data.read().await.get::<ChannelIdMap>().unwrap();
 
-        let msg_caption = generate_full_caption(tx, &self.ui_definitions.clone(), content_info).await;
+        let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions.clone(), content_info).await;
         let msg_buttons = get_pending_buttons(&self.ui_definitions);
 
         let edited_msg = EditMessage::new();
@@ -123,10 +123,10 @@ impl Handler {
         *self.edited_content.lock().await = None;
     }
 
-    pub async fn interaction_edit(&self, tx: &mut DatabaseTransaction, ctx: &Context, content_info: &mut ContentInfo) {
+    pub async fn interaction_edit(&self, user_settings: &UserSettings, tx: &mut DatabaseTransaction, ctx: &Context, content_info: &mut ContentInfo) {
         let channel_id = *ctx.data.read().await.get::<ChannelIdMap>().unwrap();
 
-        let msg_caption = generate_full_caption(tx, &self.ui_definitions.clone(), content_info).await;
+        let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions.clone(), content_info).await;
         let msg_buttons = get_edit_buttons(&self.ui_definitions);
 
         let edited_msg = EditMessage::new();
@@ -145,7 +145,7 @@ impl Handler {
 
         let content_info_dupe = ContentInfo {
             username: content_info.username.clone(),
-            message_id: content_info.message_id.clone(),
+            message_id: content_info.message_id,
             url: content_info.url.clone(),
             caption: content_info.caption.clone(),
             hashtags: content_info.hashtags.clone(),
@@ -154,7 +154,7 @@ impl Handler {
             status: content_info.status.clone(),
             last_updated_at: content_info.last_updated_at.clone(),
             added_at: content_info.added_at.clone(),
-            encountered_errors: content_info.encountered_errors.clone(),
+            encountered_errors: content_info.encountered_errors,
         };
 
         *self.edited_content.lock().await = Some(EditedContent {

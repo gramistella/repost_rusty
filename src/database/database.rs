@@ -522,9 +522,7 @@ pub struct DatabaseTransaction {
 
 impl DatabaseTransaction {
     pub fn load_user_settings(&mut self) -> UserSettings {
-        let user_settings = user_settings::table.filter(user_settings::username.eq(&self.username)).first::<UserSettings>(&mut self.conn).unwrap();
-
-        user_settings
+        user_settings::table.filter(user_settings::username.eq(&self.username)).first::<UserSettings>(&mut self.conn).unwrap()
     }
 
     pub fn _save_user_settings(&mut self, user_settings: &UserSettings) {
@@ -534,7 +532,7 @@ impl DatabaseTransaction {
     pub fn load_bot_status(&mut self) -> BotStatus {
         let bot_status = bot_status::table.filter(bot_status::username.eq(&self.username)).first::<InnerBotStatus>(&mut self.conn).unwrap();
 
-        let outer_bot_status = BotStatus {
+        BotStatus {
             username: bot_status.username,
             message_id: MessageId::new(bot_status.message_id as u64),
             status: bot_status.status,
@@ -544,9 +542,8 @@ impl DatabaseTransaction {
             last_updated_at: bot_status.last_updated_at,
             queue_alert_message_id: MessageId::new(bot_status.queue_alert_message_id as u64),
             halt_alert_message_id: MessageId::new(bot_status.halt_alert_message_id as u64),
-        };
-
-        outer_bot_status
+        }
+        
     }
 
     pub fn save_bot_status(&mut self, bot_status: &BotStatus) {
@@ -570,15 +567,14 @@ impl DatabaseTransaction {
     }
 
     pub fn load_duplicate_content(&mut self) -> Vec<DuplicateContent> {
-        let duplicate_content = duplicate_content::table.filter(duplicate_content::username.eq(&self.username)).load::<DuplicateContent>(&mut self.conn).unwrap();
-
-        duplicate_content
+        duplicate_content::table.filter(duplicate_content::username.eq(&self.username)).load::<DuplicateContent>(&mut self.conn).unwrap()
+        
     }
 
     pub fn get_content_info_by_shortcode(&mut self, shortcode: &String) -> ContentInfo {
         let found_content = content_info::table.filter(content_info::username.eq(&self.username)).filter(content_info::original_shortcode.eq(&shortcode)).first::<InnerContentInfo>(&mut self.conn).unwrap();
 
-        let outer_content = ContentInfo {
+        ContentInfo {
             username: found_content.username,
             message_id: MessageId::new(found_content.message_id as u64),
             url: found_content.url,
@@ -590,9 +586,7 @@ impl DatabaseTransaction {
             last_updated_at: found_content.last_updated_at,
             added_at: found_content.added_at,
             encountered_errors: found_content.encountered_errors,
-        };
-
-        outer_content
+        }
     }
 
     pub fn remove_content_info_with_shortcode(&mut self, shortcode: &String) {
@@ -655,7 +649,7 @@ impl DatabaseTransaction {
         let max_message_id = message_id_vec.iter().max().cloned();
         let msg_id = match max_message_id {
             Some(max) => max + 1000,
-            None => now_in_my_timezone(&user_settings).num_seconds_from_midnight() as i64,
+            None => now_in_my_timezone(user_settings).num_seconds_from_midnight() as i64,
         };
 
         msg_id as u64
@@ -669,30 +663,23 @@ impl DatabaseTransaction {
 
         if deleted_rows > 0 {
             let user_settings = self.load_user_settings();
+            let mut queued_content_list = self.load_content_queue();
 
-            let mut queued_posts: Vec<QueuedContent> = queued_content.filter(username.eq(&self.username)).order_by(will_post_at.asc()).load(&mut self.conn).unwrap();
+            if let Some(removed_post_index) = queued_content_list.iter().position(|content| content.original_shortcode == shortcode) {
+                queued_content_list.remove(removed_post_index);
 
-            let removed_post_index = queued_posts.iter().position(|post| post.original_shortcode == shortcode);
-
-            if let Some(removed_post_index) = removed_post_index {
-                queued_posts.remove(removed_post_index);
-
-                for post in queued_posts.iter_mut().skip(removed_post_index) {
-                    let new_post_time = self.get_new_post_time();
-                    post.will_post_at = new_post_time.clone();
+                for post in queued_content_list.iter_mut().skip(removed_post_index) {
+                    post.will_post_at = self.get_new_post_time();
 
                     let mut content_info = self.get_content_info_by_shortcode(&post.original_shortcode);
                     content_info.last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-                    if content_info.status.to_string().contains("shown") {
-                        content_info.status = ContentStatus::Queued { shown: true };
-                    } else {
-                        content_info.status = ContentStatus::Queued { shown: false };
-                    }
+                    content_info.status = if content_info.status.to_string().contains("shown") { ContentStatus::Queued { shown: true } } else { ContentStatus::Queued { shown: false } };
                     self.save_content_info(&content_info);
                 }
             }
         }
     }
+
     pub fn save_queued_content(&mut self, queued_post: &QueuedContent) {
         diesel::insert_into(queued_content::table)
             .values(queued_post)
@@ -704,9 +691,7 @@ impl DatabaseTransaction {
     }
 
     pub fn load_content_queue(&mut self) -> Vec<QueuedContent> {
-        let content_queue = queued_content::table.filter(queued_content::username.eq(&self.username)).order(queued_content::will_post_at).load::<QueuedContent>(&mut self.conn).unwrap();
-
-        content_queue
+        queued_content::table.filter(queued_content::username.eq(&self.username)).order(queued_content::will_post_at).load::<QueuedContent>(&mut self.conn).unwrap()
     }
 
     pub fn get_queued_content_by_shortcode(&mut self, shortcode: String) -> Option<QueuedContent> {
@@ -738,13 +723,17 @@ impl DatabaseTransaction {
     }
 
     pub fn save_rejected_content(&mut self, rejected_content: RejectedContent) {
-        diesel::insert_into(rejected_content::table).values(&rejected_content).execute(&mut self.conn).unwrap();
+        diesel::insert_into(rejected_content::table)
+            .values(&rejected_content)
+            .on_conflict((rejected_content::username, rejected_content::original_shortcode))
+            .do_update()
+            .set(&rejected_content)
+            .execute(&mut self.conn)
+            .unwrap();
     }
 
     pub fn load_rejected_content(&mut self) -> Vec<RejectedContent> {
-        let rejected_content = rejected_content::table.filter(rejected_content::username.eq(&self.username)).load::<RejectedContent>(&mut self.conn).unwrap();
-
-        rejected_content
+        rejected_content::table.filter(rejected_content::username.eq(&self.username)).load::<RejectedContent>(&mut self.conn).unwrap()
     }
 
     /// Save a posted content to the database
@@ -765,7 +754,7 @@ impl DatabaseTransaction {
             }
         }
 
-        // Otherwise we remove the post from the queue with the conn to avoid recalculating the will_post_at of the other posts
+        // Otherwise we remove the post from the queue to avoid recalculating the will_post_at of the other posts
         // This is what the "normal" behavior should be, the above will only happen if the bot was offline for a long time
         if !removed {
             // Firstly we remove the published_content from the content_queue
@@ -788,9 +777,7 @@ impl DatabaseTransaction {
     }
 
     pub fn load_posted_content(&mut self) -> Vec<PublishedContent> {
-        let posted_content = published_content::table.filter(published_content::username.eq(&self.username)).load::<PublishedContent>(&mut self.conn).unwrap();
-
-        posted_content
+        published_content::table.filter(published_content::username.eq(&self.username)).load::<PublishedContent>(&mut self.conn).unwrap()
     }
 
     /// Save a content that failed to upload to the database
@@ -811,9 +798,7 @@ impl DatabaseTransaction {
     }
 
     pub fn load_failed_content(&mut self) -> Vec<FailedContent> {
-        let failed_content = failed_content::table.filter(failed_content::username.eq(&self.username)).load::<FailedContent>(&mut self.conn).unwrap();
-
-        failed_content
+        failed_content::table.filter(failed_content::username.eq(&self.username)).load::<FailedContent>(&mut self.conn).unwrap()
     }
 
     pub fn get_new_post_time(&mut self) -> String {
@@ -926,28 +911,22 @@ impl DatabaseTransaction {
     fn shortcode_exists_in_table(&mut self, table_name: &str, shortcode: &str) -> bool {
         match table_name {
             "content_info" => {
-                let exists_in_table = select(exists(content_info::table.filter(content_info::original_shortcode.eq(shortcode)).filter(content_info::username.eq(&self.username)))).get_result(&mut self.conn).unwrap();
-                exists_in_table
+                select(exists(content_info::table.filter(content_info::original_shortcode.eq(shortcode)).filter(content_info::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
             }
             "published_content" => {
-                let exists_in_table = select(exists(published_content::table.filter(published_content::original_shortcode.eq(shortcode)).filter(published_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap();
-                exists_in_table
+                select(exists(published_content::table.filter(published_content::original_shortcode.eq(shortcode)).filter(published_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
             }
             "queued_content" => {
-                let exists_in_table = select(exists(queued_content::table.filter(queued_content::original_shortcode.eq(shortcode)).filter(queued_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap();
-                exists_in_table
+                select(exists(queued_content::table.filter(queued_content::original_shortcode.eq(shortcode)).filter(queued_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
             }
             "rejected_content" => {
-                let exists_in_table = select(exists(rejected_content::table.filter(rejected_content::original_shortcode.eq(shortcode)).filter(rejected_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap();
-                exists_in_table
+                select(exists(rejected_content::table.filter(rejected_content::original_shortcode.eq(shortcode)).filter(rejected_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
             }
             "failed_content" => {
-                let exists_in_table = select(exists(failed_content::table.filter(failed_content::original_shortcode.eq(shortcode)).filter(failed_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap();
-                exists_in_table
+                select(exists(failed_content::table.filter(failed_content::original_shortcode.eq(shortcode)).filter(failed_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
             }
             "duplicate_content" => {
-                let exists_in_table = select(exists(duplicate_content::table.filter(duplicate_content::original_shortcode.eq(shortcode)).filter(duplicate_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap();
-                exists_in_table
+                select(exists(duplicate_content::table.filter(duplicate_content::original_shortcode.eq(shortcode)).filter(duplicate_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
             }
             _ => false,
         }
