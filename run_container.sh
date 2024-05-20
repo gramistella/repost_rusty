@@ -1,11 +1,13 @@
 #!/bin/bash
 
-# Check if a screen session with the name "repostrusty" already exists
-if screen -list | grep -q "repostrusty"; then
-    echo "Removing existing screen session..."
-    # Terminate the existing screen session
-    screen -X -S repostrusty quit
-fi
+# Get a list of all screen sessions with the name "repostrusty"
+sessions=$(screen -ls | grep -o '[0-9]*\.repostrusty')
+
+# Loop over the sessions and terminate each one
+for session in $sessions; do
+    echo "Removing existing screen session $session..."
+    screen -X -S $session quit
+done
 
 # Create a new screen session named "repostrusty"
 screen -dmS repostrusty

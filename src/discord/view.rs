@@ -16,9 +16,7 @@ use crate::discord::utils::{
     generate_bot_status_caption, generate_full_caption, get_bot_status_buttons, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, handle_msg_deletion, now_in_my_timezone, send_message_with_retry, should_update_buttons, should_update_caption,
 };
 use crate::s3::helper::delete_from_s3;
-use crate::{INTERFACE_UPDATE_INTERVAL, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
-
-const DELAY_BETWEEN_MESSAGE_UPDATES: Duration = Duration::milliseconds(250);
+use crate::{DELAY_BETWEEN_MESSAGE_UPDATES, INTERFACE_UPDATE_INTERVAL, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 
 impl Handler {
     pub async fn process_bot_status(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
@@ -52,7 +50,7 @@ impl Handler {
         // Warn the user if the queue is empty
         if content_queue_len == 0 && bot_status.queue_alert_1_message_id.get() == 1 {
             let mention = Mention::from(MY_DISCORD_ID);
-            let msg_caption = format!("{mention} the content queue is empty! ˙◠˙");
+            let msg_caption = format!("{mention} the content queue is empty! ( •̀ - •́ )");
             let msg = CreateMessage::new().content(msg_caption);
             bot_status.queue_alert_1_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
         }
@@ -70,7 +68,7 @@ impl Handler {
                 let msg_caption = format!("Hello?? Are you there {mention}? Queue some content, or the queue will run out! (╥﹏╥)");
                 let msg = CreateMessage::new().content(msg_caption);
                 bot_status.queue_alert_2_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
-            }  else if content_queue_len == 3 && bot_status.queue_alert_3_message_id.get() == 1 {
+            } else if content_queue_len == 3 && bot_status.queue_alert_3_message_id.get() == 1 {
                 let mention = Mention::from(MY_DISCORD_ID);
                 let msg_caption = format!("Hey {mention}, remember to add more content to the queue soon! (¬_¬\")");
                 let msg = CreateMessage::new().content(msg_caption);
@@ -79,7 +77,7 @@ impl Handler {
         }
 
         // If the content_queue_len rises above 2, delete the warning messages
-        if content_queue_len > 2 {
+        if content_queue_len > 3 {
             if bot_status.queue_alert_2_message_id.get() != 1 {
                 let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_2_message_id).await;
                 handle_msg_deletion(delete_msg_result);

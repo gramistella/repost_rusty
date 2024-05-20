@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rand::prelude::{SliceRandom, StdRng};
@@ -17,9 +16,7 @@ use crate::database::database::{Database, DatabaseTransaction, UserSettings};
 use crate::discord::interactions::{EditedContent, EditedContentKind};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{clear_all_messages, prune_expired_content};
-use crate::{GUILD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
-
-pub(crate) const DISCORD_REFRESH_RATE: Duration = Duration::from_millis(250);
+use crate::{DISCORD_REFRESH_RATE, GUILD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 
 #[derive(Clone)]
 pub struct Handler {
@@ -149,13 +146,13 @@ impl EventHandler for Handler {
             }
         }
 
-        let user_settings = tx.load_user_settings();
+        let mut user_settings = tx.load_user_settings();
         if found_content.is_none() {
             let mut bot_status = tx.load_bot_status();
             if bot_status.message_id == original_message_id {
                 match interaction_type.as_str() {
                     "resume_from_halt" => {
-                        self.interaction_resume_from_halt(&user_settings, &mut bot_status, &mut tx).await;
+                        self.interaction_resume_from_halt(&mut user_settings, &mut bot_status, &mut tx).await;
                     }
                     "enable_manual_mode" => {
                         self.interaction_enable_manual_mode(&user_settings, &mut bot_status, &mut tx).await;

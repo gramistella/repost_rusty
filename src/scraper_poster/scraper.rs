@@ -20,10 +20,9 @@ use crate::discord::utils::now_in_my_timezone;
 use crate::s3::helper::upload_to_s3;
 use crate::scraper_poster::utils::{pause_scraper_if_needed, process_caption, save_cookie_store_to_json, set_bot_status_halted, set_bot_status_operational};
 use crate::video::processing::process_video;
-use crate::MAX_CONTENT_HANDLED;
 use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
+use crate::{MAX_CONTENT_HANDLED, SCRAPER_REFRESH_RATE};
 
-pub(crate) const SCRAPER_REFRESH_RATE: Duration = Duration::from_millis(1500);
 #[derive(Clone)]
 pub struct ContentManager {
     pub(crate) username: String,

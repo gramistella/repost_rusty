@@ -492,6 +492,7 @@ impl Database {
             queue_alert_1_message_id BIGINT NOT NULL,
             queue_alert_2_message_id BIGINT NOT NULL,
             queue_alert_3_message_id BIGINT NOT NULL,
+            prev_content_queue_len INTEGER NOT NULL,
             halt_alert_message_id BIGINT NOT NULL
         )",
         )
@@ -698,12 +699,12 @@ impl DatabaseTransaction {
         }
     }
 
-    pub fn save_queued_content(&mut self, queued_post: &QueuedContent) {
+    pub fn save_queued_content(&mut self, queued_content: &QueuedContent) {
         diesel::insert_into(queued_content::table)
-            .values(queued_post)
+            .values(queued_content)
             .on_conflict((queued_content::username, queued_content::original_shortcode))
             .do_update()
-            .set(queued_post)
+            .set(queued_content)
             .execute(&mut self.conn)
             .unwrap();
     }

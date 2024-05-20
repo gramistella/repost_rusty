@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use serenity::all::{CreateActionRow, MessageId};
 use serenity::async_trait;
 

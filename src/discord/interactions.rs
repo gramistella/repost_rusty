@@ -11,10 +11,12 @@ use crate::discord::view::handle_content_deletion;
 use crate::{INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
 
 impl Handler {
-    pub async fn interaction_resume_from_halt(&self, user_settings: &UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
+    pub async fn interaction_resume_from_halt(&self, user_settings: &mut UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
         bot_status.status = 0;
+        user_settings.can_post = true;
         bot_status.status_message = "resuming...".to_string();
         bot_status.last_updated_at = (now_in_my_timezone(user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        tx.save_user_settings(user_settings);
         tx.save_bot_status(bot_status)
     }
 
