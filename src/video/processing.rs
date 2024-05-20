@@ -4,6 +4,7 @@ use std::process::Stdio;
 use image_hasher::HasherConfig;
 
 use crate::database::database::{DatabaseTransaction, HashedVideo};
+use crate::video::error::{VideoProcessingError, VideoProcessingResult};
 
 fn divide_number(n: i32) -> [i32; 4] {
     let part1 = 0;
@@ -16,7 +17,7 @@ fn divide_number(n: i32) -> [i32; 4] {
 
 /// Returns whether the video already exists in the database
 
-pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str, username: String, shortcode: String) -> Result<bool, Box<dyn std::error::Error>> {
+pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str, username: String, shortcode: String) -> VideoProcessingResult<bool> {
     //println!("Processing video: {}, shortcode {}, username {}", video_path, shortcode, username);
     let path = format!("temp/{video_path}");
 
@@ -91,7 +92,7 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str, usern
     Ok(video_exists)
 }
 
-fn get_total_frames(video_path: &str) -> Result<i32, Box<dyn std::error::Error>> {
+fn get_total_frames(video_path: &str) -> VideoProcessingResult<i32> {
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
@@ -111,7 +112,7 @@ fn get_total_frames(video_path: &str) -> Result<i32, Box<dyn std::error::Error>>
     Ok(total_frames)
 }
 
-fn get_video_duration(video_path: &str) -> Result<f64, Box<dyn std::error::Error>> {
+fn get_video_duration(video_path: &str) -> VideoProcessingResult<f64> {
     let output = Command::new("ffprobe")
         .arg("-v")
         .arg("error")
@@ -125,11 +126,14 @@ fn get_video_duration(video_path: &str) -> Result<f64, Box<dyn std::error::Error
         .output()
         .unwrap();
 
-    let duration = String::from_utf8(output.stdout).unwrap().trim().parse::<f64>().unwrap();
+    let duration = match String::from_utf8(output.stdout.clone()).unwrap().trim().parse::<f64>() {
+        Ok(duration) => duration,
+        Err(_) => return Err(VideoProcessingError::DurationError(String::from_utf8(output.stdout).unwrap().trim().to_string())),
+    };
     Ok((duration * 1000.0).round() / 1000.0)
 }
 
-fn extract_frame(video_path: &str, frame_number: i32, output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn extract_frame(video_path: &str, frame_number: i32, output_path: &str) -> VideoProcessingResult<()> {
     let status = Command::new("ffmpeg")
         .arg("-y")
         .arg("-i")
@@ -145,7 +149,7 @@ fn extract_frame(video_path: &str, frame_number: i32, output_path: &str) -> Resu
         .unwrap();
 
     if !status.success() {
-        return Err("Failed to extract frame".into());
+        return Err(VideoProcessingError::FrameExtractionError(frame_number));
     }
 
     Ok(())

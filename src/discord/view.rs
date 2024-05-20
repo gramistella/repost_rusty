@@ -49,17 +49,51 @@ impl Handler {
         // find all content in content info that is suitable for queuing
         let queueable_content_count = content_info_vec.iter().filter(|content_info| matches!(&content_info.status, ContentStatus::Pending { .. })).count();
 
-        // Remind the user if the content queue is about to run out
-        if content_queue_len <= 2 && bot_status.queue_alert_message_id.get() == 1 && queueable_content_count >= 1 {
+        // Warn the user if the queue is empty
+        if content_queue_len == 0 && bot_status.queue_alert_1_message_id.get() == 1 {
             let mention = Mention::from(MY_DISCORD_ID);
-            let msg_caption = format!("Hey {mention}, the content queue is about to run out!");
+            let msg_caption = format!("{mention} the content queue is empty! ˙◠˙");
             let msg = CreateMessage::new().content(msg_caption);
-            bot_status.queue_alert_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
-        } else if content_queue_len > 2 && bot_status.queue_alert_message_id.get() != 1 {
-            let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_message_id).await;
-            handle_msg_deletion(delete_msg_result);
-            bot_status.queue_alert_message_id = MessageId::new(1);
+            bot_status.queue_alert_1_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
         }
+        // If the queue is not empty, but the message is still there, delete it
+        else if content_queue_len > 0 && bot_status.queue_alert_1_message_id.get() != 1 {
+            let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_1_message_id).await;
+            handle_msg_deletion(delete_msg_result);
+            bot_status.queue_alert_1_message_id = MessageId::new(1);
+        }
+
+        // Warn the user if the queue is about to be empty
+        if content_queue_len < bot_status.prev_content_queue_len as usize && queueable_content_count >= 1 {
+            if content_queue_len == 1 && bot_status.queue_alert_2_message_id.get() == 1 {
+                let mention = Mention::from(MY_DISCORD_ID);
+                let msg_caption = format!("Hello?? Are you there {mention}? Queue some content, or the queue will run out! (╥﹏╥)");
+                let msg = CreateMessage::new().content(msg_caption);
+                bot_status.queue_alert_2_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
+            }  else if content_queue_len == 3 && bot_status.queue_alert_3_message_id.get() == 1 {
+                let mention = Mention::from(MY_DISCORD_ID);
+                let msg_caption = format!("Hey {mention}, remember to add more content to the queue soon! (¬_¬\")");
+                let msg = CreateMessage::new().content(msg_caption);
+                bot_status.queue_alert_3_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
+            }
+        }
+
+        // If the content_queue_len rises above 2, delete the warning messages
+        if content_queue_len > 2 {
+            if bot_status.queue_alert_2_message_id.get() != 1 {
+                let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_2_message_id).await;
+                handle_msg_deletion(delete_msg_result);
+                bot_status.queue_alert_2_message_id = MessageId::new(1);
+            }
+            if bot_status.queue_alert_3_message_id.get() != 1 {
+                let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_3_message_id).await;
+                handle_msg_deletion(delete_msg_result);
+                bot_status.queue_alert_3_message_id = MessageId::new(1);
+            }
+        }
+
+        // Update prev_content_queue_len
+        bot_status.prev_content_queue_len = content_queue_len as i32;
 
         // Notify the user if the bot is halted
         if bot_status.status == 1 && bot_status.halt_alert_message_id.get() == 1 {
@@ -94,34 +128,6 @@ impl Handler {
             content_info.last_updated_at = now_in_my_timezone(user_settings).to_rfc3339();
         }
     }
-
-    /*
-    pub async fn process_content<T: ProcessableContent + Sync + Send>(
-        &self,
-        user_settings: &UserSettings,
-        ctx: &Context,
-        tx: &mut DatabaseTransaction,
-        content: &mut T,
-        global_last_updated_at: Arc<Mutex<DateTime<Utc>>>,
-        channel_id: ChannelId,
-    ){
-        let content_caption = content.generate_caption(tx, &self.ui_definitions).await;
-        let content_buttons = content.generate_buttons(&self.ui_definitions).await;
-
-        if content.is_shown().await {
-            handle_shown_message_update(ctx, channel_id, content, user_settings, &content_caption, content_buttons, global_last_updated_at).await;
-        } else {
-            content.set_status(ContentStatus::Pending { shown: true }).await;
-
-            let video_attachment = get_video_attachment(ctx, content).await;
-            let video_message = CreateMessage::new().add_file(video_attachment).content(content_caption).components(content_buttons);
-            let msg = send_message_with_retry(ctx, channel_id, video_message).await;
-            content.set_message_id(msg.id);
-            content.set_last_updated_at(now_in_my_timezone(user_settings).to_rfc3339());
-        }
-
-    }
-    */
 
     pub async fn process_queued(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, content_info: &mut ContentInfo, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         let channel_id = *ctx.data.read().await.get::<ChannelIdMap>().unwrap();

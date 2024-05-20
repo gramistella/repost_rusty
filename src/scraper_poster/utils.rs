@@ -31,18 +31,24 @@ pub async fn pause_scraper_if_needed(tx: &mut DatabaseTransaction) {
 
 pub fn set_bot_status_halted(tx: &mut DatabaseTransaction) {
     let mut bot_status = tx.load_bot_status();
+    let mut user_settings = tx.load_user_settings();
+    user_settings.can_post = false;
     bot_status.status = 1;
     bot_status.status_message = "halted  ⚠️".to_string();
     bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     tx.save_bot_status(&bot_status);
+    tx.save_user_settings(&user_settings);
 }
 
 pub fn set_bot_status_operational(tx: &mut DatabaseTransaction) {
     let mut bot_status = tx.load_bot_status();
+    let mut user_settings = tx.load_user_settings();
+    user_settings.can_post = false;
     bot_status.status = 0;
     bot_status.status_message = "operational  🟢".to_string();
     bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
     tx.save_bot_status(&bot_status);
+    tx.save_user_settings(&user_settings);
 }
 
 pub fn process_caption(accounts_to_scrape: &HashMap<String, String>, hashtag_mapping: &HashMap<String, String>, mut rng: &mut StdRng, author: &User, caption: String) -> String {

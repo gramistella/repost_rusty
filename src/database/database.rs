@@ -233,7 +233,10 @@ pub struct BotStatus {
     pub is_discord_warmed_up: bool,
     pub manual_mode: bool,
     pub last_updated_at: String,
-    pub queue_alert_message_id: MessageId,
+    pub queue_alert_1_message_id: MessageId,
+    pub queue_alert_2_message_id: MessageId,
+    pub queue_alert_3_message_id: MessageId,
+    pub prev_content_queue_len: i32,
     pub halt_alert_message_id: MessageId,
 }
 
@@ -248,7 +251,10 @@ struct InnerBotStatus {
     pub is_discord_warmed_up: bool,
     pub manual_mode: bool,
     pub last_updated_at: String,
-    pub queue_alert_message_id: i64,
+    pub queue_alert_1_message_id: i64,
+    pub queue_alert_2_message_id: i64,
+    pub queue_alert_3_message_id: i64,
+    pub prev_content_queue_len: i32,
     pub halt_alert_message_id: i64,
 }
 
@@ -262,7 +268,10 @@ table! {
         is_discord_warmed_up -> Bool,
         manual_mode -> Bool,
         last_updated_at -> Text,
-        queue_alert_message_id -> BigInt,
+        queue_alert_1_message_id -> BigInt,
+        queue_alert_2_message_id -> BigInt,
+        queue_alert_3_message_id -> BigInt,
+        prev_content_queue_len -> Integer,
         halt_alert_message_id -> BigInt,
     }
 }
@@ -480,7 +489,9 @@ impl Database {
             is_discord_warmed_up BOOLEAN NOT NULL,
             manual_mode BOOLEAN NOT NULL,
             last_updated_at TEXT NOT NULL,
-            queue_alert_message_id BIGINT NOT NULL,
+            queue_alert_1_message_id BIGINT NOT NULL,
+            queue_alert_2_message_id BIGINT NOT NULL,
+            queue_alert_3_message_id BIGINT NOT NULL,
             halt_alert_message_id BIGINT NOT NULL
         )",
         )
@@ -498,7 +509,10 @@ impl Database {
                 is_discord_warmed_up: false,
                 manual_mode: false,
                 last_updated_at: Utc::now().to_rfc3339(),
-                queue_alert_message_id: 1,
+                queue_alert_1_message_id: 1,
+                queue_alert_2_message_id: 1,
+                queue_alert_3_message_id: 1,
+                prev_content_queue_len: 0,
                 halt_alert_message_id: 1,
             };
             diesel::insert_into(bot_status::table).values(&bot_status).execute(conn).unwrap();
@@ -525,7 +539,7 @@ impl DatabaseTransaction {
         user_settings::table.filter(user_settings::username.eq(&self.username)).first::<UserSettings>(&mut self.conn).unwrap()
     }
 
-    pub fn _save_user_settings(&mut self, user_settings: &UserSettings) {
+    pub fn save_user_settings(&mut self, user_settings: &UserSettings) {
         diesel::update(user_settings::table).filter(user_settings::username.eq(&self.username)).set(user_settings).execute(&mut self.conn).unwrap();
     }
 
@@ -540,10 +554,12 @@ impl DatabaseTransaction {
             is_discord_warmed_up: bot_status.is_discord_warmed_up,
             manual_mode: bot_status.manual_mode,
             last_updated_at: bot_status.last_updated_at,
-            queue_alert_message_id: MessageId::new(bot_status.queue_alert_message_id as u64),
+            queue_alert_1_message_id: MessageId::new(bot_status.queue_alert_1_message_id as u64),
+            queue_alert_2_message_id: MessageId::new(bot_status.queue_alert_2_message_id as u64),
+            queue_alert_3_message_id: MessageId::new(bot_status.queue_alert_3_message_id as u64),
+            prev_content_queue_len: bot_status.prev_content_queue_len,
             halt_alert_message_id: MessageId::new(bot_status.halt_alert_message_id as u64),
         }
-        
     }
 
     pub fn save_bot_status(&mut self, bot_status: &BotStatus) {
@@ -555,7 +571,10 @@ impl DatabaseTransaction {
             is_discord_warmed_up: bot_status.is_discord_warmed_up,
             manual_mode: bot_status.manual_mode,
             last_updated_at: bot_status.last_updated_at.clone(),
-            queue_alert_message_id: bot_status.queue_alert_message_id.get() as i64,
+            queue_alert_1_message_id: bot_status.queue_alert_1_message_id.get() as i64,
+            queue_alert_2_message_id: bot_status.queue_alert_2_message_id.get() as i64,
+            queue_alert_3_message_id: bot_status.queue_alert_3_message_id.get() as i64,
+            prev_content_queue_len: bot_status.prev_content_queue_len,
             halt_alert_message_id: bot_status.halt_alert_message_id.get() as i64,
         };
 
@@ -568,7 +587,6 @@ impl DatabaseTransaction {
 
     pub fn load_duplicate_content(&mut self) -> Vec<DuplicateContent> {
         duplicate_content::table.filter(duplicate_content::username.eq(&self.username)).load::<DuplicateContent>(&mut self.conn).unwrap()
-        
     }
 
     pub fn get_content_info_by_shortcode(&mut self, shortcode: &String) -> ContentInfo {
@@ -910,24 +928,12 @@ impl DatabaseTransaction {
 
     fn shortcode_exists_in_table(&mut self, table_name: &str, shortcode: &str) -> bool {
         match table_name {
-            "content_info" => {
-                select(exists(content_info::table.filter(content_info::original_shortcode.eq(shortcode)).filter(content_info::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
-            }
-            "published_content" => {
-                select(exists(published_content::table.filter(published_content::original_shortcode.eq(shortcode)).filter(published_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
-            }
-            "queued_content" => {
-                select(exists(queued_content::table.filter(queued_content::original_shortcode.eq(shortcode)).filter(queued_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
-            }
-            "rejected_content" => {
-                select(exists(rejected_content::table.filter(rejected_content::original_shortcode.eq(shortcode)).filter(rejected_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
-            }
-            "failed_content" => {
-                select(exists(failed_content::table.filter(failed_content::original_shortcode.eq(shortcode)).filter(failed_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
-            }
-            "duplicate_content" => {
-                select(exists(duplicate_content::table.filter(duplicate_content::original_shortcode.eq(shortcode)).filter(duplicate_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap()
-            }
+            "content_info" => select(exists(content_info::table.filter(content_info::original_shortcode.eq(shortcode)).filter(content_info::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "published_content" => select(exists(published_content::table.filter(published_content::original_shortcode.eq(shortcode)).filter(published_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "queued_content" => select(exists(queued_content::table.filter(queued_content::original_shortcode.eq(shortcode)).filter(queued_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "rejected_content" => select(exists(rejected_content::table.filter(rejected_content::original_shortcode.eq(shortcode)).filter(rejected_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "failed_content" => select(exists(failed_content::table.filter(failed_content::original_shortcode.eq(shortcode)).filter(failed_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "duplicate_content" => select(exists(duplicate_content::table.filter(duplicate_content::original_shortcode.eq(shortcode)).filter(duplicate_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
             _ => false,
         }
     }

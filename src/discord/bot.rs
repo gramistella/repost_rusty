@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use rand::prelude::{SliceRandom, StdRng};
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, Interaction, MessageId, RatelimitInfo};
 use serenity::async_trait;
@@ -12,7 +14,6 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 use crate::database::database::{Database, DatabaseTransaction, UserSettings};
-use crate::discord::commands::{edit_caption, Data};
 use crate::discord::interactions::{EditedContent, EditedContentKind};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{clear_all_messages, prune_expired_content};
@@ -91,13 +92,14 @@ impl EventHandler for Handler {
         loop {
             let mut tx = self.database.begin_transaction().await;
             let user_settings = tx.load_user_settings();
+            let mut rng = StdRng::from_entropy();
 
             let self_clone = self.clone();
             let ctx_clone = ctx.clone();
             let global_last_updated_at = Arc::clone(&self.global_last_updated_at);
 
             let task = tokio::spawn(async move {
-                self_clone.ready_loop(&ctx_clone, &user_settings, &mut tx, global_last_updated_at).await;
+                self_clone.ready_loop(&ctx_clone, &user_settings, &mut tx, global_last_updated_at, &mut rng).await;
             });
 
             task.await.unwrap();
@@ -224,13 +226,19 @@ impl EventHandler for Handler {
 }
 
 impl Handler {
-    async fn ready_loop(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
+    async fn ready_loop(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>, rng: &mut StdRng) {
         if self.is_bot_busy().await {
             return;
         }
 
         self.process_bot_status(ctx, user_settings, tx, Arc::clone(&global_last_updated_at)).await;
-        let content_mapping = tx.load_content_mapping();
+        let content_mapping = if *self.is_first_iteration.lock().await {
+            tx.load_content_mapping()
+        } else {
+            let mut content_mapping = tx.load_content_mapping();
+            content_mapping.shuffle(rng);
+            content_mapping
+        };
 
         if content_mapping.is_empty() {
             sleep(DISCORD_REFRESH_RATE).await;
@@ -298,16 +306,6 @@ impl DiscordBot {
         // Set gateway intents, which decides what events the bot will be notified about
         let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
-        let framework = poise::Framework::builder()
-            .options(poise::FrameworkOptions { commands: vec![edit_caption()], ..Default::default() })
-            .setup(|ctx, _ready, framework| {
-                Box::pin(async move {
-                    poise::builtins::register_in_guild(ctx, &framework.options().commands, GUILD_ID).await?;
-                    Ok(Data {})
-                })
-            })
-            .build();
-
         // let interaction_shard = Shard::new();
         // Create a new instance of the Client, logging in as a bot.
         let client = Client::builder(token, intents)
@@ -321,7 +319,6 @@ impl DiscordBot {
                 global_last_updated_at: Arc::new(Mutex::new(Utc::now())),
                 is_first_iteration: Arc::new(Mutex::new(true)),
             })
-            .framework(framework)
             .await
             .expect("Err creating client");
 
@@ -398,7 +395,7 @@ impl DiscordBot {
 
             // Reset the message ids for the alerts to function properly when restarting the bot
             bot_status.halt_alert_message_id = MessageId::new(1);
-            bot_status.queue_alert_message_id = MessageId::new(1);
+            bot_status.queue_alert_1_message_id = MessageId::new(1);
 
             tx.save_bot_status(&bot_status);
         }
@@ -428,7 +425,7 @@ impl DiscordBot {
         client_guard.start().await.expect("Error starting client");
     }
 
-    pub async fn run_bot(&mut self) {
+    pub async fn run(&mut self) {
         println!("Running discord bot for {}", self.username);
         self.start_listener().await;
     }

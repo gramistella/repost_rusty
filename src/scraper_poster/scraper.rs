@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
 use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
@@ -15,7 +14,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;
 
-use crate::database::database::{ContentInfo, Database, DuplicateContent, FailedContent, PublishedContent, QueuedContent};
+use crate::database::database::{ContentInfo, Database, DuplicateContent};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::s3::helper::upload_to_s3;
@@ -24,19 +23,19 @@ use crate::video::processing::process_video;
 use crate::MAX_CONTENT_HANDLED;
 use crate::{FETCH_SLEEP_LEN, MAX_CONTENT_PER_ITERATION, SCRAPER_DOWNLOAD_SLEEP_LEN, SCRAPER_LOOP_SLEEP_LEN};
 
-pub(crate) const SCRAPER_REFRESH_RATE: Duration = Duration::from_millis(1000);
+pub(crate) const SCRAPER_REFRESH_RATE: Duration = Duration::from_millis(1500);
 #[derive(Clone)]
-pub struct ScraperPoster {
-    username: String,
-    scraper: Arc<Mutex<InstagramScraper>>,
-    database: Database,
-    is_offline: bool,
+pub struct ContentManager {
+    pub(crate) username: String,
+    pub(crate) scraper: Arc<Mutex<InstagramScraper>>,
+    pub(crate) database: Database,
+    pub(crate) is_offline: bool,
     cookie_store_path: String,
-    credentials: HashMap<String, String>,
+    pub(crate) credentials: HashMap<String, String>,
     latest_content_mutex: Arc<Mutex<Option<(String, String, String, String)>>>,
 }
 
-impl ScraperPoster {
+impl ContentManager {
     pub fn new(database: Database, username: String, credentials: HashMap<String, String>, is_offline: bool) -> Self {
         let cookie_store_path = format!("cookies/cookies_{}.json", username);
         let scraper = Arc::new(Mutex::new(InstagramScraper::with_cookie_store(&cookie_store_path)));
@@ -54,7 +53,7 @@ impl ScraperPoster {
         }
     }
 
-    pub async fn run_scraper(&mut self) {
+    pub async fn run(&mut self) {
         let (sender_loop, scraper_loop) = self.scraper_loop().await;
 
         let poster_loop = self.poster_loop();
@@ -66,7 +65,6 @@ impl ScraperPoster {
         let _ = tokio::try_join!(sender_loop.instrument(sender_span), scraper_loop.instrument(scraper_span), poster_loop.instrument(poster_span));
     }
 
-    //noinspection RsConstantConditionIf
     async fn scraper_loop(&mut self) -> (JoinHandle<anyhow::Result<()>>, JoinHandle<anyhow::Result<()>>) {
         let span = tracing::span!(tracing::Level::INFO, "outer_scraper_loop");
         let _enter = span.enter();
@@ -206,7 +204,7 @@ impl ScraperPoster {
                         cloned_self.println("Reached the maximum amount of handled content");
                         cloned_self.println(&format!("Starting long sleep ({} minutes)", SCRAPER_LOOP_SLEEP_LEN.as_secs() / 60));
                         cloned_self.randomized_sleep(SCRAPER_LOOP_SLEEP_LEN.as_secs()).await;
-                        
+
                         continue;
                     }
 
@@ -224,6 +222,168 @@ impl ScraperPoster {
             });
         }
         (sender_loop, scraper_loop)
+    }
+
+    async fn login_scraper(&mut self) {
+        let username = self.credentials.get("username").unwrap().clone();
+        let password = self.credentials.get("password").unwrap().clone();
+
+        {
+            // Lock the scraper_poster
+            let mut scraper_guard = self.scraper.lock().await;
+            scraper_guard.authenticate_with_login(username.clone(), password.clone());
+            self.println("Logging in...");
+            let result = scraper_guard.login().await;
+            match result {
+                Ok(_) => {
+                    self.println("Logged in successfully");
+                }
+                Err(e) => {
+                    self.println(&format!(" Login failed: {}", e));
+                    let mut tx = self.database.begin_transaction().await;
+                    set_bot_status_halted(&mut tx);
+
+                    loop {
+                        let bot_status = tx.load_bot_status();
+                        if bot_status.status == 0 {
+                            self.println("Reattempting to log in...");
+                            scraper_guard.authenticate_with_login(username.clone(), password.clone());
+                            let result = scraper_guard.login().await;
+                            match result {
+                                Ok(_) => {
+                                    self.println("Logged in successfully");
+                                    set_bot_status_operational(&mut tx);
+                                    break;
+                                }
+                                Err(e) => {
+                                    self.println(&format!(" Login failed: {}", e));
+                                    set_bot_status_halted(&mut tx);
+                                }
+                            }
+                        } else {
+                            tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
+                        }
+                    }
+                }
+            };
+
+            let cookie_store = Arc::clone(&scraper_guard.session.cookie_store);
+            save_cookie_store_to_json(&self.cookie_store_path, cookie_store).await;
+        }
+    }
+
+    async fn fetch_user_info(&mut self, accounts_to_scrape: &mut HashMap<String, String>, accounts_being_scraped: &mut Vec<User>) {
+        let mut tx = self.database.begin_transaction().await;
+
+        pause_scraper_if_needed(&mut tx).await;
+        let mut accounts_scraped = 0;
+        let accounts_to_scrape_len = accounts_to_scrape.len();
+        self.println("Fetching user info...");
+        for (profile, _hashtags) in accounts_to_scrape.clone() {
+            {
+                pause_scraper_if_needed(&mut tx).await;
+
+                accounts_scraped += 1;
+                let mut scraper_guard = self.scraper.lock().await;
+                let result = scraper_guard.scrape_userinfo(&profile).await;
+
+                match result {
+                    Ok(user) => {
+                        accounts_being_scraped.push(user);
+                        self.println(&format!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile));
+                        set_bot_status_operational(&mut tx);
+                    }
+                    Err(e) => {
+                        self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
+                        match e {
+                            InstagramScraperError::UserNotFound(profile) => {
+                                accounts_to_scrape.remove(&profile);
+                            }
+                            _ => {
+                                set_bot_status_halted(&mut tx);
+                                loop {
+                                    let bot_status = tx.load_bot_status();
+                                    if bot_status.status == 0 {
+                                        self.println("Reattempting to fetch user info...");
+                                        let result = scraper_guard.scrape_userinfo(&profile).await;
+                                        match result {
+                                            Ok(user) => {
+                                                accounts_being_scraped.push(user);
+                                                self.println(&format!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile));
+                                                set_bot_status_operational(&mut tx);
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
+                                                set_bot_status_halted(&mut tx);
+                                            }
+                                        }
+                                    } else {
+                                        tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+            }
+
+            self.randomized_sleep(FETCH_SLEEP_LEN.as_secs()).await;
+        }
+    }
+
+    async fn fetch_posts(&mut self, accounts_being_scraped: Vec<User>, posts: &mut HashMap<User, Vec<Post>>) {
+        let mut tx = self.database.begin_transaction().await;
+        pause_scraper_if_needed(&mut tx).await;
+        let mut accounts_scraped = 0;
+        let accounts_being_scraped_len = accounts_being_scraped.len();
+        self.println("Fetching posts...");
+        for user in accounts_being_scraped.iter() {
+            // get posts
+            {
+                pause_scraper_if_needed(&mut tx).await;
+
+                let mut scraper_guard = self.scraper.lock().await;
+                accounts_scraped += 1;
+                self.println(&format!("{}/{} Retrieving posts from user {}", accounts_scraped, accounts_being_scraped_len, user.username));
+
+                match scraper_guard.scrape_posts(&user.id, 5).await {
+                    Ok(scraped_posts) => {
+                        set_bot_status_operational(&mut tx);
+                        posts.insert(user.clone(), scraped_posts);
+                    }
+                    Err(e) => {
+                        self.println(&format!("Error scraping posts: {}", e));
+                        let mut bot_status = tx.load_bot_status();
+                        bot_status.status = 1;
+                        tx.save_bot_status(&bot_status);
+                        loop {
+                            let bot_status = tx.load_bot_status();
+                            if bot_status.status == 0 {
+                                self.println("Reattempting to fetch posts...");
+                                let result = scraper_guard.scrape_posts(&user.id, 5).await;
+                                match result {
+                                    Ok(scraped_posts) => {
+                                        posts.insert(user.clone(), scraped_posts);
+                                        set_bot_status_operational(&mut tx);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        self.println(&format!("Error scraping posts: {}", e));
+                                        set_bot_status_halted(&mut tx);
+                                    }
+                                }
+                            } else {
+                                tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
+                            }
+                        }
+                        break;
+                    }
+                };
+            }
+
+            self.randomized_sleep(FETCH_SLEEP_LEN.as_secs()).await;
+        }
     }
 
     async fn scrape_posts(&mut self, accounts_to_scrape: &HashMap<String, String>, hashtag_mapping: &HashMap<String, String>, posts: &mut HashMap<User, Vec<Post>>) {
@@ -363,438 +523,6 @@ impl ScraperPoster {
         }
     }
 
-    async fn fetch_posts(&mut self, accounts_being_scraped: Vec<User>, posts: &mut HashMap<User, Vec<Post>>) {
-        let mut tx = self.database.begin_transaction().await;
-        pause_scraper_if_needed(&mut tx).await;
-        let mut accounts_scraped = 0;
-        let accounts_being_scraped_len = accounts_being_scraped.len();
-        self.println("Fetching posts...");
-        for user in accounts_being_scraped.iter() {
-            // get posts
-            {
-                pause_scraper_if_needed(&mut tx).await;
-
-                let mut scraper_guard = self.scraper.lock().await;
-                accounts_scraped += 1;
-                self.println(&format!("{}/{} Retrieving posts from user {}", accounts_scraped, accounts_being_scraped_len, user.username));
-
-                match scraper_guard.scrape_posts(&user.id, 5).await {
-                    Ok(scraped_posts) => {
-                        set_bot_status_operational(&mut tx);
-                        posts.insert(user.clone(), scraped_posts);
-                    }
-                    Err(e) => {
-                        self.println(&format!("Error scraping posts: {}", e));
-                        let mut bot_status = tx.load_bot_status();
-                        bot_status.status = 1;
-                        tx.save_bot_status(&bot_status);
-                        loop {
-                            let bot_status = tx.load_bot_status();
-                            if bot_status.status == 0 {
-                                self.println("Reattempting to fetch posts...");
-                                let result = scraper_guard.scrape_posts(&user.id, 5).await;
-                                match result {
-                                    Ok(scraped_posts) => {
-                                        posts.insert(user.clone(), scraped_posts);
-                                        set_bot_status_operational(&mut tx);
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        self.println(&format!("Error scraping posts: {}", e));
-                                        set_bot_status_halted(&mut tx);
-                                    }
-                                }
-                            } else {
-                                tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
-                            }
-                        }
-                        break;
-                    }
-                };
-            }
-
-            self.randomized_sleep(FETCH_SLEEP_LEN.as_secs()).await;
-        }
-    }
-
-    async fn fetch_user_info(&mut self, accounts_to_scrape: &mut HashMap<String, String>, accounts_being_scraped: &mut Vec<User>) {
-        let mut tx = self.database.begin_transaction().await;
-
-        pause_scraper_if_needed(&mut tx).await;
-        let mut accounts_scraped = 0;
-        let accounts_to_scrape_len = accounts_to_scrape.len();
-        self.println("Fetching user info...");
-        for (profile, _hashtags) in accounts_to_scrape.clone() {
-            {
-                pause_scraper_if_needed(&mut tx).await;
-
-                accounts_scraped += 1;
-                let mut scraper_guard = self.scraper.lock().await;
-                let result = scraper_guard.scrape_userinfo(&profile).await;
-
-                match result {
-                    Ok(user) => {
-                        accounts_being_scraped.push(user);
-                        self.println(&format!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile));
-                        set_bot_status_operational(&mut tx);
-                    }
-                    Err(e) => {
-                        self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
-                        match e {
-                            InstagramScraperError::UserNotFound(profile) => {
-                                accounts_to_scrape.remove(&profile);
-                            }
-                            _ => {
-                                set_bot_status_halted(&mut tx);
-                                loop {
-                                    let bot_status = tx.load_bot_status();
-                                    if bot_status.status == 0 {
-                                        self.println("Reattempting to fetch user info...");
-                                        let result = scraper_guard.scrape_userinfo(&profile).await;
-                                        match result {
-                                            Ok(user) => {
-                                                accounts_being_scraped.push(user);
-                                                self.println(&format!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile));
-                                                set_bot_status_operational(&mut tx);
-                                                break;
-                                            }
-                                            Err(e) => {
-                                                self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
-                                                set_bot_status_halted(&mut tx);
-                                            }
-                                        }
-                                    } else {
-                                        tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                };
-            }
-
-            self.randomized_sleep(FETCH_SLEEP_LEN.as_secs()).await;
-        }
-    }
-
-    async fn login_scraper(&mut self) {
-        let username = self.credentials.get("username").unwrap().clone();
-        let password = self.credentials.get("password").unwrap().clone();
-
-        {
-            // Lock the scraper_poster
-            let mut scraper_guard = self.scraper.lock().await;
-            scraper_guard.authenticate_with_login(username.clone(), password.clone());
-            self.println("Logging in...");
-            let result = scraper_guard.login().await;
-            match result {
-                Ok(_) => {
-                    self.println("Logged in successfully");
-                }
-                Err(e) => {
-                    self.println(&format!(" Login failed: {}", e));
-                    let mut tx = self.database.begin_transaction().await;
-                    set_bot_status_halted(&mut tx);
-
-                    loop {
-                        let bot_status = tx.load_bot_status();
-                        if bot_status.status == 0 {
-                            self.println("Reattempting to log in...");
-                            scraper_guard.authenticate_with_login(username.clone(), password.clone());
-                            let result = scraper_guard.login().await;
-                            match result {
-                                Ok(_) => {
-                                    self.println("Logged in successfully");
-                                    set_bot_status_operational(&mut tx);
-                                    break;
-                                }
-                                Err(e) => {
-                                    self.println(&format!(" Login failed: {}", e));
-                                    set_bot_status_halted(&mut tx);
-                                }
-                            }
-                        } else {
-                            tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
-                        }
-                    }
-                }
-            };
-
-            let cookie_store = Arc::clone(&scraper_guard.session.cookie_store);
-            save_cookie_store_to_json(&self.cookie_store_path, cookie_store).await;
-        }
-    }
-
-    fn poster_loop(&mut self) -> JoinHandle<anyhow::Result<()>> {
-        let span = tracing::span!(tracing::Level::INFO, "poster_loop");
-        let _enter = span.enter();
-        let mut cloned_self = self.clone();
-        tokio::spawn(async move {
-            cloned_self.amend_queue().await;
-            // Allow the scraper_poster to login
-
-            let sleep_duration = 90;
-            let mut rng = StdRng::from_rng(OsRng).unwrap();
-            let variance: u64 = rng.gen_range(0..=1); // generates a number between 0 and 1
-            let sleep_duration = sleep_duration + (sleep_duration * variance * 3 / 10); // add up to 30% of the original sleep duration
-
-            // Add
-            sleep(Duration::from_secs(sleep_duration)).await;
-
-            cloned_self.println(&format!("[{}] Starting poster loop...", cloned_self.username));
-
-            loop {
-                let mut transaction = cloned_self.database.begin_transaction().await;
-                let content_mapping = transaction.load_content_mapping();
-                let user_settings = transaction.load_user_settings();
-
-                for content_info in content_mapping {
-                    if content_info.status.to_string().contains("queued_") {
-                        let queued_posts = transaction.load_content_queue();
-                        for mut queued_post in queued_posts {
-                            if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(&user_settings) {
-                                if user_settings.can_post {
-                                    let mut scraper_guard = cloned_self.scraper.lock().await;
-
-                                    if !cloned_self.is_offline {
-                                        // Example of a caption:
-                                        // "This is a cool caption!"
-                                        // "•"
-                                        // "•"
-                                        // "•"
-                                        // "•"
-                                        // "•"
-                                        // "(We don’t own this reel. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for credit/removal.)"
-                                        // "•"
-                                        // "#cool #caption #hashtags"
-
-                                        let full_caption;
-                                        let big_spacer = "\n\n\n•\n•\n•\n•\n•\n";
-                                        let small_spacer = "\n•\n";
-                                        let disclaimer = "(We don’t own this content. All rights are reserved & belong to their respective owners, no copyright infringement intended. DM for credit/removal.)";
-                                        if queued_post.caption.is_empty() && queued_post.hashtags.is_empty() {
-                                            full_caption = "".to_string();
-                                        } else if queued_post.caption.is_empty() {
-                                            full_caption = format!("{}", queued_post.hashtags);
-                                        } else if queued_post.hashtags.is_empty() {
-                                            full_caption = format!("{}", queued_post.caption);
-                                        } else {
-                                            full_caption = format!("{}{}{}{}{}", queued_post.caption, big_spacer, disclaimer, small_spacer, queued_post.hashtags);
-                                        }
-
-                                        let user_id = cloned_self.credentials.get("instagram_business_account_id").unwrap();
-                                        let access_token = cloned_self.credentials.get("fb_access_token").unwrap();
-
-                                        cloned_self.println(&format!("[+] Publishing content to instagram: {}", queued_post.original_shortcode));
-                                        let timer = std::time::Instant::now();
-                                        let reel_id = match scraper_guard.upload_reel(user_id, access_token, &queued_post.url, &full_caption).await {
-                                            Ok(reel_id) => {
-                                                let duration = timer.elapsed(); // End timer
-
-                                                let minutes = duration.as_secs() / 60;
-                                                let seconds = duration.as_secs() % 60;
-
-                                                cloned_self.println(&format!("[+] Published content successfully: {}, took {} minutes and {} seconds", queued_post.original_shortcode, minutes, seconds));
-                                                reel_id
-                                            }
-                                            Err(err) => {
-                                                match err {
-                                                    InstagramScraperError::UploadFailedRecoverable(_) => {
-                                                        drop(scraper_guard);
-                                                        if err.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
-                                                            cloned_self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
-                                                            set_bot_status_halted(&mut transaction);
-                                                            loop {
-                                                                let bot_status = transaction.load_bot_status();
-                                                                if bot_status.status == 0 {
-                                                                    cloned_self.println("Reattempting to upload content to instagram...");
-                                                                    let result = cloned_self.scraper.lock().await.upload_reel(user_id, access_token, &queued_post.url, &full_caption).await;
-                                                                    match result {
-                                                                        Ok(_) => {
-                                                                            cloned_self.println(&format!("[+] Published content successfully: {}", queued_post.original_shortcode));
-                                                                            set_bot_status_operational(&mut transaction);
-                                                                            break;
-                                                                        }
-                                                                        Err(_e) => {
-                                                                            cloned_self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
-                                                                            set_bot_status_halted(&mut transaction);
-                                                                        }
-                                                                    }
-                                                                } else {
-                                                                    tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
-                                                                }
-                                                            }
-                                                        } else {
-                                                            cloned_self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err));
-                                                            cloned_self.handle_recoverable_failed_content().await;
-                                                        }
-                                                    }
-                                                    InstagramScraperError::UploadFailedNonRecoverable(_) => {
-                                                        cloned_self.println(&format!("[!] Couldn't upload content to instagram!\n [ERROR] {}\n{}", err, queued_post.url));
-                                                        drop(scraper_guard);
-                                                        cloned_self.handle_failed_content(&mut queued_post).await;
-                                                    }
-                                                    InstagramScraperError::UploadSucceededButFailedToRetrieveId(e) => {
-                                                        cloned_self.println(&format!("[!] Uploaded content to instagram, but failed to retrieve media id!\n [WARNING] {}\n{}", e, queued_post.url));
-                                                        drop(scraper_guard);
-                                                        cloned_self.handle_posted_but_failed_content(&queued_post).await;
-                                                    }
-                                                    _ => {}
-                                                }
-                                                continue;
-                                            }
-                                        };
-
-                                        // Try to comment on the post
-                                        let mut comment_vec = vec![];
-                                        match cloned_self.username.as_str() {
-                                            "repostrusty" => {
-                                                let comment_caption_1 = format!("Follow @{} for daily dank memes 😤", cloned_self.username);
-                                                let comment_caption_2 = format!("Follow @{} for daily memes, I won't disappoint 😎", cloned_self.username);
-                                                let comment_caption_3 = format!("Follow @{} for your daily meme fix 🗿", cloned_self.username);
-                                                comment_vec.push(comment_caption_1);
-                                                comment_vec.push(comment_caption_2);
-                                                comment_vec.push(comment_caption_3);
-                                            }
-                                            "cringepostrusty" => {
-                                                let comment_caption_1 = format!("Follow @{} for daily cringe 😤", cloned_self.username);
-                                                let comment_caption_2 = format!("Follow @{} for daily cringe, I won't disappoint 😎", cloned_self.username);
-                                                let comment_caption_3 = format!("Follow @{} for your daily cringe fix 🗿", cloned_self.username);
-                                                comment_vec.push(comment_caption_1);
-                                                comment_vec.push(comment_caption_2);
-                                                comment_vec.push(comment_caption_3);
-                                            }
-                                            "rusty_cat_memes" => {
-                                                let comment_caption_1 = format!("Follow @{} for daily cat memes ⸜(｡˃ ᵕ ˂ )⸝♡", cloned_self.username);
-                                                let comment_caption_2 = format!("Follow @{} for daily cat memes, I won't disappoint ദ്ദി(˵ •̀ ᴗ - ˵ ) ✧", cloned_self.username);
-                                                let comment_caption_3 = format!("Follow @{} for your daily cat meme needs (˶ᵔ ᵕ ᵔ˶)", cloned_self.username);
-                                                comment_vec.push(comment_caption_1);
-                                                comment_vec.push(comment_caption_2);
-                                                comment_vec.push(comment_caption_3);
-                                            }
-                                            _ => {}
-                                        }
-
-                                        // Choose a random comment
-                                        let mut rng = StdRng::from_entropy();
-                                        let comment_caption = comment_vec.choose(&mut rng).unwrap();
-                                        match scraper_guard.comment(&reel_id, access_token, comment_caption).await {
-                                            Ok(_) => {
-                                                cloned_self.println("Commented on the post successfully!");
-                                            }
-                                            Err(e) => {
-                                                let e = format!("{}", e);
-                                                cloned_self.println(&format!("Error while commenting: {}", e));
-                                            }
-                                        }
-                                    } else if queued_post.caption.contains("will_fail") {
-                                        cloned_self.println(&format!("[!] Failed to upload content offline: {}", queued_post.url));
-                                        drop(scraper_guard);
-                                        cloned_self.handle_failed_content(&mut queued_post).await;
-                                        continue;
-                                    } else {
-                                        cloned_self.println(&format!("[!] Uploaded content offline: {}", queued_post.url));
-                                    }
-
-                                    let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode);
-                                    content_info.status = ContentStatus::Published { shown: false };
-
-                                    transaction.save_content_info(&content_info);
-
-                                    let published_content = PublishedContent {
-                                        username: queued_post.username.clone(),
-                                        url: queued_post.url.clone(),
-                                        caption: queued_post.caption.clone(),
-                                        hashtags: queued_post.hashtags.clone(),
-                                        original_author: queued_post.original_author.clone(),
-                                        original_shortcode: queued_post.original_shortcode.clone(),
-                                        published_at: now_in_my_timezone(&user_settings).to_rfc3339(),
-                                    };
-
-                                    transaction.save_published_content(published_content);
-                                } else {
-                                    let new_will_post_at = transaction.get_new_post_time();
-                                    queued_post.will_post_at = new_will_post_at;
-                                    transaction.save_queued_content(&queued_post);
-                                    let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode);
-                                    content_info.status = ContentStatus::Queued { shown: false };
-                                    transaction.save_content_info(&content_info);
-                                }
-                            }
-                        }
-                    }
-                }
-                // Don't remove this sleep, without it the bot becomes completely unresponsive
-                sleep(SCRAPER_REFRESH_RATE).await;
-            }
-        })
-    }
-
-    async fn handle_failed_content(&mut self, queued_post: &mut QueuedContent) {
-        let span = tracing::span!(tracing::Level::INFO, "handle_failed_content");
-        let _enter = span.enter();
-
-        let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings();
-        let mut video_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode);
-        video_info.status = ContentStatus::Failed { shown: false };
-
-        transaction.save_content_info(&video_info);
-
-        let now = now_in_my_timezone(&user_settings).to_rfc3339();
-        let failed_content = FailedContent {
-            username: queued_post.username.clone(),
-            url: queued_post.url.clone(),
-            caption: queued_post.caption.clone(),
-            hashtags: queued_post.hashtags.clone(),
-            original_author: queued_post.original_author.clone(),
-            original_shortcode: queued_post.original_shortcode.clone(),
-            failed_at: now,
-        };
-
-        transaction.save_failed_content(failed_content);
-    }
-
-    // Move all the queued content
-    async fn handle_recoverable_failed_content(&mut self) {
-        let span = tracing::span!(tracing::Level::INFO, "handle_recoverable_failed_content");
-        let _enter = span.enter();
-
-        let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings();
-
-        for mut queued_post in transaction.load_content_queue() {
-            let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 60) as u64);
-            queued_post.will_post_at = new_will_post_at.to_rfc3339();
-            transaction.save_queued_content(&queued_post);
-        }
-    }
-
-    async fn handle_posted_but_failed_content(&mut self, queued_post: &QueuedContent) {
-        let span = tracing::span!(tracing::Level::INFO, "handle_posted_but_failed_content");
-        let _enter = span.enter();
-
-        let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings();
-
-        let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode);
-        content_info.status = ContentStatus::Published { shown: false };
-
-        transaction.save_content_info(&content_info);
-
-        let published_content = PublishedContent {
-            username: queued_post.username.clone(),
-            url: queued_post.url.clone(),
-            caption: queued_post.caption.clone(),
-            hashtags: queued_post.hashtags.clone(),
-            original_author: queued_post.original_author.clone(),
-            original_shortcode: queued_post.original_shortcode.clone(),
-            published_at: now_in_my_timezone(&user_settings).to_rfc3339(),
-        };
-
-        transaction.save_published_content(published_content);
-    }
-
     /// Randomized sleep function, will randomize the sleep duration by up to 30% of the original duration
     async fn randomized_sleep(&mut self, original_duration: u64) {
         let span = tracing::span!(tracing::Level::INFO, "randomized_sleep");
@@ -808,38 +536,7 @@ impl ScraperPoster {
         sleep(Duration::from_secs(sleep_duration)).await;
     }
 
-    /// This function will amend the queue to ensure that only one post is posted at a time,
-    /// even if the bot was shut down for a while.
-    async fn amend_queue(&self) {
-        let mut tx = self.database.begin_transaction().await;
-        let content_queue = tx.load_content_queue();
-        let user_settings = tx.load_user_settings();
-        let mut content_to_post = 0;
-        for queued_post in content_queue.iter().clone() {
-            if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(&user_settings) {
-                self.println(&format!("Amending queue: {}", queued_post.original_shortcode));
-                content_to_post += 1;
-            }
-        }
-
-        if content_to_post > 1 {
-            // Determine difference between the current time and the time the first post will be posted
-            let first_post_time = DateTime::parse_from_rfc3339(&content_queue.first().unwrap().will_post_at).unwrap();
-
-            // Calculate the time difference between the first post and now
-            let time_difference = now_in_my_timezone(&user_settings) - first_post_time.with_timezone(&Utc);
-
-            // Add the time difference to all the posts
-            for mut queued_post in content_queue {
-                let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + time_difference;
-                self.println(&format!("Changing post time for {}: {}", queued_post.original_shortcode, new_will_post_at));
-                queued_post.will_post_at = new_will_post_at.to_rfc3339();
-                tx.save_queued_content(&queued_post);
-            }
-        }
-    }
-
-    fn println(&self, message: &str) {
+    pub(crate) fn println(&self, message: &str) {
         println!(" [{}] - {}", self.username, message);
     }
 }

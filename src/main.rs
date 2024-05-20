@@ -16,7 +16,7 @@ use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
 
 use crate::database::database::Database;
 use crate::discord::bot::DiscordBot;
-use crate::scraper_poster::scraper::ScraperPoster;
+use crate::scraper_poster::scraper::ContentManager;
 
 mod discord;
 mod s3;
@@ -62,19 +62,18 @@ fn main() -> anyhow::Result<()> {
             let _enter = span.enter();
             tracing::info!("Starting bot for user: {}", username);
 
-            //let rt_scraper_poster = Arc::new(tokio::runtime::Runtime::new().unwrap());
-            let rt_discord_bot = Arc::new(tokio::runtime::Runtime::new().unwrap());
-            let rt_clone = Arc::clone(&rt_discord_bot);
+            let rt = Arc::new(tokio::runtime::Runtime::new().unwrap());
+            let rt_clone = Arc::clone(&rt);
 
             let db = Database::new(username.clone(), credentials.clone()).unwrap();
 
-            let mut discord_bot_manager = rt_discord_bot.block_on(async { DiscordBot::new(db.clone(), credentials.clone(), is_first_run).await });
+            let mut discord_bot_manager = rt.block_on(async { DiscordBot::new(db.clone(), credentials.clone(), is_first_run).await });
 
-            // Run the scraper_poster and the bot concurrently
-            let mut scraper_poster = ScraperPoster::new(db.clone(), username.clone(), credentials.clone(), IS_OFFLINE);
-            let scraper = std::thread::spawn(move || rt_discord_bot.block_on(scraper_poster.run_scraper()));
+            // Run the content_manager and the bot concurrently
+            let mut content_manager = ContentManager::new(db.clone(), username.clone(), credentials.clone(), IS_OFFLINE);
+            let scraper = std::thread::spawn(move || rt.block_on(content_manager.run()));
 
-            let discord = std::thread::spawn(move || rt_clone.block_on(async { discord_bot_manager.run_bot().await }));
+            let discord = std::thread::spawn(move || rt_clone.block_on(async { discord_bot_manager.run().await }));
 
             all_handles.push(scraper);
             all_handles.push(discord);
