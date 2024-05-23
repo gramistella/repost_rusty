@@ -13,7 +13,7 @@ use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::scraper_poster::scraper::ContentManager;
 use crate::scraper_poster::utils::{set_bot_status_halted, set_bot_status_operational};
-use crate::{SCRAPER_REFRESH_RATE};
+use crate::SCRAPER_REFRESH_RATE;
 
 impl ContentManager {
     pub fn poster_loop(&mut self) -> JoinHandle<anyhow::Result<()>> {

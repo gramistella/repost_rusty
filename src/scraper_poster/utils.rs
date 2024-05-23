@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::Duration;
 
+use chrono::Duration;
 use instagram_scraper_rs::User;
 use rand::prelude::{SliceRandom, StdRng};
 use reqwest_cookie_store::CookieStoreMutex;
 
 use crate::database::database::DatabaseTransaction;
 use crate::discord::utils::now_in_my_timezone;
-use crate::{SCRAPER_REFRESH_RATE};
+use crate::SCRAPER_REFRESH_RATE;
 
 pub async fn save_cookie_store_to_json(cookie_store_path: &String, cookie_store_mutex: Arc<CookieStoreMutex>) {
     let span = tracing::span!(tracing::Level::INFO, "save_cookie_store_to_json");
@@ -36,6 +36,7 @@ pub async fn set_bot_status_halted(tx: &mut DatabaseTransaction) {
     bot_status.status = 1;
     bot_status.status_message = "halted  ⚠️".to_string();
     bot_status.last_updated_at = (now_in_my_timezone(&user_settings) - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+    println!(" [{}] HALTED! ", bot_status.username);
     tx.save_bot_status(&bot_status).await;
     tx.save_user_settings(&user_settings).await;
 }

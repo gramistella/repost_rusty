@@ -2,20 +2,18 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
-use sqlx::sqlx_macros::*;
-use sqlx::{Error, Pool, Postgres, query, query_as};
-use sqlx::postgres::PgPoolOptions;
-
 use chrono::{DateTime, Duration, Timelike, Utc};
-
 use image_hasher::ImageHash;
 use rand::Rng;
 use serenity::all::MessageId;
 use sqlx::pool::PoolConnection;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlx_macros::*;
+use sqlx::{query, query_as, Error, Pool, Postgres};
 
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
-use crate::{INITIAL_INTERFACE_UPDATE_INTERVAL};
+use crate::INITIAL_INTERFACE_UPDATE_INTERVAL;
 use crate::IS_OFFLINE;
 
 pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
@@ -76,7 +74,6 @@ pub struct FailedContent {
     pub failed_at: String,
 }
 
-
 #[derive(Debug, Clone)]
 pub(crate) struct ContentInfo {
     pub username: String,
@@ -106,7 +103,6 @@ struct InnerContentInfo {
     pub encountered_errors: i32,
 }
 
-
 #[derive(Debug, Clone)]
 pub struct HashedVideo {
     pub username: String,
@@ -117,7 +113,6 @@ pub struct HashedVideo {
     pub hash_frame_3: ImageHash,
     pub hash_frame_4: ImageHash,
 }
-
 
 struct InnerHashedVideo {
     pub username: String,
@@ -146,7 +141,6 @@ pub struct BotStatus {
     pub halt_alert_message_id: MessageId,
 }
 
-
 struct InnerBotStatus {
     pub username: String,
     pub message_id: i64,
@@ -167,7 +161,6 @@ pub struct DuplicateContent {
     pub username: String,
     pub original_shortcode: String,
 }
-
 
 pub(crate) struct Database {
     pool: Pool<Postgres>,
@@ -206,14 +199,10 @@ impl Database {
             format!("postgres://{db_username}:{db_password}@192.168.1.101/prod")
         };
 
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&database_url).await?;
+        let pool = PgPoolOptions::new().max_connections(5).connect(&database_url).await?;
 
-
-
-
-        query!("CREATE TABLE IF NOT EXISTS user_settings (
+        query!(
+            "CREATE TABLE IF NOT EXISTS user_settings (
             username TEXT PRIMARY KEY,
             can_post BOOLEAN NOT NULL,
             posting_interval INTEGER NOT NULL,
@@ -221,8 +210,11 @@ impl Database {
             random_interval_variance INTEGER NOT NULL,
             rejected_content_lifespan INTEGER NOT NULL,
             timezone_offset INTEGER NOT NULL
-        )").execute(&pool).await.unwrap();
-
+        )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let user_exists = query_as!(UserSettings, "SELECT * FROM user_settings WHERE username = $1", &username).fetch_optional(&pool).await.unwrap().is_some();
 
@@ -238,7 +230,8 @@ impl Database {
                     timezone_offset: 2,
                 };
 
-                query!("INSERT INTO user_settings (username, can_post, posting_interval, interface_update_interval, random_interval_variance, rejected_content_lifespan, timezone_offset) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                query!(
+                    "INSERT INTO user_settings (username, can_post, posting_interval, interface_update_interval, random_interval_variance, rejected_content_lifespan, timezone_offset) VALUES ($1, $2, $3, $4, $5, $6, $7)",
                     user_settings.username,
                     user_settings.can_post,
                     user_settings.posting_interval,
@@ -246,8 +239,10 @@ impl Database {
                     user_settings.random_interval_variance,
                     user_settings.rejected_content_lifespan,
                     user_settings.timezone_offset
-                    ).execute(&pool).await.unwrap();
-
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
             } else {
                 let user_settings = UserSettings {
                     username: username.clone(),
@@ -259,7 +254,8 @@ impl Database {
                     timezone_offset: 2,
                 };
 
-                query!("INSERT INTO user_settings (username, can_post, posting_interval, interface_update_interval, random_interval_variance, rejected_content_lifespan, timezone_offset) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                query!(
+                    "INSERT INTO user_settings (username, can_post, posting_interval, interface_update_interval, random_interval_variance, rejected_content_lifespan, timezone_offset) VALUES ($1, $2, $3, $4, $5, $6, $7)",
                     user_settings.username,
                     user_settings.can_post,
                     user_settings.posting_interval,
@@ -267,11 +263,15 @@ impl Database {
                     user_settings.random_interval_variance,
                     user_settings.rejected_content_lifespan,
                     user_settings.timezone_offset
-                    ).execute(&pool).await.unwrap();
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
             }
         }
 
-        query!("CREATE TABLE IF NOT EXISTS content_info (
+        query!(
+            "CREATE TABLE IF NOT EXISTS content_info (
             username TEXT NOT NULL,
             message_id BIGINT NOT NULL,
             url TEXT NOT NULL,
@@ -284,9 +284,14 @@ impl Database {
             added_at TEXT NOT NULL,
             encountered_errors INTEGER NOT NULL,
             PRIMARY KEY (username, original_shortcode))
-            ").execute(&pool).await.unwrap();
+            "
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS queued_content (
+        query!(
+            "CREATE TABLE IF NOT EXISTS queued_content (
             username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -295,9 +300,14 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             will_post_at TEXT NOT NULL,
             PRIMARY KEY (username, original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS published_content (
+        query!(
+            "CREATE TABLE IF NOT EXISTS published_content (
             username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -306,9 +316,14 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             published_at TEXT NOT NULL,
             PRIMARY KEY (username, original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS rejected_content (
+        query!(
+            "CREATE TABLE IF NOT EXISTS rejected_content (
             username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -317,9 +332,14 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             rejected_at TEXT NOT NULL,
             PRIMARY KEY (username, original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS failed_content (
+        query!(
+            "CREATE TABLE IF NOT EXISTS failed_content (
             username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -328,10 +348,14 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             failed_at TEXT NOT NULL,
             PRIMARY KEY (username, original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-
-        query!("CREATE TABLE IF NOT EXISTS video_hashes (
+        query!(
+            "CREATE TABLE IF NOT EXISTS video_hashes (
             username TEXT NOT NULL,
             original_shortcode TEXT NOT NULL,
             duration TEXT NOT NULL,
@@ -340,16 +364,25 @@ impl Database {
             hash_frame_3 TEXT NOT NULL,
             hash_frame_4 TEXT NOT NULL,
             PRIMARY KEY (original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-
-        query!("CREATE TABLE IF NOT EXISTS duplicate_content (
+        query!(
+            "CREATE TABLE IF NOT EXISTS duplicate_content (
             username TEXT NOT NULL,
             original_shortcode TEXT NOT NULL,
             PRIMARY KEY (original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS bot_status (
+        query!(
+            "CREATE TABLE IF NOT EXISTS bot_status (
             username TEXT PRIMARY KEY,
             message_id BIGINT NOT NULL,
             status INTEGER NOT NULL,
@@ -362,7 +395,11 @@ impl Database {
             queue_alert_3_message_id BIGINT NOT NULL,
             prev_content_queue_len INTEGER NOT NULL,
             halt_alert_message_id BIGINT NOT NULL
-        )").execute(&pool).await.unwrap();
+        )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let bot_status_exists = query_as!(InnerBotStatus, "SELECT * FROM bot_status WHERE username = $1", &username).fetch_one(&pool).await.is_ok();
         if !bot_status_exists {
@@ -394,7 +431,6 @@ impl Database {
                 bot_status.prev_content_queue_len,
                 bot_status.halt_alert_message_id
             ).execute(&pool).await.unwrap();
-
         }
 
         Ok(Database { pool, username })
@@ -417,7 +453,8 @@ impl DatabaseTransaction {
     }
 
     pub async fn save_user_settings(&mut self, user_settings: &UserSettings) {
-        query!("UPDATE user_settings SET can_post = $1, posting_interval = $2, interface_update_interval = $3, random_interval_variance = $4, rejected_content_lifespan = $5, timezone_offset = $6 WHERE username = $7",
+        query!(
+            "UPDATE user_settings SET can_post = $1, posting_interval = $2, interface_update_interval = $3, random_interval_variance = $4, rejected_content_lifespan = $5, timezone_offset = $6 WHERE username = $7",
             user_settings.can_post,
             user_settings.posting_interval,
             user_settings.interface_update_interval,
@@ -425,7 +462,10 @@ impl DatabaseTransaction {
             user_settings.rejected_content_lifespan,
             user_settings.timezone_offset,
             user_settings.username
-        ).execute(self.conn.as_mut()).await.unwrap();
+        )
+        .execute(self.conn.as_mut())
+        .await
+        .unwrap();
     }
 
     pub async fn load_bot_status(&mut self) -> BotStatus {
@@ -477,11 +517,13 @@ impl DatabaseTransaction {
             inner_bot_status.halt_alert_message_id,
             inner_bot_status.username
         ).execute(self.conn.as_mut()).await.unwrap();
-
     }
 
     pub async fn save_duplicate_content(&mut self, duplicate_content: DuplicateContent) {
-        query!("INSERT INTO duplicate_content (username, original_shortcode) VALUES ($1, $2)", duplicate_content.username, duplicate_content.original_shortcode).execute(self.conn.as_mut()).await.unwrap();
+        query!("INSERT INTO duplicate_content (username, original_shortcode) VALUES ($1, $2)", duplicate_content.username, duplicate_content.original_shortcode)
+            .execute(self.conn.as_mut())
+            .await
+            .unwrap();
     }
 
     pub async fn load_duplicate_content(&mut self) -> Vec<DuplicateContent> {
@@ -541,7 +583,6 @@ impl DatabaseTransaction {
             inner_content_info.added_at,
             inner_content_info.encountered_errors
         ).execute(self.conn.as_mut()).await.unwrap();
-
     }
 
     pub async fn load_content_mapping(&mut self) -> Vec<ContentInfo> {
@@ -584,8 +625,6 @@ impl DatabaseTransaction {
     }
 
     pub async fn remove_post_from_queue_with_shortcode(&mut self, shortcode: String) {
-
-
         let deleted_rows = query!("DELETE FROM queued_content WHERE original_shortcode = $1 AND username = $2", shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap().rows_affected();
 
         if deleted_rows > 0 {
@@ -608,7 +647,8 @@ impl DatabaseTransaction {
     }
 
     pub async fn save_queued_content(&mut self, queued_content: &QueuedContent) {
-        query!("INSERT INTO queued_content (username, url, caption, hashtags, original_author, original_shortcode, will_post_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (username, original_shortcode) DO UPDATE SET url = $2, caption = $3, hashtags = $4, original_author = $5, will_post_at = $7",
+        query!(
+            "INSERT INTO queued_content (username, url, caption, hashtags, original_author, original_shortcode, will_post_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (username, original_shortcode) DO UPDATE SET url = $2, caption = $3, hashtags = $4, original_author = $5, will_post_at = $7",
             queued_content.username,
             queued_content.url,
             queued_content.caption,
@@ -616,8 +656,10 @@ impl DatabaseTransaction {
             queued_content.original_author,
             queued_content.original_shortcode,
             queued_content.will_post_at
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        )
+        .execute(self.conn.as_mut())
+        .await
+        .unwrap();
     }
 
     pub async fn load_content_queue(&mut self) -> Vec<QueuedContent> {
@@ -652,7 +694,8 @@ impl DatabaseTransaction {
     }
 
     pub async fn save_rejected_content(&mut self, rejected_content: RejectedContent) {
-        query!("INSERT INTO rejected_content (username, url, caption, hashtags, original_author, original_shortcode, rejected_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (username, original_shortcode) DO UPDATE SET url = $2, caption = $3, hashtags = $4, original_author = $5, rejected_at = $7",
+        query!(
+            "INSERT INTO rejected_content (username, url, caption, hashtags, original_author, original_shortcode, rejected_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (username, original_shortcode) DO UPDATE SET url = $2, caption = $3, hashtags = $4, original_author = $5, rejected_at = $7",
             rejected_content.username,
             rejected_content.url,
             rejected_content.caption,
@@ -660,11 +703,13 @@ impl DatabaseTransaction {
             rejected_content.original_author,
             rejected_content.original_shortcode,
             rejected_content.rejected_at
-        ).execute(self.conn.as_mut()).await.unwrap();
+        )
+        .execute(self.conn.as_mut())
+        .await
+        .unwrap();
     }
 
     pub async fn load_rejected_content(&mut self) -> Vec<RejectedContent> {
-
         query_as!(RejectedContent, "SELECT * FROM rejected_content WHERE username = $1", &self.username).fetch_all(self.conn.as_mut()).await.unwrap()
     }
 
@@ -691,12 +736,12 @@ impl DatabaseTransaction {
         if !removed {
             // Firstly we remove the published_content from the content_queue
             query!("DELETE FROM queued_content WHERE original_shortcode = $1 AND username = $2", published_content.original_shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap();
-
         }
 
         query!("DELETE FROM published_content WHERE original_shortcode = $1 AND username = $2", published_content.original_shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap();
 
-        query!("INSERT INTO published_content (username, url, caption, hashtags, original_author, original_shortcode, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        query!(
+            "INSERT INTO published_content (username, url, caption, hashtags, original_author, original_shortcode, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             published_content.username,
             published_content.url,
             published_content.caption,
@@ -704,8 +749,10 @@ impl DatabaseTransaction {
             published_content.original_author,
             published_content.original_shortcode,
             published_content.published_at
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        )
+        .execute(self.conn.as_mut())
+        .await
+        .unwrap();
     }
 
     pub async fn load_posted_content(&mut self) -> Vec<PublishedContent> {
@@ -726,7 +773,8 @@ impl DatabaseTransaction {
         }
 
         // Then we add the failed_content to the failed_content table
-        query!("INSERT INTO failed_content (username, url, caption, hashtags, original_author, original_shortcode, failed_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        query!(
+            "INSERT INTO failed_content (username, url, caption, hashtags, original_author, original_shortcode, failed_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             failed_content.username,
             failed_content.url,
             failed_content.caption,
@@ -734,8 +782,10 @@ impl DatabaseTransaction {
             failed_content.original_author,
             failed_content.original_shortcode,
             failed_content.failed_at
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        )
+        .execute(self.conn.as_mut())
+        .await
+        .unwrap();
     }
 
     pub async fn load_failed_content(&mut self) -> Vec<FailedContent> {
@@ -830,7 +880,8 @@ impl DatabaseTransaction {
             hash_frame_4: hashed_video.hash_frame_4.to_base64(),
         };
 
-        query!("INSERT INTO video_hashes (username, original_shortcode, duration, hash_frame_1, hash_frame_2, hash_frame_3, hash_frame_4) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (original_shortcode) DO UPDATE SET duration = $3, hash_frame_1 = $4, hash_frame_2 = $5, hash_frame_3 = $6, hash_frame_4 = $7",
+        query!(
+            "INSERT INTO video_hashes (username, original_shortcode, duration, hash_frame_1, hash_frame_2, hash_frame_3, hash_frame_4) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (original_shortcode) DO UPDATE SET duration = $3, hash_frame_1 = $4, hash_frame_2 = $5, hash_frame_3 = $6, hash_frame_4 = $7",
             inner_hashed_video.username,
             inner_hashed_video.original_shortcode,
             inner_hashed_video.duration,
@@ -838,8 +889,10 @@ impl DatabaseTransaction {
             inner_hashed_video.hash_frame_2,
             inner_hashed_video.hash_frame_3,
             inner_hashed_video.hash_frame_4
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        )
+        .execute(self.conn.as_mut())
+        .await
+        .unwrap();
     }
 
     pub async fn does_content_exist_with_shortcode(&mut self, shortcode: String) -> bool {
@@ -863,7 +916,7 @@ impl DatabaseTransaction {
                 return true;
             }
         }
-       false
+        false
     }
 
     async fn shortcode_exists_in_table(&mut self, table_name: &str, shortcode: &str) -> bool {
@@ -880,6 +933,5 @@ impl DatabaseTransaction {
 
     pub async fn clear_all_other_bot_statuses(&mut self) {
         query!("DELETE FROM bot_status WHERE username != $1", &self.username).execute(self.conn.as_mut()).await.unwrap();
-
     }
 }

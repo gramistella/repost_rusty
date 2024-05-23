@@ -1,16 +1,11 @@
 use std::error::Error;
 use std::fmt;
-use std::io::Write;
 use std::str::FromStr;
 
-use diesel::deserialize::FromSql;
-use diesel::pg::Pg;
-use diesel::serialize::{IsNull, Output, ToSql};
 use serde::de::Visitor;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Debug, PartialEq, FromSqlRow, AsExpression, Clone)]
-#[diesel(sql_type = ContentStatusType)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ContentStatus {
     RemovedFromView,
     Pending { shown: bool },
@@ -146,24 +141,5 @@ fn get_status_string(content_status: ContentStatus) -> String {
                 "failed_hidden".to_string()
             }
         }
-    }
-}
-
-#[derive(SqlType)]
-#[diesel(postgres_type(name = "content_status"))]
-pub struct ContentStatusType;
-
-impl ToSql<ContentStatusType, Pg> for ContentStatus {
-    fn to_sql<'b>(&'b self, out: &mut Output<'b, '_, Pg>) -> diesel::serialize::Result {
-        let status = get_status_string(self.clone());
-        out.write_all(status.as_bytes())?;
-        Ok(IsNull::No)
-    }
-}
-
-impl FromSql<ContentStatusType, Pg> for ContentStatus {
-    fn from_sql(bytes: diesel::pg::PgValue<'_>) -> diesel::deserialize::Result<Self> {
-        let value = String::from_utf8_lossy(bytes.as_bytes());
-        value.parse().map_err(|_| "Invalid ContentStatus variant".into())
     }
 }

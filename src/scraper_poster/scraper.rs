@@ -9,7 +9,7 @@ use rand::{Rng, SeedableRng};
 use serenity::all::MessageId;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;

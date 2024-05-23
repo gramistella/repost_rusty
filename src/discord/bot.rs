@@ -9,7 +9,7 @@ use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::prelude::*;
-use tokio::sync::{Mutex};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 use crate::database::database::{Database, DatabaseTransaction, UserSettings};
@@ -86,9 +86,7 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
-        
         loop {
-
             let mut tx = self.database.begin_transaction().await;
             let user_settings = tx.load_user_settings().await;
             let mut rng = StdRng::from_entropy();
@@ -106,7 +104,7 @@ impl EventHandler for Handler {
                 let obtained_permit = permit.take().unwrap();
                 self_clone.ready_loop(&ctx_clone, &user_settings, &mut tx, global_last_updated_at, &mut rng, is_first_iteration_clone, obtained_permit).await;
             });*/
-            
+
             if *is_first_iteration {
                 //current_handle.await.unwrap();
                 let mut tx = self.database.begin_transaction().await;
@@ -116,7 +114,6 @@ impl EventHandler for Handler {
                 tx.save_bot_status(&bot_status).await;
                 *is_first_iteration = false;
             }
-
 
             sleep(DISCORD_REFRESH_RATE).await;
         }
@@ -188,13 +185,13 @@ impl EventHandler for Handler {
                     self.interaction_accepted(&ctx, &user_settings, &mut content, &mut tx, global_last_updated_at).await;
                 }
                 "remove_from_queue" => {
-                    self.interaction_remove_from_queue(&user_settings, &mut content, &mut tx).await;
+                    self.interaction_remove_from_queue(&ctx, &user_settings, &mut content, &mut tx, global_last_updated_at).await;
                 }
                 "reject" => {
-                    self.interaction_rejected(&user_settings, &mut content, &mut tx).await;
+                    self.interaction_rejected(&ctx, &user_settings, &mut content, &mut tx, global_last_updated_at).await;
                 }
                 "undo_rejected" => {
-                    self.interaction_undo_rejected(&user_settings, &mut content, &mut tx).await;
+                    self.interaction_undo_rejected(&ctx, &user_settings, &mut content, &mut tx, global_last_updated_at).await;
                 }
                 "remove_from_view" => {
                     self.interaction_remove_from_view(&ctx, &mut content).await;
@@ -241,11 +238,9 @@ impl EventHandler for Handler {
 
 impl Handler {
     async fn ready_loop(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>, rng: &mut StdRng, is_first_iteration: bool) {
-        
         if self.is_bot_busy().await {
             return;
         }
-        
 
         self.process_bot_status(ctx, user_settings, tx, Arc::clone(&global_last_updated_at)).await;
         let content_mapping = if is_first_iteration {
@@ -255,7 +250,7 @@ impl Handler {
             content_mapping.shuffle(rng);
             content_mapping
         };
-        
+
         if content_mapping.is_empty() {
             sleep(DISCORD_REFRESH_RATE).await;
         }

@@ -119,7 +119,7 @@ pub fn generate_bot_status_caption(user_settings: &UserSettings, bot_status: &Bo
     } else {
         content_queue_string = "Currently there are no queued posts! You should probably add some because, you know, you can :3".to_string();
     }
-    
+
     let update_interval = user_settings.interface_update_interval as f64 / 1000.0;
     let update_interval_string = format!("Current interface update interval: {:.2}s", update_interval);
 

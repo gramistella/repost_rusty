@@ -1,6 +1,3 @@
-#[macro_use]
-extern crate diesel;
-
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;

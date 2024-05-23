@@ -3,6 +3,7 @@ FROM docker.io/lukemathwalker/cargo-chef:latest-rust-1 AS chef
 WORKDIR /repostrusty
 
 FROM chef AS planner
+COPY .env .env
 COPY ./Cargo.lock ./Cargo.lock
 COPY ./Cargo.toml ./Cargo.toml
 COPY ./instagram_scraper_rs ./instagram_scraper_rs
@@ -16,6 +17,7 @@ COPY ./instagram_scraper_rs ./instagram_scraper_rs
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Copy the source code and configuration
+COPY .env .env
 COPY ./Cargo.lock ./Cargo.lock
 COPY ./Cargo.toml ./Cargo.toml
 COPY ./src ./src

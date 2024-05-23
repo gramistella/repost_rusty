@@ -10,7 +10,7 @@ use crate::discord::bot::{ChannelIdMap, Handler};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{generate_full_caption, get_edit_buttons, get_pending_buttons, now_in_my_timezone};
 use crate::discord::view::handle_content_deletion;
-use crate::{POSTED_CHANNEL_ID};
+use crate::POSTED_CHANNEL_ID;
 
 impl Handler {
     pub async fn interaction_resume_from_halt(&self, user_settings: &mut UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
@@ -63,10 +63,14 @@ impl Handler {
         tx.save_queued_content(&queued_content).await;
 
         content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+        {
+            let mut locked_global_last_updated_at = global_last_updated_at.lock().await;
+            *locked_global_last_updated_at = *locked_global_last_updated_at - Duration::milliseconds(user_settings.interface_update_interval);
+        }
         self.process_queued(ctx, user_settings, tx, content_info, global_last_updated_at).await
     }
 
-    pub async fn interaction_rejected(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
+    pub async fn interaction_rejected(&self, ctx: &Context, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         content_info.status = ContentStatus::Rejected { shown: true };
 
         let now = now_in_my_timezone(user_settings);
@@ -81,10 +85,17 @@ impl Handler {
         };
         tx.save_rejected_content(rejected_content).await;
 
+        // Force the update of the message
         content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+        {
+            let mut locked_global_last_updated_at = global_last_updated_at.lock().await;
+            *locked_global_last_updated_at = *locked_global_last_updated_at - Duration::milliseconds(user_settings.interface_update_interval);
+        }
+
+        self.process_rejected(ctx, user_settings, tx, content_info, global_last_updated_at).await;
     }
 
-    pub async fn interaction_remove_from_queue(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
+    pub async fn interaction_remove_from_queue(&self, context: &Context, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         content_info.status = ContentStatus::Pending { shown: true };
 
         let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content_info.original_shortcode.clone()).await;
@@ -94,15 +105,27 @@ impl Handler {
 
         let now = now_in_my_timezone(user_settings);
         content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+        {
+            let mut locked_global_last_updated_at = global_last_updated_at.lock().await;
+            *locked_global_last_updated_at = *locked_global_last_updated_at - Duration::milliseconds(user_settings.interface_update_interval);
+        }
+
+        self.process_pending(context, user_settings, tx, content_info, global_last_updated_at).await;
     }
 
-    pub async fn interaction_undo_rejected(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
+    pub async fn interaction_undo_rejected(&self, context: &Context, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         content_info.status = ContentStatus::Pending { shown: true };
 
         tx.remove_rejected_content_with_shortcode(content_info.original_shortcode.clone()).await;
 
         let now = now_in_my_timezone(user_settings);
         content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+        {
+            let mut locked_global_last_updated_at = global_last_updated_at.lock().await;
+            *locked_global_last_updated_at = *locked_global_last_updated_at - Duration::milliseconds(user_settings.interface_update_interval);
+        }
+
+        self.process_pending(context, user_settings, tx, content_info, global_last_updated_at).await;
     }
 
     pub async fn interaction_remove_from_view(&self, ctx: &Context, content_info: &mut ContentInfo) {
