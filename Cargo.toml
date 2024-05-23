@@ -8,6 +8,8 @@ anyhow = { version = "1.0.86", features = [] }
 thiserror = "1.0.61"
 chrono = "0.4.38"
 diesel = { version = "2.1.6", features = ["postgres", "r2d2"] }
+#sea-orm = { version = "1.0.0-rc.4", features = ["sqlx-postgres","runtime-tokio-native-tls", "macros"] }
+sqlx = { version = "0.7.4", features = [ "postgres", "runtime-tokio", "tls-native-tls" ] }
 futures = "0.3.30"
 image = "0.25.1"
 image_hasher = "2.0.0"

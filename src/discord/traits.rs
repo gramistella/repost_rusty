@@ -107,7 +107,7 @@ impl ProcessableContent for ContentInfo {
     }
 
     async fn generate_caption(&self, tx: &mut DatabaseTransaction, ui_definitions: &UiDefinitions) -> String {
-        let user_settings = tx.load_user_settings();
+        let user_settings = tx.load_user_settings().await;
         generate_full_caption(&user_settings, tx, ui_definitions, self).await
     }
 

@@ -16,7 +16,7 @@ use crate::discord::utils::{
     generate_bot_status_caption, generate_full_caption, get_bot_status_buttons, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, handle_msg_deletion, now_in_my_timezone, send_message_with_retry, should_update_buttons, should_update_caption,
 };
 use crate::s3::helper::delete_from_s3;
-use crate::{DELAY_BETWEEN_MESSAGE_UPDATES, INTERFACE_UPDATE_INTERVAL, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
+use crate::{DELAY_BETWEEN_MESSAGE_UPDATES, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 
 impl Handler {
     pub async fn process_bot_status(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
@@ -24,12 +24,12 @@ impl Handler {
 
         let now = now_in_my_timezone(user_settings);
 
-        let mut bot_status = tx.load_bot_status();
-        let content_queue = tx.load_content_queue();
-        let content_info_vec = tx.load_content_mapping();
+        let mut bot_status = tx.load_bot_status().await;
+        let content_queue = tx.load_content_queue().await;
+        let content_info_vec = tx.load_content_mapping().await;
         let content_queue_len = content_queue.len();
 
-        let msg_caption = generate_bot_status_caption(&bot_status, content_info_vec.clone(), content_queue, now);
+        let msg_caption = generate_bot_status_caption(&user_settings, &bot_status, content_info_vec.clone(), content_queue, now);
         let msg_buttons = get_bot_status_buttons(&bot_status);
 
         if bot_status.message_id.get() == 1 {
@@ -38,7 +38,7 @@ impl Handler {
             bot_status.last_updated_at = now.to_rfc3339();
         } else {
             let last_updated_at = DateTime::parse_from_rfc3339(&bot_status.last_updated_at).unwrap();
-            if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
+            if now - last_updated_at.with_timezone(&Utc) >= Duration::milliseconds(user_settings.interface_update_interval) {
                 handle_shown_message_update(ctx, STATUS_CHANNEL_ID, &mut bot_status, user_settings, &msg_caption, msg_buttons, global_last_updated_at).await;
                 bot_status.last_updated_at = now.to_rfc3339();
             }
@@ -50,7 +50,7 @@ impl Handler {
         // Warn the user if the queue is empty
         if content_queue_len == 0 && bot_status.queue_alert_1_message_id.get() == 1 {
             let mention = Mention::from(MY_DISCORD_ID);
-            let msg_caption = format!("{mention} the content queue is empty! ( •̀ - •́ )");
+            let msg_caption = format!("{mention} the queue is empty! ( •̀ - •́ )");
             let msg = CreateMessage::new().content(msg_caption);
             bot_status.queue_alert_1_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
         }
@@ -65,12 +65,12 @@ impl Handler {
         if content_queue_len < bot_status.prev_content_queue_len as usize && queueable_content_count >= 1 {
             if content_queue_len == 1 && bot_status.queue_alert_2_message_id.get() == 1 {
                 let mention = Mention::from(MY_DISCORD_ID);
-                let msg_caption = format!("Hello?? Are you there {mention}? Queue some content, or the queue will run out! (╥﹏╥)");
+                let msg_caption = format!("Hello? Are you there {mention}? Queue some content, now! (╥﹏╥)");
                 let msg = CreateMessage::new().content(msg_caption);
                 bot_status.queue_alert_2_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
             } else if content_queue_len == 3 && bot_status.queue_alert_3_message_id.get() == 1 {
                 let mention = Mention::from(MY_DISCORD_ID);
-                let msg_caption = format!("Hey {mention}, remember to add more content to the queue soon! (¬_¬\")");
+                let msg_caption = format!("Hey {mention}, remember to add more content to the queue! (¬_¬\")");
                 let msg = CreateMessage::new().content(msg_caption);
                 bot_status.queue_alert_3_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
             }
@@ -105,7 +105,7 @@ impl Handler {
             bot_status.halt_alert_message_id = MessageId::new(1);
         }
 
-        tx.save_bot_status(&bot_status);
+        tx.save_bot_status(&bot_status).await;
     }
 
     pub async fn process_pending(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, content_info: &mut ContentInfo, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
@@ -134,13 +134,13 @@ impl Handler {
         let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions, content_info).await;
         let mut msg_buttons = get_queued_buttons(&self.ui_definitions);
 
-        let queued_content = match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()) {
+        let queued_content = match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).await {
             Some(queued_content) => queued_content,
-            None => match tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()) {
+            None => match tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).await {
                 Some(_posted_content) => {
                     return self.process_published(ctx, user_settings, tx, content_info, global_last_updated_at).await;
                 }
-                None => match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()) {
+                None => match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).await {
                     Some(_failed_content) => {
                         return self.process_failed(ctx, user_settings, tx, content_info, global_last_updated_at).await;
                     }
@@ -180,7 +180,7 @@ impl Handler {
         let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_rejected_buttons(&self.ui_definitions);
 
-        let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()) {
+        let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).await {
             Some(rejected_content) => rejected_content,
             None => {
                 tracing::error!("Couldn't process rejected_content, content not found in rejected table! {:?}", content_info);
@@ -213,7 +213,7 @@ impl Handler {
         let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_published_buttons(&self.ui_definitions);
 
-        let published_content = match tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()) {
+        let published_content = match tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).await {
             Some(published_content) => published_content,
             None => {
                 tracing::error!("Couldn't process published_content, content not found in published table! {:?}", content_info);
@@ -248,7 +248,7 @@ impl Handler {
         let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_failed_buttons(&self.ui_definitions);
 
-        let failed_content = match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()) {
+        let failed_content = match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).await {
             Some(failed_content) => failed_content,
             None => {
                 tracing::error!("Couldn't process failed_content, content not found in failed table! {:?}", content_info);
@@ -329,7 +329,7 @@ async fn handle_shown_message_update<T: crate::discord::traits::Updatable>(ctx: 
     let last_updated_at = DateTime::parse_from_rfc3339(&item.get_last_updated_at()).unwrap();
     let now = now_in_my_timezone(user_settings);
 
-    if now - last_updated_at.with_timezone(&Utc) >= Duration::seconds(INTERFACE_UPDATE_INTERVAL.as_secs() as i64) {
+    if now - last_updated_at.with_timezone(&Utc) >= Duration::milliseconds(user_settings.interface_update_interval) {
         // Get the last_updated_at of the last updated message
         let last_updated_at_last_message = *global_last_updated_at.lock().await;
 

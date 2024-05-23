@@ -1,53 +1,55 @@
 use std::ops::Deref;
+use std::sync::Arc;
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use serenity::all::{Context, CreateMessage, EditMessage, Interaction, Mention, MessageId, MessageReference};
+use tokio::sync::Mutex;
 
 use crate::database::database::{BotStatus, ContentInfo, DatabaseTransaction, QueuedContent, RejectedContent, UserSettings};
 use crate::discord::bot::{ChannelIdMap, Handler};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{generate_full_caption, get_edit_buttons, get_pending_buttons, now_in_my_timezone};
 use crate::discord::view::handle_content_deletion;
-use crate::{INTERFACE_UPDATE_INTERVAL, POSTED_CHANNEL_ID};
+use crate::{POSTED_CHANNEL_ID};
 
 impl Handler {
     pub async fn interaction_resume_from_halt(&self, user_settings: &mut UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
         bot_status.status = 0;
         user_settings.can_post = true;
         bot_status.status_message = "resuming...".to_string();
-        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-        tx.save_user_settings(user_settings);
-        tx.save_bot_status(bot_status)
+        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+        tx.save_user_settings(user_settings).await;
+        tx.save_bot_status(bot_status).await
     }
 
     pub async fn interaction_enable_manual_mode(&self, user_settings: &UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
         bot_status.manual_mode = true;
         bot_status.status_message = "manual mode  🟡".to_string();
-        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-        tx.save_bot_status(bot_status)
+        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+        tx.save_bot_status(bot_status).await
     }
 
     pub async fn interaction_disable_manual_mode(&self, user_settings: &UserSettings, bot_status: &mut BotStatus, tx: &mut DatabaseTransaction) {
         bot_status.manual_mode = false;
         bot_status.status_message = "disabling manual mode...".to_string();
-        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-        tx.save_bot_status(bot_status)
+        bot_status.last_updated_at = (now_in_my_timezone(user_settings) - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+        tx.save_bot_status(bot_status).await
     }
 
     pub async fn interaction_publish_now(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
         let now = now_in_my_timezone(user_settings);
 
-        let mut queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
+        let mut queued_content = tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).await.unwrap();
         queued_content.will_post_at = (now + Duration::seconds(30)).to_rfc3339();
-        tx.save_queued_content(&queued_content);
+        tx.save_queued_content(&queued_content).await;
 
-        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
     }
-    pub async fn interaction_accepted(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
+    pub async fn interaction_accepted(&self, ctx: &Context, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         content_info.status = ContentStatus::Queued { shown: true };
 
         let now = now_in_my_timezone(user_settings);
-        let will_post_at = tx.get_new_post_time();
+        let will_post_at = tx.get_new_post_time().await;
         let queued_content = QueuedContent {
             username: content_info.username.clone(),
             url: content_info.url.clone(),
@@ -58,9 +60,10 @@ impl Handler {
             will_post_at,
         };
 
-        tx.save_queued_content(&queued_content);
+        tx.save_queued_content(&queued_content).await;
 
-        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+        self.process_queued(ctx, user_settings, tx, content_info, global_last_updated_at).await
     }
 
     pub async fn interaction_rejected(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
@@ -76,30 +79,30 @@ impl Handler {
             original_shortcode: content_info.original_shortcode.clone(),
             rejected_at: now.to_rfc3339(),
         };
-        tx.save_rejected_content(rejected_content);
+        tx.save_rejected_content(rejected_content).await;
 
-        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
     }
 
     pub async fn interaction_remove_from_queue(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
         content_info.status = ContentStatus::Pending { shown: true };
 
-        let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content_info.original_shortcode.clone());
+        let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content_info.original_shortcode.clone()).await;
         if is_in_queue {
-            tx.remove_post_from_queue_with_shortcode(content_info.original_shortcode.clone());
+            tx.remove_post_from_queue_with_shortcode(content_info.original_shortcode.clone()).await;
         }
 
         let now = now_in_my_timezone(user_settings);
-        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
     }
 
     pub async fn interaction_undo_rejected(&self, user_settings: &UserSettings, content_info: &mut ContentInfo, tx: &mut DatabaseTransaction) {
         content_info.status = ContentStatus::Pending { shown: true };
 
-        tx.remove_rejected_content_with_shortcode(content_info.original_shortcode.clone());
+        tx.remove_rejected_content_with_shortcode(content_info.original_shortcode.clone()).await;
 
         let now = now_in_my_timezone(user_settings);
-        content_info.last_updated_at = (now - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
+        content_info.last_updated_at = (now - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
     }
 
     pub async fn interaction_remove_from_view(&self, ctx: &Context, content_info: &mut ContentInfo) {

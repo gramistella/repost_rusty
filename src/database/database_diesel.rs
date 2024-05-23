@@ -1,17 +1,19 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::DerefMut;
 use std::str::FromStr;
-
-use sqlx::sqlx_macros::*;
-use sqlx::{Error, Pool, Postgres, query, query_as};
-use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Timelike, Utc};
-
+use diesel::dsl::exists;
+use diesel::prelude::*;
+use diesel::result::Error;
+use diesel::{delete, select, table, PgConnection, RunQueryDsl};
+use diesel::r2d2::{ConnectionManager, Pool, PooledConnection};
 use image_hasher::ImageHash;
 use rand::Rng;
 use serenity::all::MessageId;
-use sqlx::pool::PoolConnection;
+use tokio::sync::Mutex;
 
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
@@ -21,7 +23,8 @@ use crate::IS_OFFLINE;
 pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 pub const DEFAULT_POSTED_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 
-#[derive(FromRow)]
+#[derive(Queryable, Insertable, AsChangeset)]
+#[diesel(table_name = user_settings)]
 pub struct UserSettings {
     pub username: String,
     pub can_post: bool,
@@ -32,7 +35,20 @@ pub struct UserSettings {
     pub timezone_offset: i32,
 }
 
-#[derive(Debug, Clone)]
+table! {
+    user_settings (username) {
+        username -> Text,
+        can_post -> Bool,
+        posting_interval -> Integer,
+        interface_update_interval -> BigInt,
+        random_interval_variance -> Integer,
+        rejected_content_lifespan -> Integer,
+        timezone_offset -> Integer,
+    }
+}
+
+#[derive(Queryable, Insertable, Selectable, AsChangeset, Clone)]
+#[diesel(table_name = queued_content)]
 pub struct QueuedContent {
     pub username: String,
     pub url: String,
@@ -43,7 +59,20 @@ pub struct QueuedContent {
     pub will_post_at: String,
 }
 
-#[derive(Debug, Clone)]
+table! {
+    queued_content (username, original_shortcode) {
+        username -> Text,
+        url -> Text,
+        caption -> Text,
+        hashtags -> Text,
+        original_author -> Text,
+        original_shortcode -> Text,
+        will_post_at -> Text,
+    }
+}
+
+#[derive(Queryable, Insertable, Selectable, AsChangeset, Clone)]
+#[diesel(table_name = published_content)]
 pub struct PublishedContent {
     pub username: String,
     pub url: String,
@@ -54,7 +83,20 @@ pub struct PublishedContent {
     pub published_at: String,
 }
 
-#[derive(Debug, Clone)]
+table! {
+    published_content (username, original_shortcode) {
+        username -> Text,
+        url -> Text,
+        caption -> Text,
+        hashtags -> Text,
+        original_author -> Text,
+        original_shortcode -> Text,
+        published_at -> Text,
+    }
+}
+
+#[derive(Queryable, Insertable, Selectable, AsChangeset, Clone)]
+#[diesel(table_name = rejected_content)]
 pub struct RejectedContent {
     pub username: String,
     pub url: String,
@@ -65,7 +107,20 @@ pub struct RejectedContent {
     pub rejected_at: String,
 }
 
-#[derive(Debug, Clone)]
+table! {
+    rejected_content (username, original_shortcode) {
+        username -> Text,
+        url -> Text,
+        caption -> Text,
+        hashtags -> Text,
+        original_author -> Text,
+        original_shortcode -> Text,
+        rejected_at -> Text,
+    }
+}
+
+#[derive(Queryable, Insertable, AsChangeset, Clone)]
+#[diesel(table_name = failed_content)]
 pub struct FailedContent {
     pub username: String,
     pub url: String,
@@ -76,6 +131,17 @@ pub struct FailedContent {
     pub failed_at: String,
 }
 
+table! {
+    failed_content (username, original_shortcode) {
+        username -> Text,
+        url -> Text,
+        caption -> Text,
+        hashtags -> Text,
+        original_author -> Text,
+        original_shortcode -> Text,
+        failed_at -> Text,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct ContentInfo {
@@ -92,7 +158,9 @@ pub(crate) struct ContentInfo {
     pub encountered_errors: i32,
 }
 
-struct InnerContentInfo {
+#[derive(Queryable, Insertable, Selectable, AsChangeset, Debug, Clone)]
+#[diesel(table_name = content_info)]
+pub(crate) struct InnerContentInfo {
     pub username: String,
     pub message_id: i64,
     pub url: String,
@@ -106,6 +174,21 @@ struct InnerContentInfo {
     pub encountered_errors: i32,
 }
 
+table! {
+    content_info (username, original_shortcode) {
+        username -> Text,
+        message_id -> BigInt,
+        url -> Text,
+        status -> Text,
+        caption -> Text,
+        hashtags -> Text,
+        original_author -> Text,
+        original_shortcode -> Text,
+        last_updated_at -> Text,
+        added_at -> Text,
+        encountered_errors -> Integer,
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct HashedVideo {
@@ -118,8 +201,9 @@ pub struct HashedVideo {
     pub hash_frame_4: ImageHash,
 }
 
-
-struct InnerHashedVideo {
+#[derive(Queryable, Insertable, Selectable, AsChangeset, PartialEq)]
+#[diesel(table_name = video_hashes)]
+pub struct InnerHashedVideo {
     pub username: String,
     pub duration: String,
     pub original_shortcode: String,
@@ -127,6 +211,18 @@ struct InnerHashedVideo {
     pub hash_frame_2: String,
     pub hash_frame_3: String,
     pub hash_frame_4: String,
+}
+
+table! {
+    video_hashes (original_shortcode) {
+        username -> Text,
+        original_shortcode -> Text,
+        duration -> Text,
+        hash_frame_1 -> Text,
+        hash_frame_2 -> Text,
+        hash_frame_3 -> Text,
+        hash_frame_4 -> Text,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -146,7 +242,8 @@ pub struct BotStatus {
     pub halt_alert_message_id: MessageId,
 }
 
-
+#[derive(Queryable, QueryableByName, Insertable, Selectable, AsChangeset)]
+#[diesel(table_name = bot_status)]
 struct InnerBotStatus {
     pub username: String,
     pub message_id: i64,
@@ -163,14 +260,40 @@ struct InnerBotStatus {
     pub halt_alert_message_id: i64,
 }
 
+table! {
+    use diesel::sql_types::*;
+    bot_status (username) {
+        username -> Text,
+        message_id -> BigInt,
+        status -> Integer,
+        status_message -> Text,
+        is_discord_warmed_up -> Bool,
+        manual_mode -> Bool,
+        last_updated_at -> Text,
+        queue_alert_1_message_id -> BigInt,
+        queue_alert_2_message_id -> BigInt,
+        queue_alert_3_message_id -> BigInt,
+        prev_content_queue_len -> Integer,
+        halt_alert_message_id -> BigInt,
+    }
+}
+
+#[derive(Queryable, QueryableByName, Insertable, Selectable)]
+#[diesel(table_name = duplicate_content)]
 pub struct DuplicateContent {
     pub username: String,
     pub original_shortcode: String,
 }
 
+table! {
+    duplicate_content (original_shortcode) {
+        username -> Text,
+        original_shortcode -> Text,
+    }
+}
 
 pub(crate) struct Database {
-    pool: Pool<Postgres>,
+    pool: Arc<Mutex<Pool<ConnectionManager<PgConnection>>>>,
     username: String,
 }
 
@@ -197,7 +320,7 @@ impl Clone for Database {
 
 impl Database {
     //noinspection RsConstantConditionIf
-    pub async fn new(username: String, credentials: HashMap<String, String>) -> Result<Self, Error> {
+    pub fn new(username: String, credentials: HashMap<String, String>) -> Result<Self, Error> {
         let db_username = credentials.get("db_username").expect("No db_username field in credentials");
         let db_password = credentials.get("db_password").expect("No db_password field in credentials");
         let database_url = if IS_OFFLINE {
@@ -206,14 +329,16 @@ impl Database {
             format!("postgres://{db_username}:{db_password}@192.168.1.101/prod")
         };
 
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&database_url).await?;
+        let manager = ConnectionManager::<PgConnection>::new(database_url);
 
+        let pool = Pool::new(manager).expect("Failed to create pool.");
 
+        let mut pooled_conn = pool.get().unwrap();
 
+        let conn = pooled_conn.deref_mut();
 
-        query!("CREATE TABLE IF NOT EXISTS user_settings (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS user_settings (
             username TEXT PRIMARY KEY,
             can_post BOOLEAN NOT NULL,
             posting_interval INTEGER NOT NULL,
@@ -221,10 +346,12 @@ impl Database {
             random_interval_variance INTEGER NOT NULL,
             rejected_content_lifespan INTEGER NOT NULL,
             timezone_offset INTEGER NOT NULL
-        )").execute(&pool).await.unwrap();
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-
-        let user_exists = query_as!(UserSettings, "SELECT * FROM user_settings WHERE username = $1", &username).fetch_optional(&pool).await.unwrap().is_some();
+        let user_exists = user_settings::table.filter(user_settings::username.eq(&username)).first::<UserSettings>(conn).is_ok();
 
         if !user_exists {
             if IS_OFFLINE {
@@ -238,16 +365,7 @@ impl Database {
                     timezone_offset: 2,
                 };
 
-                query!("INSERT INTO user_settings (username, can_post, posting_interval, interface_update_interval, random_interval_variance, rejected_content_lifespan, timezone_offset) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                    user_settings.username,
-                    user_settings.can_post,
-                    user_settings.posting_interval,
-                    user_settings.interface_update_interval,
-                    user_settings.random_interval_variance,
-                    user_settings.rejected_content_lifespan,
-                    user_settings.timezone_offset
-                    ).execute(&pool).await.unwrap();
-
+                diesel::insert_into(user_settings::table).values(&user_settings).execute(conn).unwrap();
             } else {
                 let user_settings = UserSettings {
                     username: username.clone(),
@@ -259,19 +377,12 @@ impl Database {
                     timezone_offset: 2,
                 };
 
-                query!("INSERT INTO user_settings (username, can_post, posting_interval, interface_update_interval, random_interval_variance, rejected_content_lifespan, timezone_offset) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                    user_settings.username,
-                    user_settings.can_post,
-                    user_settings.posting_interval,
-                    user_settings.interface_update_interval,
-                    user_settings.random_interval_variance,
-                    user_settings.rejected_content_lifespan,
-                    user_settings.timezone_offset
-                    ).execute(&pool).await.unwrap();
+                diesel::insert_into(user_settings::table).values(&user_settings).execute(conn).unwrap();
             }
         }
 
-        query!("CREATE TABLE IF NOT EXISTS content_info (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS content_info (
             username TEXT NOT NULL,
             message_id BIGINT NOT NULL,
             url TEXT NOT NULL,
@@ -283,10 +394,14 @@ impl Database {
             last_updated_at TEXT NOT NULL,
             added_at TEXT NOT NULL,
             encountered_errors INTEGER NOT NULL,
-            PRIMARY KEY (username, original_shortcode))
-            ").execute(&pool).await.unwrap();
+            PRIMARY KEY (username, original_shortcode)
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS queued_content (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS queued_content (
             username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -295,9 +410,13 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             will_post_at TEXT NOT NULL,
             PRIMARY KEY (username, original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS published_content (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS published_content (
             username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -306,9 +425,13 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             published_at TEXT NOT NULL,
             PRIMARY KEY (username, original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS rejected_content (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS rejected_content (
             username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -317,9 +440,13 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             rejected_at TEXT NOT NULL,
             PRIMARY KEY (username, original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS failed_content (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS failed_content (
             username TEXT NOT NULL,
             url TEXT NOT NULL,
             caption TEXT NOT NULL,
@@ -328,10 +455,13 @@ impl Database {
             original_shortcode TEXT NOT NULL,
             failed_at TEXT NOT NULL,
             PRIMARY KEY (username, original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-
-        query!("CREATE TABLE IF NOT EXISTS video_hashes (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS video_hashes (
             username TEXT NOT NULL,
             original_shortcode TEXT NOT NULL,
             duration TEXT NOT NULL,
@@ -340,16 +470,23 @@ impl Database {
             hash_frame_3 TEXT NOT NULL,
             hash_frame_4 TEXT NOT NULL,
             PRIMARY KEY (original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-
-        query!("CREATE TABLE IF NOT EXISTS duplicate_content (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS duplicate_content (
             username TEXT NOT NULL,
             original_shortcode TEXT NOT NULL,
             PRIMARY KEY (original_shortcode)
-        )").execute(&pool).await.unwrap();
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-        query!("CREATE TABLE IF NOT EXISTS bot_status (
+        diesel::sql_query(
+            "CREATE TABLE IF NOT EXISTS bot_status (
             username TEXT PRIMARY KEY,
             message_id BIGINT NOT NULL,
             status INTEGER NOT NULL,
@@ -362,9 +499,13 @@ impl Database {
             queue_alert_3_message_id BIGINT NOT NULL,
             prev_content_queue_len INTEGER NOT NULL,
             halt_alert_message_id BIGINT NOT NULL
-        )").execute(&pool).await.unwrap();
+        )",
+        )
+        .execute(conn)
+        .unwrap();
 
-        let bot_status_exists = query_as!(InnerBotStatus, "SELECT * FROM bot_status WHERE username = $1", &username).fetch_one(&pool).await.is_ok();
+        let bot_status_exists = bot_status::table.filter(bot_status::username.eq(&username)).first::<InnerBotStatus>(conn).is_ok();
+
         if !bot_status_exists {
             let bot_status = InnerBotStatus {
                 username: username.clone(),
@@ -380,56 +521,36 @@ impl Database {
                 prev_content_queue_len: 0,
                 halt_alert_message_id: 1,
             };
-            query!("INSERT INTO bot_status (username, message_id, status, status_message, is_discord_warmed_up, manual_mode, last_updated_at, queue_alert_1_message_id, queue_alert_2_message_id, queue_alert_3_message_id, prev_content_queue_len, halt_alert_message_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
-                bot_status.username,
-                bot_status.message_id,
-                bot_status.status,
-                bot_status.status_message,
-                bot_status.is_discord_warmed_up,
-                bot_status.manual_mode,
-                bot_status.last_updated_at,
-                bot_status.queue_alert_1_message_id,
-                bot_status.queue_alert_2_message_id,
-                bot_status.queue_alert_3_message_id,
-                bot_status.prev_content_queue_len,
-                bot_status.halt_alert_message_id
-            ).execute(&pool).await.unwrap();
-
+            diesel::insert_into(bot_status::table).values(&bot_status).execute(conn).unwrap();
         }
+
+        let pool = Arc::new(Mutex::new(pool));
 
         Ok(Database { pool, username })
     }
     pub async fn begin_transaction(&self) -> DatabaseTransaction {
-        let conn = self.pool.acquire().await.unwrap();
+        let pool_guard = self.pool.lock().await;
+        let conn = pool_guard.get().unwrap();
         DatabaseTransaction { conn, username: self.username.clone() }
     }
 }
 
 pub struct DatabaseTransaction {
-    conn: PoolConnection<Postgres>,
+    conn: PooledConnection<ConnectionManager<PgConnection>>,
     username: String,
 }
 
 impl DatabaseTransaction {
-    pub async fn load_user_settings(&mut self) -> UserSettings {
-        let user_settings = query_as!(UserSettings, "SELECT * FROM user_settings WHERE username = $1", &self.username).fetch_one(self.conn.as_mut()).await.unwrap();
-        user_settings
+    pub fn load_user_settings(&mut self) -> UserSettings {
+        user_settings::table.filter(user_settings::username.eq(&self.username)).first::<UserSettings>(&mut self.conn).unwrap()
     }
 
-    pub async fn save_user_settings(&mut self, user_settings: &UserSettings) {
-        query!("UPDATE user_settings SET can_post = $1, posting_interval = $2, interface_update_interval = $3, random_interval_variance = $4, rejected_content_lifespan = $5, timezone_offset = $6 WHERE username = $7",
-            user_settings.can_post,
-            user_settings.posting_interval,
-            user_settings.interface_update_interval,
-            user_settings.random_interval_variance,
-            user_settings.rejected_content_lifespan,
-            user_settings.timezone_offset,
-            user_settings.username
-        ).execute(self.conn.as_mut()).await.unwrap();
+    pub fn save_user_settings(&mut self, user_settings: &UserSettings) {
+        diesel::update(user_settings::table).filter(user_settings::username.eq(&self.username)).set(user_settings).execute(&mut self.conn).unwrap();
     }
 
-    pub async fn load_bot_status(&mut self) -> BotStatus {
-        let bot_status = query_as!(InnerBotStatus, "SELECT * FROM bot_status WHERE username = $1", &self.username).fetch_one(self.conn.as_mut()).await.unwrap();
+    pub fn load_bot_status(&mut self) -> BotStatus {
+        let bot_status = bot_status::table.filter(bot_status::username.eq(&self.username)).first::<InnerBotStatus>(&mut self.conn).unwrap();
 
         BotStatus {
             username: bot_status.username,
@@ -447,7 +568,7 @@ impl DatabaseTransaction {
         }
     }
 
-    pub async fn save_bot_status(&mut self, bot_status: &BotStatus) {
+    pub fn save_bot_status(&mut self, bot_status: &BotStatus) {
         let inner_bot_status = InnerBotStatus {
             username: bot_status.username.clone(),
             message_id: bot_status.message_id.get() as i64,
@@ -463,33 +584,19 @@ impl DatabaseTransaction {
             halt_alert_message_id: bot_status.halt_alert_message_id.get() as i64,
         };
 
-        query!("UPDATE bot_status SET message_id = $1, status = $2, status_message = $3, is_discord_warmed_up = $4, manual_mode = $5, last_updated_at = $6, queue_alert_1_message_id = $7, queue_alert_2_message_id = $8, queue_alert_3_message_id = $9, prev_content_queue_len = $10, halt_alert_message_id = $11 WHERE username = $12",
-            inner_bot_status.message_id,
-            inner_bot_status.status,
-            inner_bot_status.status_message,
-            inner_bot_status.is_discord_warmed_up,
-            inner_bot_status.manual_mode,
-            inner_bot_status.last_updated_at,
-            inner_bot_status.queue_alert_1_message_id,
-            inner_bot_status.queue_alert_2_message_id,
-            inner_bot_status.queue_alert_3_message_id,
-            inner_bot_status.prev_content_queue_len,
-            inner_bot_status.halt_alert_message_id,
-            inner_bot_status.username
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        diesel::update(bot_status::table).filter(bot_status::username.eq(&self.username)).set(inner_bot_status).execute(&mut self.conn).unwrap();
     }
 
-    pub async fn save_duplicate_content(&mut self, duplicate_content: DuplicateContent) {
-        query!("INSERT INTO duplicate_content (username, original_shortcode) VALUES ($1, $2)", duplicate_content.username, duplicate_content.original_shortcode).execute(self.conn.as_mut()).await.unwrap();
+    pub fn save_duplicate_content(&mut self, duplicate_content: DuplicateContent) {
+        diesel::insert_into(duplicate_content::table).values(&duplicate_content).execute(&mut self.conn).unwrap();
     }
 
-    pub async fn load_duplicate_content(&mut self) -> Vec<DuplicateContent> {
-        query_as!(DuplicateContent, "SELECT * FROM duplicate_content WHERE username = $1", &self.username).fetch_all(self.conn.as_mut()).await.unwrap()
+    pub fn load_duplicate_content(&mut self) -> Vec<DuplicateContent> {
+        duplicate_content::table.filter(duplicate_content::username.eq(&self.username)).load::<DuplicateContent>(&mut self.conn).unwrap()
     }
 
-    pub async fn get_content_info_by_shortcode(&mut self, shortcode: &String) -> ContentInfo {
-        let found_content = query_as!(InnerContentInfo, "SELECT * FROM content_info WHERE username = $1 AND original_shortcode = $2", &self.username, shortcode).fetch_one(self.conn.as_mut()).await.unwrap();
+    pub fn get_content_info_by_shortcode(&mut self, shortcode: &String) -> ContentInfo {
+        let found_content = content_info::table.filter(content_info::username.eq(&self.username)).filter(content_info::original_shortcode.eq(&shortcode)).first::<InnerContentInfo>(&mut self.conn).unwrap();
 
         ContentInfo {
             username: found_content.username,
@@ -506,11 +613,11 @@ impl DatabaseTransaction {
         }
     }
 
-    pub async fn remove_content_info_with_shortcode(&mut self, shortcode: &String) {
-        query!("DELETE FROM content_info WHERE username = $1 AND original_shortcode = $2", &self.username, shortcode).execute(self.conn.as_mut()).await.unwrap();
+    pub fn remove_content_info_with_shortcode(&mut self, shortcode: &String) {
+        delete(content_info::table).filter(content_info::username.eq(&self.username)).filter(content_info::original_shortcode.eq(&shortcode)).execute(&mut self.conn).unwrap();
     }
 
-    pub async fn save_content_info(&mut self, content_info: &ContentInfo) {
+    pub fn save_content_info(&mut self, content_info: &ContentInfo) {
         let span = tracing::span!(tracing::Level::INFO, "save_content_mapping");
         let _enter = span.enter();
 
@@ -528,24 +635,17 @@ impl DatabaseTransaction {
             encountered_errors: content_info.encountered_errors,
         };
 
-        query!("INSERT INTO content_info (username, message_id, url, status, caption, hashtags, original_author, original_shortcode, last_updated_at, added_at, encountered_errors) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (username, original_shortcode) DO UPDATE SET message_id = $2, url = $3, status = $4, caption = $5, hashtags = $6, original_author = $7, last_updated_at = $9, added_at = $10, encountered_errors = $11",
-            inner_content_info.username,
-            inner_content_info.message_id,
-            inner_content_info.url,
-            inner_content_info.status,
-            inner_content_info.caption,
-            inner_content_info.hashtags,
-            inner_content_info.original_author,
-            inner_content_info.original_shortcode,
-            inner_content_info.last_updated_at,
-            inner_content_info.added_at,
-            inner_content_info.encountered_errors
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        diesel::insert_into(content_info::table)
+            .values(&inner_content_info)
+            .on_conflict((content_info::username, content_info::original_shortcode))
+            .do_update()
+            .set(&inner_content_info)
+            .execute(&mut self.conn)
+            .unwrap();
     }
 
-    pub async fn load_content_mapping(&mut self) -> Vec<ContentInfo> {
-        let content_list = query_as!(InnerContentInfo, "SELECT * FROM content_info WHERE username = $1 ORDER BY added_at", &self.username).fetch_all(self.conn.as_mut()).await.unwrap();
+    pub fn load_content_mapping(&mut self) -> Vec<ContentInfo> {
+        let content_list = content_info::table.filter(content_info::username.eq(&self.username)).order(content_info::added_at).load::<InnerContentInfo>(&mut self.conn).unwrap();
 
         let content_list = content_list
             .iter()
@@ -567,13 +667,9 @@ impl DatabaseTransaction {
         content_list
     }
 
-    pub async fn get_temp_message_id(&mut self, user_settings: &UserSettings) -> u64 {
-        let record_list = query!("SELECT message_id FROM content_info WHERE username = $1", &self.username).fetch_all(self.conn.as_mut()).await.unwrap();
+    pub fn get_temp_message_id(&mut self, user_settings: &UserSettings) -> u64 {
+        let message_id_vec = content_info::table.select(content_info::message_id).filter(content_info::username.eq(&self.username)).load::<i64>(&mut self.conn).unwrap();
 
-        let mut message_id_vec = Vec::new();
-        for record in record_list {
-            message_id_vec.push(record.message_id);
-        }
         let max_message_id = message_id_vec.iter().max().cloned();
         let msg_id = match max_message_id {
             Some(max) => max + 1000,
@@ -583,105 +679,101 @@ impl DatabaseTransaction {
         msg_id as u64
     }
 
-    pub async fn remove_post_from_queue_with_shortcode(&mut self, shortcode: String) {
+    pub fn remove_post_from_queue_with_shortcode(&mut self, shortcode: String) {
+        use crate::database::database_diesel::queued_content::dsl::*;
+        use diesel::prelude::*;
 
-
-        let deleted_rows = query!("DELETE FROM queued_content WHERE original_shortcode = $1 AND username = $2", shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap().rows_affected();
+        let deleted_rows = delete(queued_content).filter(original_shortcode.eq(&shortcode)).filter(username.eq(&self.username)).execute(&mut self.conn).unwrap();
 
         if deleted_rows > 0 {
-            let user_settings = self.load_user_settings().await;
-            let mut queued_content_list = self.load_content_queue().await;
+            let user_settings = self.load_user_settings();
+            let mut queued_content_list = self.load_content_queue();
 
             if let Some(removed_post_index) = queued_content_list.iter().position(|content| content.original_shortcode == shortcode) {
                 queued_content_list.remove(removed_post_index);
 
                 for post in queued_content_list.iter_mut().skip(removed_post_index) {
-                    post.will_post_at = self.get_new_post_time().await;
+                    post.will_post_at = self.get_new_post_time();
 
-                    let mut content_info = self.get_content_info_by_shortcode(&post.original_shortcode).await;
+                    let mut content_info = self.get_content_info_by_shortcode(&post.original_shortcode);
                     content_info.last_updated_at = (now_in_my_timezone(&user_settings) - Duration::milliseconds(user_settings.interface_update_interval as i64)).to_rfc3339();
                     content_info.status = if content_info.status.to_string().contains("shown") { ContentStatus::Queued { shown: true } } else { ContentStatus::Queued { shown: false } };
-                    self.save_content_info(&content_info).await;
+                    self.save_content_info(&content_info);
                 }
             }
         }
     }
 
-    pub async fn save_queued_content(&mut self, queued_content: &QueuedContent) {
-        query!("INSERT INTO queued_content (username, url, caption, hashtags, original_author, original_shortcode, will_post_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (username, original_shortcode) DO UPDATE SET url = $2, caption = $3, hashtags = $4, original_author = $5, will_post_at = $7",
-            queued_content.username,
-            queued_content.url,
-            queued_content.caption,
-            queued_content.hashtags,
-            queued_content.original_author,
-            queued_content.original_shortcode,
-            queued_content.will_post_at
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+    pub fn save_queued_content(&mut self, queued_content: &QueuedContent) {
+        diesel::insert_into(queued_content::table)
+            .values(queued_content)
+            .on_conflict((queued_content::username, queued_content::original_shortcode))
+            .do_update()
+            .set(queued_content)
+            .execute(&mut self.conn)
+            .unwrap();
     }
 
-    pub async fn load_content_queue(&mut self) -> Vec<QueuedContent> {
-        query_as!(QueuedContent, "SELECT * FROM queued_content WHERE username = $1 ORDER BY will_post_at", &self.username).fetch_all(self.conn.as_mut()).await.unwrap()
+    pub fn load_content_queue(&mut self) -> Vec<QueuedContent> {
+        queued_content::table.filter(queued_content::username.eq(&self.username)).order(queued_content::will_post_at).load::<QueuedContent>(&mut self.conn).unwrap()
     }
 
-    pub async fn get_queued_content_by_shortcode(&mut self, shortcode: String) -> Option<QueuedContent> {
-        let content_queue = self.load_content_queue().await;
+    pub fn get_queued_content_by_shortcode(&mut self, shortcode: String) -> Option<QueuedContent> {
+        let content_queue = self.load_content_queue();
+
         content_queue.iter().find(|&content| content.original_shortcode == shortcode).cloned()
     }
 
-    pub async fn get_rejected_content_by_shortcode(&mut self, shortcode: String) -> Option<RejectedContent> {
-        let rejected_content = self.load_rejected_content().await;
+    pub fn get_rejected_content_by_shortcode(&mut self, shortcode: String) -> Option<RejectedContent> {
+        let rejected_content = self.load_rejected_content();
 
         rejected_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
     }
 
-    pub async fn get_failed_content_by_shortcode(&mut self, shortcode: String) -> Option<FailedContent> {
-        let failed_content = self.load_failed_content().await;
+    pub fn get_failed_content_by_shortcode(&mut self, shortcode: String) -> Option<FailedContent> {
+        let failed_content = self.load_failed_content();
 
         failed_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
     }
 
-    pub async fn get_published_content_by_shortcode(&mut self, shortcode: String) -> Option<PublishedContent> {
-        let published_content = self.load_posted_content().await;
+    pub fn get_published_content_by_shortcode(&mut self, shortcode: String) -> Option<PublishedContent> {
+        let published_content = self.load_posted_content();
 
         published_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
     }
 
-    pub async fn remove_rejected_content_with_shortcode(&mut self, shortcode: String) {
-        query!("DELETE FROM rejected_content WHERE original_shortcode = $1 AND username = $2", shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap();
+    pub fn remove_rejected_content_with_shortcode(&mut self, shortcode: String) {
+        delete(rejected_content::table).filter(rejected_content::original_shortcode.eq(&shortcode)).filter(rejected_content::username.eq(&self.username)).execute(&mut self.conn).unwrap();
     }
 
-    pub async fn save_rejected_content(&mut self, rejected_content: RejectedContent) {
-        query!("INSERT INTO rejected_content (username, url, caption, hashtags, original_author, original_shortcode, rejected_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (username, original_shortcode) DO UPDATE SET url = $2, caption = $3, hashtags = $4, original_author = $5, rejected_at = $7",
-            rejected_content.username,
-            rejected_content.url,
-            rejected_content.caption,
-            rejected_content.hashtags,
-            rejected_content.original_author,
-            rejected_content.original_shortcode,
-            rejected_content.rejected_at
-        ).execute(self.conn.as_mut()).await.unwrap();
+    pub fn save_rejected_content(&mut self, rejected_content: RejectedContent) {
+        diesel::insert_into(rejected_content::table)
+            .values(&rejected_content)
+            .on_conflict((rejected_content::username, rejected_content::original_shortcode))
+            .do_update()
+            .set(&rejected_content)
+            .execute(&mut self.conn)
+            .unwrap();
     }
 
-    pub async fn load_rejected_content(&mut self) -> Vec<RejectedContent> {
-
-        query_as!(RejectedContent, "SELECT * FROM rejected_content WHERE username = $1", &self.username).fetch_all(self.conn.as_mut()).await.unwrap()
+    pub fn load_rejected_content(&mut self) -> Vec<RejectedContent> {
+        rejected_content::table.filter(rejected_content::username.eq(&self.username)).load::<RejectedContent>(&mut self.conn).unwrap()
     }
 
     /// Save a posted content to the database
     ///
     /// Will automatically remove the content from the content_queue
-    pub async fn save_published_content(&mut self, published_content: PublishedContent) {
-        let queued_content = self.get_queued_content_by_shortcode(published_content.original_shortcode.clone()).await;
+    pub fn save_published_content(&mut self, published_content: PublishedContent) {
+        let queued_content = self.get_queued_content_by_shortcode(published_content.original_shortcode.clone());
         let mut removed = false;
 
         if let Some(queued_content) = queued_content {
-            let user_settings = self.load_user_settings().await;
+            let user_settings = self.load_user_settings();
             let posting_interval = Duration::try_seconds((user_settings.posting_interval * 60) as i64).unwrap();
             if DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap() < now_in_my_timezone(&user_settings) - posting_interval {
                 // If so, we remove the post from the queue using this function, since it also recalculates the will_post_at for the remaining posts
                 // And will avoid content being posted all at once
-                self.remove_post_from_queue_with_shortcode(published_content.original_shortcode.clone()).await;
+                self.remove_post_from_queue_with_shortcode(published_content.original_shortcode.clone());
                 removed = true;
             }
         }
@@ -690,63 +782,54 @@ impl DatabaseTransaction {
         // This is what the "normal" behavior should be, the above will only happen if the bot was offline for a long time
         if !removed {
             // Firstly we remove the published_content from the content_queue
-            query!("DELETE FROM queued_content WHERE original_shortcode = $1 AND username = $2", published_content.original_shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap();
-
+            delete(queued_content::table)
+                .filter(queued_content::original_shortcode.eq(&published_content.original_shortcode))
+                .filter(queued_content::username.eq(&self.username))
+                .execute(&mut self.conn)
+                .unwrap();
         }
 
-        query!("DELETE FROM published_content WHERE original_shortcode = $1 AND username = $2", published_content.original_shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap();
+        // We remove the published_content if it is already there
+        delete(published_content::table)
+            .filter(published_content::original_shortcode.eq(&published_content.original_shortcode))
+            .filter(published_content::username.eq(&self.username))
+            .execute(&mut self.conn)
+            .unwrap();
 
-        query!("INSERT INTO published_content (username, url, caption, hashtags, original_author, original_shortcode, published_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            published_content.username,
-            published_content.url,
-            published_content.caption,
-            published_content.hashtags,
-            published_content.original_author,
-            published_content.original_shortcode,
-            published_content.published_at
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        // Then we add the published_content to the published_content table
+        diesel::insert_into(published_content::table).values(&published_content).execute(&mut self.conn).unwrap();
     }
 
-    pub async fn load_posted_content(&mut self) -> Vec<PublishedContent> {
-        query_as!(PublishedContent, "SELECT * FROM published_content WHERE username = $1", &self.username).fetch_all(self.conn.as_mut()).await.unwrap()
+    pub fn load_posted_content(&mut self) -> Vec<PublishedContent> {
+        published_content::table.filter(published_content::username.eq(&self.username)).load::<PublishedContent>(&mut self.conn).unwrap()
     }
 
     /// Save a content that failed to upload to the database
     ///
     /// Will automatically remove the content from the content_queue
-    pub async fn save_failed_content(&mut self, failed_content: FailedContent) {
+    pub fn save_failed_content(&mut self, failed_content: FailedContent) {
         // First we check if the content is actually in the content_queue
-        let exists = query!("SELECT * FROM queued_content WHERE username = $1 AND original_shortcode = $2", &self.username, failed_content.original_shortcode).fetch_all(self.conn.as_mut()).await.unwrap().len();
+        let exists = queued_content::table.filter(queued_content::username.eq(&self.username)).filter(queued_content::original_shortcode.eq(&failed_content.original_shortcode)).execute(&mut self.conn).unwrap();
 
         if exists > 0 {
             // we remove the failed_content from the content_queue using this function
             // Since it also automatically recalculates the will_post_at for the remaining posts
-            self.remove_post_from_queue_with_shortcode(failed_content.original_shortcode.clone()).await;
+            self.remove_post_from_queue_with_shortcode(failed_content.original_shortcode.clone());
         }
 
         // Then we add the failed_content to the failed_content table
-        query!("INSERT INTO failed_content (username, url, caption, hashtags, original_author, original_shortcode, failed_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            failed_content.username,
-            failed_content.url,
-            failed_content.caption,
-            failed_content.hashtags,
-            failed_content.original_author,
-            failed_content.original_shortcode,
-            failed_content.failed_at
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        diesel::insert_into(failed_content::table).values(&failed_content).execute(&mut self.conn).unwrap();
     }
 
-    pub async fn load_failed_content(&mut self) -> Vec<FailedContent> {
-        query_as!(FailedContent, "SELECT * FROM failed_content WHERE username = $1", &self.username).fetch_all(self.conn.as_mut()).await.unwrap()
+    pub fn load_failed_content(&mut self) -> Vec<FailedContent> {
+        failed_content::table.filter(failed_content::username.eq(&self.username)).load::<FailedContent>(&mut self.conn).unwrap()
     }
 
-    pub async fn get_new_post_time(&mut self) -> String {
-        let user_settings = self.load_user_settings().await;
+    pub fn get_new_post_time(&mut self) -> String {
+        let user_settings = self.load_user_settings();
 
-        let posted_content = self.load_posted_content().await;
-        let queued_content = self.load_content_queue().await;
+        let posted_content = self.load_posted_content();
+        let queued_content = self.load_content_queue();
 
         let current_time = now_in_my_timezone(&user_settings);
 
@@ -800,8 +883,8 @@ impl DatabaseTransaction {
         new_post_time.to_rfc3339()
     }
 
-    pub async fn load_hashed_videos(&mut self) -> Vec<HashedVideo> {
-        let hashed_videos = query_as!(InnerHashedVideo, "SELECT * FROM video_hashes WHERE username = $1", &self.username).fetch_all(self.conn.as_mut()).await.unwrap();
+    pub fn load_hashed_videos(&mut self) -> Vec<HashedVideo> {
+        let hashed_videos = video_hashes::table.filter(video_hashes::username.eq(&self.username)).load::<InnerHashedVideo>(&mut self.conn).unwrap();
 
         let outer_hashed_video = hashed_videos
             .iter()
@@ -819,7 +902,7 @@ impl DatabaseTransaction {
         outer_hashed_video
     }
 
-    pub async fn save_hashed_video(&mut self, hashed_video: HashedVideo) {
+    pub fn save_hashed_video(&mut self, hashed_video: HashedVideo) {
         let inner_hashed_video = InnerHashedVideo {
             username: hashed_video.username.clone(),
             duration: hashed_video.duration.to_string(),
@@ -830,56 +913,38 @@ impl DatabaseTransaction {
             hash_frame_4: hashed_video.hash_frame_4.to_base64(),
         };
 
-        query!("INSERT INTO video_hashes (username, original_shortcode, duration, hash_frame_1, hash_frame_2, hash_frame_3, hash_frame_4) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (original_shortcode) DO UPDATE SET duration = $3, hash_frame_1 = $4, hash_frame_2 = $5, hash_frame_3 = $6, hash_frame_4 = $7",
-            inner_hashed_video.username,
-            inner_hashed_video.original_shortcode,
-            inner_hashed_video.duration,
-            inner_hashed_video.hash_frame_1,
-            inner_hashed_video.hash_frame_2,
-            inner_hashed_video.hash_frame_3,
-            inner_hashed_video.hash_frame_4
-        ).execute(self.conn.as_mut()).await.unwrap();
-
+        diesel::insert_into(video_hashes::table).values(&inner_hashed_video).on_conflict(video_hashes::original_shortcode).do_update().set(&inner_hashed_video).execute(&mut self.conn).unwrap();
     }
 
-    pub async fn does_content_exist_with_shortcode(&mut self, shortcode: String) -> bool {
+    pub fn does_content_exist_with_shortcode(&mut self, shortcode: String) -> bool {
         // Execute each statement and check if the URL exists
         let tables = ["content_info", "posted_content", "content_queue", "rejected_content", "failed_content", "duplicate_content"];
-        for table in tables {
-            let exists = self.shortcode_exists_in_table(table, &shortcode).await;
-            if exists {
-                return true;
-            }
-        }
-        false
+        let exists = tables.iter().any(|table| self.shortcode_exists_in_table(table, &shortcode));
+
+        exists
     }
 
-    pub async fn does_content_exist_with_shortcode_in_queue(&mut self, shortcode: String) -> bool {
+    pub fn does_content_exist_with_shortcode_in_queue(&mut self, shortcode: String) -> bool {
         // Execute each statement and check if the URL exists
         let tables = ["content_queue"];
-        for table in tables {
-            let exists = self.shortcode_exists_in_table(table, &shortcode).await;
-            if exists {
-                return true;
-            }
-        }
-       false
+        let exists = tables.iter().any(|table| self.shortcode_exists_in_table(table, &shortcode));
+
+        exists
     }
 
-    async fn shortcode_exists_in_table(&mut self, table_name: &str, shortcode: &str) -> bool {
+    fn shortcode_exists_in_table(&mut self, table_name: &str, shortcode: &str) -> bool {
         match table_name {
-            "content_info" => query!("SELECT EXISTS(SELECT 1 FROM content_info WHERE original_shortcode = $1 AND username = $2)", shortcode, &self.username).fetch_one(self.conn.as_mut()).await.unwrap().exists.unwrap(),
-            "published_content" => query!("SELECT EXISTS(SELECT 1 FROM published_content WHERE original_shortcode = $1 AND username = $2)", shortcode, &self.username).fetch_one(self.conn.as_mut()).await.unwrap().exists.unwrap(),
-            "queued_content" => query!("SELECT EXISTS(SELECT 1 FROM queued_content WHERE original_shortcode = $1 AND username = $2)", shortcode, &self.username).fetch_one(self.conn.as_mut()).await.unwrap().exists.unwrap(),
-            "rejected_content" => query!("SELECT EXISTS(SELECT 1 FROM rejected_content WHERE original_shortcode = $1 AND username = $2)", shortcode, &self.username).fetch_one(self.conn.as_mut()).await.unwrap().exists.unwrap(),
-            "failed_content" => query!("SELECT EXISTS(SELECT 1 FROM failed_content WHERE original_shortcode = $1 AND username = $2)", shortcode, &self.username).fetch_one(self.conn.as_mut()).await.unwrap().exists.unwrap(),
-            "duplicate_content" => query!("SELECT EXISTS(SELECT 1 FROM duplicate_content WHERE original_shortcode = $1 AND username = $2)", shortcode, &self.username).fetch_one(self.conn.as_mut()).await.unwrap().exists.unwrap(),
+            "content_info" => select(exists(content_info::table.filter(content_info::original_shortcode.eq(shortcode)).filter(content_info::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "published_content" => select(exists(published_content::table.filter(published_content::original_shortcode.eq(shortcode)).filter(published_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "queued_content" => select(exists(queued_content::table.filter(queued_content::original_shortcode.eq(shortcode)).filter(queued_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "rejected_content" => select(exists(rejected_content::table.filter(rejected_content::original_shortcode.eq(shortcode)).filter(rejected_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "failed_content" => select(exists(failed_content::table.filter(failed_content::original_shortcode.eq(shortcode)).filter(failed_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
+            "duplicate_content" => select(exists(duplicate_content::table.filter(duplicate_content::original_shortcode.eq(shortcode)).filter(duplicate_content::username.eq(&self.username)))).get_result(&mut self.conn).unwrap(),
             _ => false,
         }
     }
 
     pub async fn clear_all_other_bot_statuses(&mut self) {
-        query!("DELETE FROM bot_status WHERE username != $1", &self.username).execute(self.conn.as_mut()).await.unwrap();
-
+        delete(bot_status::table.filter(bot_status::username.ne(&self.username))).execute(&mut self.conn).unwrap();
     }
 }

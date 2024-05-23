@@ -9,12 +9,12 @@ use rand::{Rng, SeedableRng};
 use serenity::all::MessageId;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::Instrument;
 
-use crate::database::database::{ContentInfo, Database, DuplicateContent};
+use crate::database::database::{ContentInfo, Database, DatabaseTransaction, DuplicateContent};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::s3::helper::upload_to_s3;
@@ -84,9 +84,9 @@ impl ContentManager {
                         lock.clone()
                     };
 
-                    let user_settings = transaction.load_user_settings();
+                    let user_settings = transaction.load_user_settings().await;
 
-                    let bot_status = transaction.load_bot_status();
+                    let bot_status = transaction.load_bot_status().await;
 
                     if bot_status.status != 0 {
                         tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
@@ -94,7 +94,7 @@ impl ContentManager {
                     }
 
                     if let Some((video_file_name, caption, author, shortcode)) = content_tuple {
-                        if !transaction.does_content_exist_with_shortcode(shortcode.clone()) && shortcode != "halted" {
+                        if !transaction.does_content_exist_with_shortcode(shortcode.clone()).await && shortcode != "halted" {
                             // Process video to check if it already exists
                             let video_exists = process_video(&mut transaction, &video_file_name, author.clone(), shortcode.clone()).await.unwrap();
 
@@ -106,7 +106,7 @@ impl ContentManager {
                                     original_shortcode: shortcode.clone(),
                                 };
 
-                                transaction.save_duplicate_content(duplicate_content);
+                                transaction.save_duplicate_content(duplicate_content).await;
                                 continue;
                             }
 
@@ -121,7 +121,7 @@ impl ContentManager {
                             let caption = re.replace_all(&caption.clone(), "").to_string();
                             let now_string = now_in_my_timezone(&user_settings).to_rfc3339();
 
-                            let message_id = transaction.get_temp_message_id(&user_settings);
+                            let message_id = transaction.get_temp_message_id(&user_settings).await;
 
                             let video = ContentInfo {
                                 username: user_settings.username.clone(),
@@ -137,7 +137,7 @@ impl ContentManager {
                                 encountered_errors: 0,
                             };
 
-                            transaction.save_content_info(&video);
+                            transaction.save_content_info(&video).await;
                         }
                     } else {
                         //tx.send(("".to_string(), "".to_string(), "".to_string(), "ignore".to_string())).await.unwrap();
@@ -197,7 +197,7 @@ impl ContentManager {
                 cloned_self.fetch_user_info(&mut accounts_to_scrape, &mut accounts_being_scraped).await;
 
                 loop {
-                    let content_mapping_len = cloned_self.database.begin_transaction().await.load_content_mapping().len();
+                    let content_mapping_len = cloned_self.database.begin_transaction().await.load_content_mapping().await.len();
 
                     if content_mapping_len >= MAX_CONTENT_HANDLED {
                         cloned_self.println("Reached the maximum amount of handled content");
@@ -240,23 +240,23 @@ impl ContentManager {
                 Err(e) => {
                     self.println(&format!(" Login failed: {}", e));
                     let mut tx = self.database.begin_transaction().await;
-                    set_bot_status_halted(&mut tx);
+                    set_bot_status_halted(&mut tx).await;
 
                     loop {
-                        let bot_status = tx.load_bot_status();
+                        let bot_status = tx.load_bot_status().await;
                         if bot_status.status == 0 {
-                            self.println("Reattempting to log in...");
+                            self.println("Retrying to log in...");
                             scraper_guard.authenticate_with_login(username.clone(), password.clone());
                             let result = scraper_guard.login().await;
                             match result {
                                 Ok(_) => {
                                     self.println("Logged in successfully");
-                                    set_bot_status_operational(&mut tx);
+                                    set_bot_status_operational(&mut tx).await;
                                     break;
                                 }
                                 Err(e) => {
                                     self.println(&format!(" Login failed: {}", e));
-                                    set_bot_status_halted(&mut tx);
+                                    set_bot_status_halted(&mut tx).await;
                                 }
                             }
                         } else {
@@ -290,7 +290,7 @@ impl ContentManager {
                     Ok(user) => {
                         accounts_being_scraped.push(user);
                         self.println(&format!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile));
-                        set_bot_status_operational(&mut tx);
+                        set_bot_status_operational(&mut tx).await;
                     }
                     Err(e) => {
                         self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
@@ -298,29 +298,29 @@ impl ContentManager {
                             InstagramScraperError::UserNotFound(profile) => {
                                 accounts_to_scrape.remove(&profile);
                             }
-                            _ => {
-                                set_bot_status_halted(&mut tx);
-                                loop {
-                                    let bot_status = tx.load_bot_status();
-                                    if bot_status.status == 0 {
-                                        self.println("Reattempting to fetch user info...");
-                                        let result = scraper_guard.scrape_userinfo(&profile).await;
-                                        match result {
-                                            Ok(user) => {
-                                                accounts_being_scraped.push(user);
-                                                self.println(&format!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile));
-                                                set_bot_status_operational(&mut tx);
-                                                break;
-                                            }
-                                            Err(e) => {
-                                                self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
-                                                set_bot_status_halted(&mut tx);
-                                            }
+                            InstagramScraperError::Http(error) => {
+                                let error = format!("{}", error);
+                                if error.contains("error sending request for url") {
+                                    // Try again
+                                    self.println("Automatically retrying to fetch user info...");
+                                    let result = scraper_guard.scrape_userinfo(&profile).await;
+                                    match result {
+                                        Ok(user) => {
+                                            accounts_being_scraped.push(user);
+                                            self.println(&format!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile));
+                                            set_bot_status_operational(&mut tx).await;
                                         }
-                                    } else {
-                                        tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
+                                        Err(e) => {
+                                            self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
+                                            set_bot_status_halted(&mut tx).await;
+                                            self.fetch_user_info_halted_loop(accounts_being_scraped, &mut tx, &mut accounts_scraped, &accounts_to_scrape_len, &profile, &mut *scraper_guard).await;
+                                        }
                                     }
                                 }
+                            }
+                            _ => {
+                                set_bot_status_halted(&mut tx).await;
+                                self.fetch_user_info_halted_loop(accounts_being_scraped, &mut tx, &mut accounts_scraped, &accounts_to_scrape_len, &profile, &mut *scraper_guard).await;
                             }
                         }
                     }
@@ -328,6 +328,30 @@ impl ContentManager {
             }
 
             self.randomized_sleep(FETCH_SLEEP_LEN.as_secs()).await;
+        }
+    }
+
+    async fn fetch_user_info_halted_loop(&self, accounts_being_scraped: &mut Vec<User>, mut tx: &mut DatabaseTransaction, accounts_scraped: &mut i32, accounts_to_scrape_len: &usize, profile: &String, scraper_guard: &mut InstagramScraper) {
+        loop {
+            let bot_status = tx.load_bot_status().await;
+            if bot_status.status == 0 {
+                self.println("Retrying to fetch user info...");
+                let result = scraper_guard.scrape_userinfo(&profile).await;
+                match result {
+                    Ok(user) => {
+                        accounts_being_scraped.push(user);
+                        self.println(&format!("{}/{} Fetched user info for {}", accounts_scraped, accounts_to_scrape_len, profile));
+                        set_bot_status_operational(&mut tx).await;
+                        break;
+                    }
+                    Err(e) => {
+                        self.println(&format!("{}/{} Error fetching user info for {}: {}", accounts_scraped, accounts_to_scrape_len, profile, e));
+                        set_bot_status_halted(&mut tx).await;
+                    }
+                }
+            } else {
+                tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
+            }
         }
     }
 
@@ -348,28 +372,28 @@ impl ContentManager {
 
                 match scraper_guard.scrape_posts(&user.id, 5).await {
                     Ok(scraped_posts) => {
-                        set_bot_status_operational(&mut tx);
+                        set_bot_status_operational(&mut tx).await;
                         posts.insert(user.clone(), scraped_posts);
                     }
                     Err(e) => {
                         self.println(&format!("Error scraping posts: {}", e));
-                        let mut bot_status = tx.load_bot_status();
+                        let mut bot_status = tx.load_bot_status().await;
                         bot_status.status = 1;
-                        tx.save_bot_status(&bot_status);
+                        tx.save_bot_status(&bot_status).await;
                         loop {
-                            let bot_status = tx.load_bot_status();
+                            let bot_status = tx.load_bot_status().await;
                             if bot_status.status == 0 {
-                                self.println("Reattempting to fetch posts...");
+                                self.println("Retrying to fetch posts...");
                                 let result = scraper_guard.scrape_posts(&user.id, 5).await;
                                 match result {
                                     Ok(scraped_posts) => {
                                         posts.insert(user.clone(), scraped_posts);
-                                        set_bot_status_operational(&mut tx);
+                                        set_bot_status_operational(&mut tx).await;
                                         break;
                                     }
                                     Err(e) => {
                                         self.println(&format!("Error scraping posts: {}", e));
-                                        set_bot_status_halted(&mut tx);
+                                        set_bot_status_halted(&mut tx).await;
                                     }
                                 }
                             } else {
@@ -416,7 +440,7 @@ impl ContentManager {
 
             if actually_scraped >= MAX_CONTENT_PER_ITERATION {
                 self.println("Reached the maximum amount of scraped content per iteration");
-                set_bot_status_operational(&mut transaction);
+                set_bot_status_operational(&mut transaction).await;
                 break;
             }
 
@@ -424,7 +448,7 @@ impl ContentManager {
 
             // Send the URL through the channel
             if post.is_video {
-                if !transaction.does_content_exist_with_shortcode(post.shortcode.clone()) {
+                if !transaction.does_content_exist_with_shortcode(post.shortcode.clone()).await {
                     let filename;
                     let caption;
                     {
@@ -435,7 +459,7 @@ impl ContentManager {
                                 actually_scraped += 1;
                                 let base_print = format!("{flattened_posts_processed}/{flattened_posts_len} - {actually_scraped}/{MAX_CONTENT_PER_ITERATION}");
                                 self.println(&format!("{base_print} Scraped content from {}: {}", author.username, post.shortcode));
-                                set_bot_status_operational(&mut transaction);
+                                set_bot_status_operational(&mut transaction).await;
                                 caption
                             }
                             Err(e) => {
@@ -445,23 +469,23 @@ impl ContentManager {
                                     InstagramScraperError::MediaNotFound { .. } => continue,
                                     InstagramScraperError::RateLimitExceeded { .. } => break,
                                     _ => {
-                                        set_bot_status_halted(&mut transaction);
+                                        set_bot_status_halted(&mut transaction).await;
                                         loop {
-                                            let bot_status = transaction.load_bot_status();
+                                            let bot_status = transaction.load_bot_status().await;
                                             if bot_status.status == 0 {
-                                                self.println("Reattempting to download reel...");
+                                                self.println("Retrying to download reel...");
                                                 let result = scraper_guard.download_reel(&post.shortcode, &filename).await;
                                                 match result {
                                                     Ok(caption) => {
                                                         actually_scraped += 1;
                                                         let base_print = format!("{flattened_posts_processed}/{flattened_posts_len} - {actually_scraped}/{MAX_CONTENT_PER_ITERATION}");
                                                         self.println(&format!("{base_print} Scraped content from {}: {}", author.username, post.shortcode));
-                                                        set_bot_status_operational(&mut transaction);
+                                                        set_bot_status_operational(&mut transaction).await;
                                                         break caption;
                                                     }
                                                     Err(e) => {
                                                         self.println(&format!("Error while downloading reel | {}", e));
-                                                        set_bot_status_halted(&mut transaction);
+                                                        set_bot_status_halted(&mut transaction).await;
                                                     }
                                                 }
                                             } else {
@@ -487,11 +511,11 @@ impl ContentManager {
                         *lock = Some((filename, caption, author.username.clone(), post.shortcode.clone()));
                     }
                 } else {
-                    let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().iter().map(|content_info| content_info.original_shortcode.clone()).collect();
-                    let existing_posted_shortcodes: Vec<String> = transaction.load_posted_content().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-                    let existing_failed_shortcodes: Vec<String> = transaction.load_failed_content().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-                    let existing_rejected_shortcodes: Vec<String> = transaction.load_rejected_content().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
-                    let existing_duplicate_shortcodes: Vec<String> = transaction.load_duplicate_content().iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                    let existing_content_shortcodes: Vec<String> = transaction.load_content_mapping().await.iter().map(|content_info| content_info.original_shortcode.clone()).collect();
+                    let existing_posted_shortcodes: Vec<String> = transaction.load_posted_content().await.iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                    let existing_failed_shortcodes: Vec<String> = transaction.load_failed_content().await.iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                    let existing_rejected_shortcodes: Vec<String> = transaction.load_rejected_content().await.iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
+                    let existing_duplicate_shortcodes: Vec<String> = transaction.load_duplicate_content().await.iter().map(|existing_posted| existing_posted.original_shortcode.clone()).collect();
 
                     match existing_content_shortcodes.iter().position(|x| x == &post.shortcode) {
                         Some(_) => {

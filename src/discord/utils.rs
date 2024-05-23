@@ -22,7 +22,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
             let mut formatted_will_post_at = "".to_string();
             let mut countdown_caption;
             let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
-            match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()) {
+            match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).await {
                 None => {
                     format!("{base_caption}\n{}\n‎\nPosting now...\n\n{}‎", queued_caption, formatted_will_post_at)
                 }
@@ -44,7 +44,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
         }
         ContentStatus::Rejected { .. } => {
             let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
-            let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()) {
+            let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).await {
                 Some(rejected_content) => rejected_content,
                 None => {
                     return format!("{base_caption}\n{}\n‎", rejected_caption);
@@ -58,7 +58,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
         }
         ContentStatus::Published { .. } => {
             let published_caption = ui_definitions.labels.get("published_caption").unwrap();
-            let published_content = tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
+            let published_content = tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).await.unwrap();
             let published_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap().format("%Y-%m-%d %H:%M:%S").to_string();
             let will_expire_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap() + DEFAULT_POSTED_EXPIRATION;
 
@@ -68,7 +68,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
         }
         ContentStatus::Failed { .. } => {
             let failed_caption = ui_definitions.labels.get("failed_caption").unwrap();
-            let failed_content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).unwrap();
+            let failed_content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).await.unwrap();
             let will_expire_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap() + DEFAULT_FAILURE_EXPIRATION;
 
             let countdown_caption = countdown_until_expiration(user_settings, will_expire_at.with_timezone(&Utc)).await;
@@ -80,7 +80,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
     }
 }
 
-pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: Vec<ContentInfo>, content_queue: Vec<QueuedContent>, now: DateTime<Utc>) -> String {
+pub fn generate_bot_status_caption(user_settings: &UserSettings, bot_status: &BotStatus, content_mapping: Vec<ContentInfo>, content_queue: Vec<QueuedContent>, now: DateTime<Utc>) -> String {
     let mut full_status_string = bot_status.status_message.clone();
     if !bot_status.is_discord_warmed_up {
         full_status_string = format!("{}, discord is still warming up...", full_status_string);
@@ -119,9 +119,12 @@ pub fn generate_bot_status_caption(bot_status: &BotStatus, content_mapping: Vec<
     } else {
         content_queue_string = "Currently there are no queued posts! You should probably add some because, you know, you can :3".to_string();
     }
+    
+    let update_interval = user_settings.interface_update_interval as f64 / 1000.0;
+    let update_interval_string = format!("Current interface update interval: {:.2}s", update_interval);
 
     let formatted_now = now.format("%Y-%m-%d %H:%M:%S").to_string();
-    let msg_caption = format!("Bot is {}\n\n{}\n\n{}\n\nLast updated at: {}", full_status_string, content_mapping_status_string, content_queue_string, formatted_now);
+    let msg_caption = format!("Bot is {}\n\n{}\n\n{}\n\n{}\n\nLast updated at: {}", full_status_string, update_interval_string, content_mapping_status_string, content_queue_string, formatted_now);
 
     msg_caption
 }
@@ -137,7 +140,7 @@ pub async fn clear_all_messages(tx: &mut DatabaseTransaction, http: &Arc<Http>, 
         http.delete_message(channel_id, message.id, None).await.unwrap();
     }
 
-    for mut content in tx.load_content_mapping() {
+    for mut content in tx.load_content_mapping().await {
         if content.status == (ContentStatus::Pending { shown: true }) {
             content.status = ContentStatus::Pending { shown: false };
         } else if content.status == (ContentStatus::Queued { shown: true }) {
@@ -150,7 +153,7 @@ pub async fn clear_all_messages(tx: &mut DatabaseTransaction, http: &Arc<Http>, 
             content.status = ContentStatus::Failed { shown: false };
         }
 
-        tx.save_content_info(&content);
+        tx.save_content_info(&content).await;
     }
 }
 
@@ -291,13 +294,13 @@ pub fn handle_msg_deletion(delete_msg_result: Result<(), SerenityError>) {
     }
 }
 
-pub fn prune_expired_content(user_settings: &UserSettings, tx: &mut DatabaseTransaction, content: &mut ContentInfo) -> bool {
+pub async fn prune_expired_content(user_settings: &UserSettings, tx: &mut DatabaseTransaction, content: &mut ContentInfo) -> bool {
     let added_at = DateTime::parse_from_rfc3339(&content.added_at).unwrap();
     if now_in_my_timezone(user_settings) > (added_at + Duration::seconds(S3_EXPIRATION_TIME as i64)) {
-        tx.remove_content_info_with_shortcode(&content.original_shortcode);
-        let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content.original_shortcode.clone());
+        tx.remove_content_info_with_shortcode(&content.original_shortcode).await;
+        let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content.original_shortcode.clone()).await;
         if is_in_queue {
-            tx.remove_post_from_queue_with_shortcode(content.original_shortcode.clone());
+            tx.remove_post_from_queue_with_shortcode(content.original_shortcode.clone()).await;
         }
         return true;
     }

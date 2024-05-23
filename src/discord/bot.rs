@@ -9,7 +9,7 @@ use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage
 use serenity::async_trait;
 use serenity::model::channel::Message;
 use serenity::prelude::*;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex};
 use tokio::time::sleep;
 
 use crate::database::database::{Database, DatabaseTransaction, UserSettings};
@@ -64,7 +64,7 @@ impl EventHandler for Handler {
                 }
 
                 let mut tx = self.database.begin_transaction().await;
-                let user_settings = tx.load_user_settings();
+                let user_settings = tx.load_user_settings().await;
 
                 match edited_content.kind {
                     EditedContentKind::Caption => {
@@ -75,7 +75,7 @@ impl EventHandler for Handler {
                     }
                 }
 
-                tx.save_content_info(&edited_content.content_info);
+                tx.save_content_info(&edited_content.content_info).await;
 
                 msg.delete(&ctx.http).await.unwrap();
                 ctx.http.delete_message(channel_id, edited_content.message_to_delete.unwrap(), None).await.unwrap();
@@ -86,30 +86,37 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
+        
         loop {
+
             let mut tx = self.database.begin_transaction().await;
-            let user_settings = tx.load_user_settings();
+            let user_settings = tx.load_user_settings().await;
             let mut rng = StdRng::from_entropy();
 
-            let self_clone = self.clone();
-            let ctx_clone = ctx.clone();
+            // let self_clone = self.clone();
+            // let ctx_clone = ctx.clone();
             let global_last_updated_at = Arc::clone(&self.global_last_updated_at);
 
-            let task = tokio::spawn(async move {
-                self_clone.ready_loop(&ctx_clone, &user_settings, &mut tx, global_last_updated_at, &mut rng).await;
-            });
-
-            task.await.unwrap();
-
             let mut is_first_iteration = self.is_first_iteration.lock().await;
+            let is_first_iteration_clone = *is_first_iteration;
+
+            self.ready_loop(&ctx, &user_settings, &mut tx, global_last_updated_at, &mut rng, is_first_iteration_clone).await;
+
+            /*current_handle = tokio::spawn(async move {
+                let obtained_permit = permit.take().unwrap();
+                self_clone.ready_loop(&ctx_clone, &user_settings, &mut tx, global_last_updated_at, &mut rng, is_first_iteration_clone, obtained_permit).await;
+            });*/
+            
             if *is_first_iteration {
+                //current_handle.await.unwrap();
                 let mut tx = self.database.begin_transaction().await;
                 println!(" [{}] Discord bot finished warming up.", self.username);
-                let mut bot_status = tx.load_bot_status();
+                let mut bot_status = tx.load_bot_status().await;
                 bot_status.is_discord_warmed_up = true;
-                tx.save_bot_status(&bot_status);
+                tx.save_bot_status(&bot_status).await;
                 *is_first_iteration = false;
             }
+
 
             sleep(DISCORD_REFRESH_RATE).await;
         }
@@ -138,17 +145,19 @@ impl EventHandler for Handler {
         let interaction_message = interaction.clone().message_component().unwrap();
         let interaction_type = interaction_message.clone().data.custom_id;
 
+        let global_last_updated_at = Arc::clone(&self.global_last_updated_at);
+
         // Check if the original message id is in the content mapping
         let mut found_content = None;
-        for content in tx.load_content_mapping() {
+        for content in tx.load_content_mapping().await {
             if content.message_id == original_message_id {
                 found_content = Some(content);
             }
         }
 
-        let mut user_settings = tx.load_user_settings();
+        let mut user_settings = tx.load_user_settings().await;
         if found_content.is_none() {
-            let mut bot_status = tx.load_bot_status();
+            let mut bot_status = tx.load_bot_status().await;
             if bot_status.message_id == original_message_id {
                 match interaction_type.as_str() {
                     "resume_from_halt" => {
@@ -176,7 +185,7 @@ impl EventHandler for Handler {
                     self.interaction_publish_now(&user_settings, &mut content, &mut tx).await;
                 }
                 "accept" => {
-                    self.interaction_accepted(&user_settings, &mut content, &mut tx).await;
+                    self.interaction_accepted(&ctx, &user_settings, &mut content, &mut tx, global_last_updated_at).await;
                 }
                 "remove_from_queue" => {
                     self.interaction_remove_from_queue(&user_settings, &mut content, &mut tx).await;
@@ -213,36 +222,46 @@ impl EventHandler for Handler {
                     tracing::error!("Unhandled interaction type: {:?}", interaction_type);
                 }
             }
-            tx.save_content_info(&content);
+            tx.save_content_info(&content).await;
         }
     }
 
     async fn ratelimit(&self, data: RatelimitInfo) {
-        tracing::warn!(" [{}] Rate limited: {:?}", self.username, data);
+        // Disable rate limit logic for the first iteration
+        if !(*self.is_first_iteration.lock().await) {
+            tracing::warn!(" [{}] Rate limited: {:?}", self.username, data);
+            let timeout = data.timeout.as_millis();
+            let mut tx = self.database.begin_transaction().await;
+            let mut user_settings = tx.load_user_settings().await;
+            user_settings.interface_update_interval += timeout as i64;
+            tx.save_user_settings(&user_settings).await;
+        }
     }
 }
 
 impl Handler {
-    async fn ready_loop(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>, rng: &mut StdRng) {
+    async fn ready_loop(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>, rng: &mut StdRng, is_first_iteration: bool) {
+        
         if self.is_bot_busy().await {
             return;
         }
+        
 
         self.process_bot_status(ctx, user_settings, tx, Arc::clone(&global_last_updated_at)).await;
-        let content_mapping = if *self.is_first_iteration.lock().await {
-            tx.load_content_mapping()
+        let content_mapping = if is_first_iteration {
+            tx.load_content_mapping().await
         } else {
-            let mut content_mapping = tx.load_content_mapping();
+            let mut content_mapping = tx.load_content_mapping().await;
             content_mapping.shuffle(rng);
             content_mapping
         };
-
+        
         if content_mapping.is_empty() {
             sleep(DISCORD_REFRESH_RATE).await;
         }
 
         for mut content in content_mapping {
-            if prune_expired_content(user_settings, tx, &mut content) {
+            if prune_expired_content(user_settings, tx, &mut content).await {
                 continue;
             }
 
@@ -252,7 +271,7 @@ impl Handler {
 
             match content.status {
                 ContentStatus::RemovedFromView => {
-                    tx.remove_content_info_with_shortcode(&content.original_shortcode);
+                    tx.remove_content_info_with_shortcode(&content.original_shortcode).await;
                     continue;
                 }
                 ContentStatus::Pending { .. } => self.process_pending(ctx, user_settings, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
@@ -262,7 +281,7 @@ impl Handler {
                 ContentStatus::Failed { .. } => self.process_failed(ctx, user_settings, tx, &mut content, Arc::clone(&global_last_updated_at)).await,
             }
 
-            tx.save_content_info(&content);
+            tx.save_content_info(&content).await;
         }
     }
 
@@ -369,7 +388,7 @@ impl DiscordBot {
             let messages = STATUS_CHANNEL_ID.messages(&client.http, GetMessages::new()).await.unwrap();
 
             let mut tx = database.begin_transaction().await;
-            let mut bot_status = tx.load_bot_status();
+            let mut bot_status = tx.load_bot_status().await;
             let mut is_message_there = false;
             for message in messages {
                 if message.author.name == *username && message.author.bot && message.content.contains("Last updated at") {
@@ -394,7 +413,7 @@ impl DiscordBot {
             bot_status.halt_alert_message_id = MessageId::new(1);
             bot_status.queue_alert_1_message_id = MessageId::new(1);
 
-            tx.save_bot_status(&bot_status);
+            tx.save_bot_status(&bot_status).await;
         }
 
         let msg = CreateMessage::new().content("Welcome back! 🦀");

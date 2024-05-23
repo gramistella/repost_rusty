@@ -13,7 +13,7 @@ use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::scraper_poster::scraper::ContentManager;
 use crate::scraper_poster::utils::{set_bot_status_halted, set_bot_status_operational};
-use crate::{INTERFACE_UPDATE_INTERVAL, SCRAPER_REFRESH_RATE};
+use crate::{SCRAPER_REFRESH_RATE};
 
 impl ContentManager {
     pub fn poster_loop(&mut self) -> JoinHandle<anyhow::Result<()>> {
@@ -37,12 +37,12 @@ impl ContentManager {
 
             loop {
                 let mut transaction = cloned_self.database.begin_transaction().await;
-                let content_mapping = transaction.load_content_mapping();
-                let user_settings = transaction.load_user_settings();
+                let content_mapping = transaction.load_content_mapping().await;
+                let user_settings = transaction.load_user_settings().await;
 
-                let queued_posts = transaction.load_content_queue();
+                let queued_posts = transaction.load_content_queue().await;
 
-                for content_info in content_mapping {
+                'outer: for content_info in content_mapping {
                     if content_info.status.to_string().contains("queued_") {
                         for queued_post in queued_posts.iter() {
                             if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(&user_settings) {
@@ -72,10 +72,10 @@ impl ContentManager {
                                         cloned_self.println(&format!("[!] Uploaded content offline: {}", queued_post.url));
                                     }
 
-                                    let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode);
+                                    let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
                                     content_info.status = ContentStatus::Published { shown: false };
 
-                                    transaction.save_content_info(&content_info);
+                                    transaction.save_content_info(&content_info).await;
 
                                     let published_content = PublishedContent {
                                         username: queued_post.username.clone(),
@@ -87,18 +87,19 @@ impl ContentManager {
                                         published_at: now_in_my_timezone(&user_settings).to_rfc3339(),
                                     };
 
-                                    transaction.save_published_content(published_content);
+                                    transaction.save_published_content(published_content).await;
                                 } else {
                                     for content in queued_posts.clone().iter_mut() {
                                         content.will_post_at = (DateTime::parse_from_rfc3339(&content.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 60) as u64)).to_rfc3339();
-                                        transaction.save_queued_content(queued_post);
-                                        let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode);
-                                        content_info.last_updated_at = (now_in_my_timezone(&user_settings) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-                                        transaction.save_content_info(&content_info);
+                                        transaction.save_queued_content(queued_post).await;
+                                        let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
+                                        content_info.last_updated_at = (now_in_my_timezone(&user_settings) - chrono::Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+                                        transaction.save_content_info(&content_info).await;
                                     }
                                     // Since we have just altered the whole queue, and we are also iterating over the queue in the outer loop, we need to break here
-                                    break;
                                 }
+                                // Just break, we need to post just once per iteration anyway
+                                break 'outer;
                             }
                         }
                     }
@@ -171,21 +172,21 @@ impl ContentManager {
                     InstagramScraperError::UploadFailedRecoverable(_) => {
                         if err.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
                             self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
-                            set_bot_status_halted(transaction);
+                            set_bot_status_halted(transaction).await;
                             loop {
-                                let bot_status = transaction.load_bot_status();
+                                let bot_status = transaction.load_bot_status().await;
                                 if bot_status.status == 0 {
-                                    self.println("Reattempting to upload content to instagram...");
+                                    self.println("Retrying to upload content to instagram...");
                                     let result = self.scraper.lock().await.upload_reel(user_id, access_token, &queued_post.url, full_caption).await;
                                     match result {
                                         Ok(_) => {
                                             self.println(&format!("[+] Published content successfully: {}", queued_post.original_shortcode));
-                                            set_bot_status_operational(transaction);
+                                            set_bot_status_operational(transaction).await;
                                             break;
                                         }
                                         Err(_e) => {
                                             self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
-                                            set_bot_status_halted(transaction);
+                                            set_bot_status_halted(transaction).await;
                                         }
                                     }
                                 } else {
@@ -247,11 +248,11 @@ impl ContentManager {
         let _enter = span.enter();
 
         let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings();
-        let mut video_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode);
+        let user_settings = transaction.load_user_settings().await;
+        let mut video_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
         video_info.status = ContentStatus::Failed { shown: false };
 
-        transaction.save_content_info(&video_info);
+        transaction.save_content_info(&video_info).await;
 
         let now = now_in_my_timezone(&user_settings).to_rfc3339();
         let failed_content = FailedContent {
@@ -264,7 +265,7 @@ impl ContentManager {
             failed_at: now,
         };
 
-        transaction.save_failed_content(failed_content);
+        transaction.save_failed_content(failed_content).await;
     }
 
     async fn handle_recoverable_failed_content(&self) {
@@ -272,12 +273,12 @@ impl ContentManager {
         let _enter = span.enter();
 
         let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings();
+        let user_settings = transaction.load_user_settings().await;
 
-        for mut queued_post in transaction.load_content_queue() {
+        for mut queued_post in transaction.load_content_queue().await {
             let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 60) as u64);
             queued_post.will_post_at = new_will_post_at.to_rfc3339();
-            transaction.save_queued_content(&queued_post);
+            transaction.save_queued_content(&queued_post).await;
         }
     }
 
@@ -286,12 +287,12 @@ impl ContentManager {
         let _enter = span.enter();
 
         let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings();
+        let user_settings = transaction.load_user_settings().await;
 
-        let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode);
+        let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
         content_info.status = ContentStatus::Published { shown: false };
 
-        transaction.save_content_info(&content_info);
+        transaction.save_content_info(&content_info).await;
 
         let published_content = PublishedContent {
             username: queued_post.username.clone(),
@@ -303,15 +304,15 @@ impl ContentManager {
             published_at: now_in_my_timezone(&user_settings).to_rfc3339(),
         };
 
-        transaction.save_published_content(published_content);
+        transaction.save_published_content(published_content).await;
     }
 
     /// This function will amend the queue to ensure that only one post is posted at a time,
     /// even if the bot was shut down for a while.
     async fn amend_queue(&self) {
         let mut tx = self.database.begin_transaction().await;
-        let content_queue = tx.load_content_queue();
-        let user_settings = tx.load_user_settings();
+        let content_queue = tx.load_content_queue().await;
+        let user_settings = tx.load_user_settings().await;
         let mut content_to_post = 0;
         for queued_post in content_queue.iter().clone() {
             if DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() < now_in_my_timezone(&user_settings) {
@@ -332,7 +333,7 @@ impl ContentManager {
                 let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + time_difference;
                 self.println(&format!("Changing post time for {}: {}", queued_post.original_shortcode, new_will_post_at));
                 queued_post.will_post_at = new_will_post_at.to_rfc3339();
-                tx.save_queued_content(&queued_post);
+                tx.save_queued_content(&queued_post).await;
             }
         }
     }

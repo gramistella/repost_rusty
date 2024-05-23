@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use chrono::Duration;
 
 use instagram_scraper_rs::User;
 use rand::prelude::{SliceRandom, StdRng};
@@ -7,7 +8,7 @@ use reqwest_cookie_store::CookieStoreMutex;
 
 use crate::database::database::DatabaseTransaction;
 use crate::discord::utils::now_in_my_timezone;
-use crate::{INTERFACE_UPDATE_INTERVAL, SCRAPER_REFRESH_RATE};
+use crate::{SCRAPER_REFRESH_RATE};
 
 pub async fn save_cookie_store_to_json(cookie_store_path: &String, cookie_store_mutex: Arc<CookieStoreMutex>) {
     let span = tracing::span!(tracing::Level::INFO, "save_cookie_store_to_json");
@@ -19,7 +20,7 @@ pub async fn save_cookie_store_to_json(cookie_store_path: &String, cookie_store_
 
 pub async fn pause_scraper_if_needed(tx: &mut DatabaseTransaction) {
     loop {
-        let bot_status = tx.load_bot_status();
+        let bot_status = tx.load_bot_status().await;
         if bot_status.manual_mode || bot_status.status != 0 {
             tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
         } else {
@@ -28,26 +29,26 @@ pub async fn pause_scraper_if_needed(tx: &mut DatabaseTransaction) {
     }
 }
 
-pub fn set_bot_status_halted(tx: &mut DatabaseTransaction) {
-    let mut bot_status = tx.load_bot_status();
-    let mut user_settings = tx.load_user_settings();
+pub async fn set_bot_status_halted(tx: &mut DatabaseTransaction) {
+    let mut bot_status = tx.load_bot_status().await;
+    let mut user_settings = tx.load_user_settings().await;
     user_settings.can_post = false;
     bot_status.status = 1;
     bot_status.status_message = "halted  ⚠️".to_string();
-    bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-    tx.save_bot_status(&bot_status);
-    tx.save_user_settings(&user_settings);
+    bot_status.last_updated_at = (now_in_my_timezone(&user_settings) - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+    tx.save_bot_status(&bot_status).await;
+    tx.save_user_settings(&user_settings).await;
 }
 
-pub fn set_bot_status_operational(tx: &mut DatabaseTransaction) {
-    let mut bot_status = tx.load_bot_status();
-    let mut user_settings = tx.load_user_settings();
+pub async fn set_bot_status_operational(tx: &mut DatabaseTransaction) {
+    let mut bot_status = tx.load_bot_status().await;
+    let mut user_settings = tx.load_user_settings().await;
     user_settings.can_post = true;
     bot_status.status = 0;
     bot_status.status_message = "operational  🟢".to_string();
-    bot_status.last_updated_at = (now_in_my_timezone(&tx.load_user_settings()) - INTERFACE_UPDATE_INTERVAL).to_rfc3339();
-    tx.save_bot_status(&bot_status);
-    tx.save_user_settings(&user_settings);
+    bot_status.last_updated_at = (now_in_my_timezone(&user_settings) - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
+    tx.save_bot_status(&bot_status).await;
+    tx.save_user_settings(&user_settings).await;
 }
 
 pub fn process_caption(accounts_to_scrape: &HashMap<String, String>, hashtag_mapping: &HashMap<String, String>, mut rng: &mut StdRng, author: &User, caption: String) -> String {
