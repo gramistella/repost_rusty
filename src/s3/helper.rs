@@ -1,21 +1,11 @@
-use std::collections::HashMap;
-
 use s3::bucket::Bucket;
-use s3::creds::Credentials;
-use s3::Region;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 
 use crate::{IS_OFFLINE, S3_EXPIRATION_TIME};
 
 //noinspection ALL
-pub async fn upload_to_s3(credentials: &HashMap<String, String>, video_path: String, path_to_file: String, delete_from_local_storage: bool) -> Result<String, Box<dyn std::error::Error>> {
-    let access_key = Some(credentials.get("s3_access_key").unwrap().as_str());
-    let secret_key = Some(credentials.get("s3_secret_key").unwrap().as_str());
-
-    let creds = Credentials::new(access_key, secret_key, None, None, None).unwrap();
-    let bucket = s3::bucket::Bucket::new("repostrusty", Region::EuNorth1, creds).unwrap();
-
+pub async fn upload_to_s3(bucket: &Bucket, video_path: String, path_to_file: String, delete_from_local_storage: bool) -> Result<String, Box<dyn std::error::Error>> {
     let file_path = format!("temp/{}", video_path);
     //println!("Uploading file: {} to s3", file_path);
     let mut file = File::open(file_path.clone()).await.unwrap();
@@ -50,13 +40,7 @@ pub async fn upload_to_s3(credentials: &HashMap<String, String>, video_path: Str
     Ok(url)
 }
 
-pub async fn delete_from_s3(credentials: &HashMap<String, String>, path_to_file: String) -> Result<(), Box<dyn std::error::Error>> {
-    let access_key = Some(credentials.get("s3_access_key").unwrap().as_str());
-    let secret_key = Some(credentials.get("s3_secret_key").unwrap().as_str());
-
-    let creds = Credentials::new(access_key, secret_key, None, None, None).unwrap();
-    let bucket = Bucket::new("repostrusty", Region::EuNorth1, creds).unwrap();
-
+pub async fn delete_from_s3(bucket: &Bucket, path_to_file: String) -> Result<(), Box<dyn std::error::Error>> {
     let mut final_path = path_to_file;
     if IS_OFFLINE {
         final_path = format!("dev/{}", final_path);
@@ -64,4 +48,15 @@ pub async fn delete_from_s3(credentials: &HashMap<String, String>, path_to_file:
     bucket.delete_object(final_path).await.unwrap();
 
     Ok(())
+}
+
+pub async fn update_presigned_url(bucket: &Bucket, path_to_file: String) -> Result<String, Box<dyn std::error::Error>> {
+    let mut final_path = path_to_file;
+    if IS_OFFLINE {
+        final_path = format!("dev/{}", final_path);
+    }
+
+    let url = bucket.presign_get(final_path.clone(), S3_EXPIRATION_TIME, None).await.unwrap();
+
+    Ok(url)
 }

@@ -1,3 +1,5 @@
+use ::s3::creds::Credentials;
+use ::s3::{Bucket, Region};
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
@@ -47,6 +49,8 @@ pub const DELAY_BETWEEN_MESSAGE_UPDATES: chrono::Duration = chrono::Duration::mi
 pub(crate) const DISCORD_REFRESH_RATE: Duration = Duration::from_millis(333);
 pub(crate) const INITIAL_INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_millis(60_000);
 
+// (V){!,!}(V)
+
 fn main() -> anyhow::Result<()> {
     env::set_var("RUST_BACKTRACE", "full");
 
@@ -66,11 +70,12 @@ fn main() -> anyhow::Result<()> {
             let rt_clone = Arc::clone(&rt);
 
             let db = rt.block_on(async { Database::new(username.clone(), credentials.clone()).await.unwrap() });
+            let bucket = init_bucket(credentials.clone());
 
-            let mut discord_bot_manager = rt.block_on(async { DiscordBot::new(db.clone(), credentials.clone(), is_first_run).await });
+            let mut discord_bot_manager = rt.block_on(async { DiscordBot::new(db.clone(), bucket.clone(), credentials.clone(), is_first_run).await });
 
             // Run the content_manager and the bot concurrently
-            let mut content_manager = ContentManager::new(db.clone(), username.clone(), credentials.clone(), IS_OFFLINE);
+            let mut content_manager = ContentManager::new(db, bucket, username, credentials, IS_OFFLINE);
             let scraper = std::thread::spawn(move || rt.block_on(content_manager.run()));
 
             let discord = std::thread::spawn(move || rt_clone.block_on(async { discord_bot_manager.run().await }));
@@ -120,6 +125,16 @@ fn init_logging() -> (tracing_appender::non_blocking::WorkerGuard, tracing_appen
     Registry::default().with(file_layer).with(layer2).init();
 
     (file_guard, stdout_guard)
+}
+
+fn init_bucket(credentials: HashMap<String, String>) -> Bucket {
+    let access_key = Some(credentials.get("s3_access_key").unwrap().as_str());
+    let secret_key = Some(credentials.get("s3_secret_key").unwrap().as_str());
+
+    let creds = Credentials::new(access_key, secret_key, None, None, None).unwrap();
+    let bucket = Bucket::new("repostrusty", Region::EuNorth1, creds).unwrap();
+
+    bucket
 }
 
 fn read_credentials(path: &str) -> HashMap<String, HashMap<String, String>> {

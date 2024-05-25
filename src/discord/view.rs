@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, FixedOffset, Utc};
 use lazy_static::lazy_static;
 use regex::Regex;
+use s3::Bucket;
 use serenity::all::{ChannelId, Context, CreateActionRow, CreateAttachment, CreateMessage, EditMessage, Mention, MessageId};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
@@ -16,7 +16,7 @@ use crate::discord::utils::{
     generate_bot_status_caption, generate_full_caption, get_bot_status_buttons, get_failed_buttons, get_pending_buttons, get_published_buttons, get_queued_buttons, get_rejected_buttons, handle_msg_deletion, now_in_my_timezone, send_message_with_retry, should_update_buttons, should_update_caption,
 };
 use crate::s3::helper::delete_from_s3;
-use crate::{DELAY_BETWEEN_MESSAGE_UPDATES, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
+use crate::{crab, DELAY_BETWEEN_MESSAGE_UPDATES, MY_DISCORD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 
 impl Handler {
     pub async fn process_bot_status(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
@@ -50,7 +50,7 @@ impl Handler {
         // Warn the user if the queue is empty
         if content_queue_len == 0 && bot_status.queue_alert_1_message_id.get() == 1 {
             let mention = Mention::from(MY_DISCORD_ID);
-            let msg_caption = format!("{mention} the queue is empty! ( •̀ - •́ )");
+            let msg_caption = format!("{mention} the queue is empty! {}", crab!("•̀ - •́"));
             let msg = CreateMessage::new().content(msg_caption);
             bot_status.queue_alert_1_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
         }
@@ -65,18 +65,18 @@ impl Handler {
         if content_queue_len < bot_status.prev_content_queue_len as usize && queueable_content_count >= 1 {
             if content_queue_len == 1 && bot_status.queue_alert_2_message_id.get() == 1 {
                 let mention = Mention::from(MY_DISCORD_ID);
-                let msg_caption = format!("Hello? Are you there {mention}? Queue some content, now! (╥﹏╥)");
+                let msg_caption = format!("Hello? Are you there {mention}? Queue some content, now! {}", crab!("╥﹏╥"));
                 let msg = CreateMessage::new().content(msg_caption);
                 bot_status.queue_alert_2_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
             } else if content_queue_len == 3 && bot_status.queue_alert_3_message_id.get() == 1 {
                 let mention = Mention::from(MY_DISCORD_ID);
-                let msg_caption = format!("Hey {mention}, remember to add more content to the queue! (¬_¬\")");
+                let msg_caption = format!("Hey {mention}, remember to add more content to the queue! {}", crab!("¬_¬\""));
                 let msg = CreateMessage::new().content(msg_caption);
                 bot_status.queue_alert_3_message_id = send_message_with_retry(ctx, channel_id, msg).await.id;
             }
         }
 
-        // If the content_queue_len rises above 2, delete the warning messages
+        // If the content_queue_len rises above 3, delete the warning messages
         if content_queue_len > 3 {
             if bot_status.queue_alert_2_message_id.get() != 1 {
                 let delete_msg_result = channel_id.delete_message(&ctx.http, bot_status.queue_alert_2_message_id).await;
@@ -134,13 +134,13 @@ impl Handler {
         let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions, content_info).await;
         let mut msg_buttons = get_queued_buttons(&self.ui_definitions);
 
-        let queued_content = match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).await {
+        let queued_content = match tx.get_queued_content_by_shortcode(&content_info.original_shortcode).await {
             Some(queued_content) => queued_content,
-            None => match tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).await {
+            None => match tx.get_published_content_by_shortcode(&content_info.original_shortcode).await {
                 Some(_posted_content) => {
                     return self.process_published(ctx, user_settings, tx, content_info, global_last_updated_at).await;
                 }
-                None => match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).await {
+                None => match tx.get_failed_content_by_shortcode(&content_info.original_shortcode).await {
                     Some(_failed_content) => {
                         return self.process_failed(ctx, user_settings, tx, content_info, global_last_updated_at).await;
                     }
@@ -180,7 +180,7 @@ impl Handler {
         let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_rejected_buttons(&self.ui_definitions);
 
-        let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).await {
+        let rejected_content = match tx.get_rejected_content_by_shortcode(&content_info.original_shortcode).await {
             Some(rejected_content) => rejected_content,
             None => {
                 tracing::error!("Couldn't process rejected_content, content not found in rejected table! {:?}", content_info);
@@ -190,7 +190,7 @@ impl Handler {
 
         let will_expire_at = DateTime::parse_from_rfc3339(&rejected_content.rejected_at).unwrap() + Duration::try_seconds((user_settings.rejected_content_lifespan * 60) as i64).unwrap();
 
-        if handle_deletion_due_to_expiration(&self.credentials, ctx, content_info, channel_id, now, will_expire_at).await {
+        if handle_deletion_due_to_expiration(&self.bucket, ctx, content_info, channel_id, now, will_expire_at).await {
             // If the content was deleted, there is no need to process it further
         } else if content_info.status == (ContentStatus::Rejected { shown: true }) {
             handle_shown_message_update(ctx, channel_id, content_info, user_settings, &msg_caption, msg_buttons, global_last_updated_at).await;
@@ -213,7 +213,7 @@ impl Handler {
         let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_published_buttons(&self.ui_definitions);
 
-        let published_content = match tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).await {
+        let published_content = match tx.get_published_content_by_shortcode(&content_info.original_shortcode).await {
             Some(published_content) => published_content,
             None => {
                 tracing::error!("Couldn't process published_content, content not found in published table! {:?}", content_info);
@@ -223,7 +223,7 @@ impl Handler {
 
         let will_expire_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap() + DEFAULT_POSTED_EXPIRATION;
 
-        if handle_deletion_due_to_expiration(&self.credentials, ctx, content_info, channel_id, now, will_expire_at).await {
+        if handle_deletion_due_to_expiration(&self.bucket, ctx, content_info, channel_id, now, will_expire_at).await {
             // If the content was deleted, there is no need to process it further
         } else if content_info.status == (ContentStatus::Published { shown: true }) {
             handle_shown_message_update(ctx, POSTED_CHANNEL_ID, content_info, user_settings, &msg_caption, msg_buttons, global_last_updated_at).await;
@@ -248,7 +248,7 @@ impl Handler {
         let msg_caption = generate_full_caption(user_settings, tx, &self.ui_definitions, content_info).await;
         let msg_buttons = get_failed_buttons(&self.ui_definitions);
 
-        let failed_content = match tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).await {
+        let failed_content = match tx.get_failed_content_by_shortcode(&content_info.original_shortcode).await {
             Some(failed_content) => failed_content,
             None => {
                 tracing::error!("Couldn't process failed_content, content not found in failed table! {:?}", content_info);
@@ -258,7 +258,7 @@ impl Handler {
 
         let will_expire_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap() + DEFAULT_FAILURE_EXPIRATION;
 
-        if handle_deletion_due_to_expiration(&self.credentials, ctx, content_info, channel_id, now, will_expire_at).await {
+        if handle_deletion_due_to_expiration(&self.bucket, ctx, content_info, channel_id, now, will_expire_at).await {
             // If the content was deleted, there is no need to process it further
         } else if content_info.status == (ContentStatus::Failed { shown: true }) {
             handle_shown_message_update(ctx, POSTED_CHANNEL_ID, content_info, user_settings, &msg_caption, msg_buttons, global_last_updated_at).await;
@@ -309,14 +309,14 @@ lazy_static! {
     static ref CONTENT_DELETION_REGEX: Regex = Regex::new(r"https?:\/\/[^\/]+\/([^?]+)").unwrap();
 }
 
-pub async fn handle_content_deletion(credentials: &HashMap<String, String>, ctx: &Context, content_info: &mut ContentInfo, channel_id: ChannelId) {
+pub async fn handle_content_deletion(bucket: &Bucket, ctx: &Context, content_info: &mut ContentInfo, channel_id: ChannelId) {
     content_info.status = RemovedFromView;
 
     let delete_msg_result = ctx.http.delete_message(channel_id, content_info.message_id, None).await;
     handle_msg_deletion(delete_msg_result);
 
     let filename = CONTENT_DELETION_REGEX.captures(&content_info.url).unwrap().get(1).unwrap().as_str();
-    match delete_from_s3(credentials, filename.to_string()).await {
+    match delete_from_s3(bucket, filename.to_string()).await {
         Ok(_) => {}
         Err(e) => {
             let e = format!("{:?}", e);
@@ -347,9 +347,9 @@ async fn handle_shown_message_update<T: crate::discord::traits::Updatable>(ctx: 
     }
 }
 
-async fn handle_deletion_due_to_expiration(credentials: &HashMap<String, String>, ctx: &Context, content_info: &mut ContentInfo, channel_id: ChannelId, now: DateTime<Utc>, will_expire_at: DateTime<FixedOffset>) -> bool {
+async fn handle_deletion_due_to_expiration(bucket: &Bucket, ctx: &Context, content_info: &mut ContentInfo, channel_id: ChannelId, now: DateTime<Utc>, will_expire_at: DateTime<FixedOffset>) -> bool {
     if will_expire_at.with_timezone(&Utc) < now {
-        handle_content_deletion(credentials, ctx, content_info, channel_id).await;
+        handle_content_deletion(&bucket, ctx, content_info, channel_id).await;
         true
     } else {
         false

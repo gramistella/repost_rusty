@@ -6,6 +6,7 @@ use instagram_scraper_rs::{InstagramScraper, InstagramScraperError, Post, User};
 use rand::prelude::SliceRandom;
 use rand::rngs::{OsRng, StdRng};
 use rand::{Rng, SeedableRng};
+use s3::Bucket;
 use serenity::all::MessageId;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -28,6 +29,7 @@ pub struct ContentManager {
     pub(crate) username: String,
     pub(crate) scraper: Arc<Mutex<InstagramScraper>>,
     pub(crate) database: Database,
+    bucket: Bucket,
     pub(crate) is_offline: bool,
     cookie_store_path: String,
     pub(crate) credentials: HashMap<String, String>,
@@ -35,7 +37,7 @@ pub struct ContentManager {
 }
 
 impl ContentManager {
-    pub fn new(database: Database, username: String, credentials: HashMap<String, String>, is_offline: bool) -> Self {
+    pub fn new(database: Database, bucket: Bucket, username: String, credentials: HashMap<String, String>, is_offline: bool) -> Self {
         let cookie_store_path = format!("cookies/cookies_{}.json", username);
         let scraper = Arc::new(Mutex::new(InstagramScraper::with_cookie_store(&cookie_store_path)));
 
@@ -45,6 +47,7 @@ impl ContentManager {
             username,
             scraper,
             database,
+            bucket,
             is_offline,
             cookie_store_path,
             credentials,
@@ -73,7 +76,7 @@ impl ContentManager {
 
         let mut transaction = self.database.begin_transaction().await;
         let username = self.username.clone();
-        let credentials = self.credentials.clone();
+        let bucket = self.bucket.clone();
         let sender_latest_content = Arc::clone(&self.latest_content_mutex);
         let sender_loop = tokio::spawn(async move {
             loop {
@@ -94,7 +97,7 @@ impl ContentManager {
                     }
 
                     if let Some((video_file_name, caption, author, shortcode)) = content_tuple {
-                        if !transaction.does_content_exist_with_shortcode(shortcode.clone()).await && shortcode != "halted" {
+                        if !transaction.does_content_exist_with_shortcode(&shortcode).await && shortcode != "halted" {
                             // Process video to check if it already exists
                             let video_exists = process_video(&mut transaction, &video_file_name, author.clone(), shortcode.clone()).await.unwrap();
 
@@ -106,13 +109,13 @@ impl ContentManager {
                                     original_shortcode: shortcode.clone(),
                                 };
 
-                                transaction.save_duplicate_content(duplicate_content).await;
+                                transaction.save_duplicate_content(&duplicate_content).await;
                                 continue;
                             }
 
                             // Upload the video to S3
                             let s3_filename = format!("{}/{}", username, video_file_name);
-                            let url = upload_to_s3(&credentials, video_file_name, s3_filename, true).await.unwrap();
+                            let url = upload_to_s3(&bucket, video_file_name, s3_filename, true).await.unwrap();
 
                             let re = regex::Regex::new(r"#\w+").unwrap();
                             let cloned_caption = caption.clone();
@@ -448,7 +451,7 @@ impl ContentManager {
 
             // Send the URL through the channel
             if post.is_video {
-                if !transaction.does_content_exist_with_shortcode(post.shortcode.clone()).await {
+                if !transaction.does_content_exist_with_shortcode(&post.shortcode).await {
                     let filename;
                     let caption;
                     {

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use rand::prelude::{SliceRandom, StdRng};
 use rand::SeedableRng;
+use s3::Bucket;
 use serde::{Deserialize, Serialize};
 use serenity::all::{Builder, ChannelId, CreateInteractionResponse, CreateMessage, GetMessages, Interaction, MessageId, RatelimitInfo};
 use serenity::async_trait;
@@ -16,13 +17,14 @@ use crate::database::database::{Database, DatabaseTransaction, UserSettings};
 use crate::discord::interactions::{EditedContent, EditedContentKind};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::{clear_all_messages, prune_expired_content};
-use crate::{DISCORD_REFRESH_RATE, GUILD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
+use crate::{crab, DISCORD_REFRESH_RATE, GUILD_ID, POSTED_CHANNEL_ID, STATUS_CHANNEL_ID};
 
 #[derive(Clone)]
 pub struct Handler {
     pub username: String,
     pub database: Database,
     pub credentials: HashMap<String, String>,
+    pub bucket: Bucket,
     pub ui_definitions: UiDefinitions,
     pub edited_content: Arc<Mutex<Option<EditedContent>>>,
     pub interaction_mutex: Arc<Mutex<()>>,
@@ -306,7 +308,7 @@ impl Handler {
 }
 
 impl DiscordBot {
-    pub async fn new(database: Database, credentials: HashMap<String, String>, is_first_run: bool) -> Self {
+    pub async fn new(database: Database, bucket: Bucket, credentials: HashMap<String, String>, is_first_run: bool) -> Self {
         let ui_definitions_yaml_data = include_str!("../../config/ui_definitions.yaml");
         let ui_definitions: UiDefinitions = serde_yaml::from_str(ui_definitions_yaml_data).expect("Error parsing config file");
 
@@ -324,6 +326,7 @@ impl DiscordBot {
                 username: username.clone(),
                 credentials: credentials.clone(),
                 database: database.clone(),
+                bucket,
                 ui_definitions: ui_definitions.clone(),
                 edited_content: Arc::new(Mutex::new(None)),
                 interaction_mutex: Arc::new(Mutex::new(())),
@@ -357,14 +360,16 @@ impl DiscordBot {
         let mut tx = database.begin_transaction().await;
 
         clear_all_messages(&mut tx, &client.http, channel_id, true).await;
-
+        
+        let welcome_message = format!("Welcome back! {}", crab!("!,!"));
+        
         if is_first_run {
             // Set up the posted channel
             let messages = POSTED_CHANNEL_ID.messages(&client.http, GetMessages::new()).await.unwrap();
 
             let mut is_message_there = false;
             for (i, message) in messages.iter().enumerate() {
-                if i == 0 && message.author.bot && message.content.contains("Welcome back! 🦀") {
+                if i == 0 && message.author.bot && message.content.contains(&welcome_message) {
                     is_message_there = true;
                     continue;
                 } else {
@@ -373,7 +378,7 @@ impl DiscordBot {
             }
 
             if !is_message_there {
-                let msg = CreateMessage::new().content("Welcome back! 🦀");
+                let msg = CreateMessage::new().content(&welcome_message);
                 let _ = client.http.send_message(POSTED_CHANNEL_ID, vec![], &msg).await;
             }
 
@@ -411,7 +416,7 @@ impl DiscordBot {
             tx.save_bot_status(&bot_status).await;
         }
 
-        let msg = CreateMessage::new().content("Welcome back! 🦀");
+        let msg = CreateMessage::new().content(welcome_message);
         let _ = client.http.send_message(channel_id, vec![], &msg).await;
 
         {

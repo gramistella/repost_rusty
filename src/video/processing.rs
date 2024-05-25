@@ -80,7 +80,7 @@ pub async fn process_video(tx: &mut DatabaseTransaction, video_path: &str, usern
             hash_frame_4: hash4.clone(),
         };
 
-        tx.save_hashed_video(video_hash).await;
+        tx.save_hashed_video(&video_hash).await;
     }
 
     // Delete the extracted frames

@@ -22,7 +22,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
             let mut formatted_will_post_at = "".to_string();
             let mut countdown_caption;
             let queued_caption = ui_definitions.labels.get("queued_caption").unwrap();
-            match tx.get_queued_content_by_shortcode(content_info.original_shortcode.clone()).await {
+            match tx.get_queued_content_by_shortcode(&content_info.original_shortcode).await {
                 None => {
                     format!("{base_caption}\n{}\n‎\nPosting now...\n\n{}‎", queued_caption, formatted_will_post_at)
                 }
@@ -44,7 +44,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
         }
         ContentStatus::Rejected { .. } => {
             let rejected_caption = ui_definitions.labels.get("rejected_caption").unwrap();
-            let rejected_content = match tx.get_rejected_content_by_shortcode(content_info.original_shortcode.clone()).await {
+            let rejected_content = match tx.get_rejected_content_by_shortcode(&content_info.original_shortcode).await {
                 Some(rejected_content) => rejected_content,
                 None => {
                     return format!("{base_caption}\n{}\n‎", rejected_caption);
@@ -58,7 +58,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
         }
         ContentStatus::Published { .. } => {
             let published_caption = ui_definitions.labels.get("published_caption").unwrap();
-            let published_content = tx.get_published_content_by_shortcode(content_info.original_shortcode.clone()).await.unwrap();
+            let published_content = tx.get_published_content_by_shortcode(&content_info.original_shortcode).await.unwrap();
             let published_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap().format("%Y-%m-%d %H:%M:%S").to_string();
             let will_expire_at = DateTime::parse_from_rfc3339(&published_content.published_at).unwrap() + DEFAULT_POSTED_EXPIRATION;
 
@@ -68,7 +68,7 @@ pub async fn generate_full_caption(user_settings: &UserSettings, tx: &mut Databa
         }
         ContentStatus::Failed { .. } => {
             let failed_caption = ui_definitions.labels.get("failed_caption").unwrap();
-            let failed_content = tx.get_failed_content_by_shortcode(content_info.original_shortcode.clone()).await.unwrap();
+            let failed_content = tx.get_failed_content_by_shortcode(&content_info.original_shortcode).await.unwrap();
             let will_expire_at = DateTime::parse_from_rfc3339(&failed_content.failed_at).unwrap() + DEFAULT_FAILURE_EXPIRATION;
 
             let countdown_caption = countdown_until_expiration(user_settings, will_expire_at.with_timezone(&Utc)).await;
@@ -295,14 +295,18 @@ pub fn handle_msg_deletion(delete_msg_result: Result<(), SerenityError>) {
 }
 
 pub async fn prune_expired_content(user_settings: &UserSettings, tx: &mut DatabaseTransaction, content: &mut ContentInfo) -> bool {
-    let added_at = DateTime::parse_from_rfc3339(&content.added_at).unwrap();
-    if now_in_my_timezone(user_settings) > (added_at + Duration::seconds(S3_EXPIRATION_TIME as i64)) {
-        tx.remove_content_info_with_shortcode(&content.original_shortcode).await;
-        let is_in_queue = tx.does_content_exist_with_shortcode_in_queue(content.original_shortcode.clone()).await;
-        if is_in_queue {
-            tx.remove_post_from_queue_with_shortcode(content.original_shortcode.clone()).await;
+    
+    match content.status {
+        ContentStatus::Queued { .. } => {
+            // Don't prune queued content, since a queued content is guaranteed to never expire
         }
-        return true;
+        _ => {
+            let added_at = DateTime::parse_from_rfc3339(&content.added_at).unwrap();
+            if now_in_my_timezone(user_settings) > (added_at + Duration::seconds(S3_EXPIRATION_TIME as i64)) {
+                tx.remove_content_info_with_shortcode(&content.original_shortcode).await;
+                return true;
+            }
+        },
     }
     false
 }

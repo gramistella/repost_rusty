@@ -1,14 +1,14 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use instagram_scraper_rs::{InstagramScraper, InstagramScraperError};
+use instagram_scraper_rs::{InstagramScraper, InstagramUploaderError};
 use rand::prelude::{SliceRandom, StdRng};
 use rand::rngs::OsRng;
 use rand::{Rng, SeedableRng};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use crate::database::database::{DatabaseTransaction, FailedContent, PublishedContent, QueuedContent};
+use crate::database::database::{DatabaseTransaction, FailedContent, PublishedContent, QueuedContent, UserSettings};
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::scraper_poster::scraper::ContentManager;
@@ -36,11 +36,11 @@ impl ContentManager {
             cloned_self.println("Starting poster loop...");
 
             loop {
-                let mut transaction = cloned_self.database.begin_transaction().await;
-                let content_mapping = transaction.load_content_mapping().await;
-                let user_settings = transaction.load_user_settings().await;
+                let mut tx = cloned_self.database.begin_transaction().await;
+                let content_mapping = tx.load_content_mapping().await;
+                let user_settings = tx.load_user_settings().await;
 
-                let queued_posts = transaction.load_content_queue().await;
+                let queued_posts = tx.load_content_queue().await;
 
                 'outer: for content_info in content_mapping {
                     if content_info.status.to_string().contains("queued_") {
@@ -57,7 +57,7 @@ impl ContentManager {
                                         let mut scraper_guard = cloned_self.scraper.lock().await;
 
                                         // Publish the content
-                                        let reel_id = match cloned_self.publish_content(&mut scraper_guard, &mut transaction, queued_post, &full_caption, user_id, access_token).await {
+                                        let reel_id = match cloned_self.publish_content(&mut scraper_guard, &user_settings, &mut tx, queued_post, &full_caption, user_id, access_token).await {
                                             Some(value) => value,
                                             None => continue,
                                         };
@@ -66,16 +66,16 @@ impl ContentManager {
                                         cloned_self.comment_on_published_content(&mut scraper_guard, access_token, &reel_id).await;
                                     } else if queued_post.caption.contains("will_fail") {
                                         cloned_self.println(&format!("[!] Failed to upload content offline: {}", queued_post.url));
-                                        cloned_self.handle_failed_content(queued_post).await;
+                                        cloned_self.handle_failed_content(&user_settings, &mut tx, queued_post).await;
                                         continue;
                                     } else {
                                         cloned_self.println(&format!("[!] Uploaded content offline: {}", queued_post.url));
                                     }
 
-                                    let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
+                                    let mut content_info = tx.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
                                     content_info.status = ContentStatus::Published { shown: false };
 
-                                    transaction.save_content_info(&content_info).await;
+                                    tx.save_content_info(&content_info).await;
 
                                     let published_content = PublishedContent {
                                         username: queued_post.username.clone(),
@@ -87,14 +87,14 @@ impl ContentManager {
                                         published_at: now_in_my_timezone(&user_settings).to_rfc3339(),
                                     };
 
-                                    transaction.save_published_content(published_content).await;
+                                    tx.save_published_content(&published_content).await;
                                 } else {
                                     for content in queued_posts.clone().iter_mut() {
                                         content.will_post_at = (DateTime::parse_from_rfc3339(&content.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 60) as u64)).to_rfc3339();
-                                        transaction.save_queued_content(queued_post).await;
-                                        let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
+                                        tx.save_queued_content(queued_post).await;
+                                        let mut content_info = tx.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
                                         content_info.last_updated_at = (now_in_my_timezone(&user_settings) - chrono::Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
-                                        transaction.save_content_info(&content_info).await;
+                                        tx.save_content_info(&content_info).await;
                                     }
                                     // Since we have just altered the whole queue, and we are also iterating over the queue in the outer loop, we need to break here
                                 }
@@ -154,65 +154,76 @@ impl ContentManager {
         }
     }
 
-    async fn publish_content(&self, scraper: &mut InstagramScraper, transaction: &mut DatabaseTransaction, queued_post: &QueuedContent, full_caption: &str, user_id: &str, access_token: &str) -> Option<String> {
+    async fn publish_content(&self, scraper: &mut InstagramScraper, user_settings: &UserSettings, tx: &mut DatabaseTransaction, queued_post: &QueuedContent, full_caption: &str, user_id: &str, access_token: &str) -> Option<String> {
         self.println(&format!("[+] Publishing content to instagram: {}", queued_post.original_shortcode));
         let timer = std::time::Instant::now();
-        let reel_id = match scraper.upload_reel(user_id, access_token, &queued_post.url, full_caption).await {
+        let result = scraper.upload_reel(user_id, access_token, &queued_post.url, full_caption).await;
+        match result {
             Ok(reel_id) => {
                 let duration = timer.elapsed(); // End timer
-
                 let minutes = duration.as_secs() / 60;
                 let seconds = duration.as_secs() % 60;
-
                 self.println(&format!("[+] Published content successfully: {}, took {} minutes and {} seconds", queued_post.original_shortcode, minutes, seconds));
-                reel_id
+                Some(reel_id)
             }
             Err(err) => {
-                match err {
-                    InstagramScraperError::UploadFailedRecoverable(_) => {
-                        if err.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
-                            self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
-                            set_bot_status_halted(transaction).await;
-                            loop {
-                                let bot_status = transaction.load_bot_status().await;
-                                if bot_status.status == 0 {
-                                    self.println("Retrying to upload content to instagram...");
-                                    let result = self.scraper.lock().await.upload_reel(user_id, access_token, &queued_post.url, full_caption).await;
-                                    match result {
-                                        Ok(_) => {
-                                            self.println(&format!("[+] Published content successfully: {}", queued_post.original_shortcode));
-                                            set_bot_status_operational(transaction).await;
-                                            break;
-                                        }
-                                        Err(_e) => {
-                                            self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
-                                            set_bot_status_halted(transaction).await;
-                                        }
-                                    }
-                                } else {
-                                    tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
-                                }
-                            }
+                self.handle_upload_error(err, user_settings, tx, scraper, user_id, access_token, queued_post, full_caption).await
+            }
+        }
+    }
+
+    async fn handle_upload_error(&self, err: InstagramUploaderError, user_settings: &UserSettings, tx: &mut DatabaseTransaction, scraper: &mut InstagramScraper, user_id: &str, access_token: &str, queued_post: &QueuedContent, full_caption: &str) -> Option<String> {
+        match err {
+            InstagramUploaderError::UploadFailedRecoverable(err) => {
+                if err.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
+                    self.handle_inactive_account_error(user_settings, tx, scraper, user_id, access_token, queued_post, full_caption).await
+                } else {
+                    self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err));
+                    self.handle_recoverable_failed_content(user_settings, tx).await;
+                    None
+                }
+            }
+            InstagramUploaderError::UploadFailedNonRecoverable(err) => {
+                self.println(&format!("[!] Couldn't upload content to instagram!\n [ERROR] {}\n{}", err, queued_post.url));
+                self.handle_failed_content(user_settings, tx, queued_post).await;
+                None
+            }
+            InstagramUploaderError::UploadSucceededButFailedToRetrieveId(e) => {
+                self.println(&format!("[!] Uploaded content to instagram, but failed to retrieve media id!\n [WARNING] {}\n{}", e, queued_post.url));
+                self.handle_posted_but_failed_content(user_settings, tx, queued_post).await;
+                None
+            }
+        }
+    }
+
+    async fn handle_inactive_account_error(&self, user_settings: &UserSettings, tx: &mut DatabaseTransaction, scraper: &mut InstagramScraper, user_id: &str, access_token: &str, queued_post: &QueuedContent, full_caption: &str) -> Option<String> {
+        self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
+        set_bot_status_halted(tx).await;
+        loop {
+            let bot_status = tx.load_bot_status().await;
+            if bot_status.status == 0 {
+                self.println(&format!("Retrying to upload content to instagram... {}", queued_post.original_shortcode));
+                let result = scraper.upload_reel(user_id, access_token, &queued_post.url, full_caption).await;
+                match result {
+                    Ok(_) => {
+                        self.println(&format!("[+] Published content successfully: {}", queued_post.original_shortcode));
+                        set_bot_status_operational(tx).await;
+                        break Some(queued_post.original_shortcode.clone());
+                    }
+                    Err(e) => {
+                        if e.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
+                            continue;
                         } else {
-                            self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err));
-                            self.handle_recoverable_failed_content().await;
+                            self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", e));
+                            self.handle_recoverable_failed_content(user_settings, tx).await;
+                            break None;
                         }
                     }
-                    InstagramScraperError::UploadFailedNonRecoverable(_) => {
-                        self.println(&format!("[!] Couldn't upload content to instagram!\n [ERROR] {}\n{}", err, queued_post.url));
-
-                        self.handle_failed_content(queued_post).await;
-                    }
-                    InstagramScraperError::UploadSucceededButFailedToRetrieveId(e) => {
-                        self.println(&format!("[!] Uploaded content to instagram, but failed to retrieve media id!\n [WARNING] {}\n{}", e, queued_post.url));
-                        self.handle_posted_but_failed_content(queued_post).await;
-                    }
-                    _ => {}
                 }
-                return None;
+            } else {
+                tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
             }
-        };
-        Some(reel_id)
+        }
     }
 
     fn prepare_caption_for_post(queued_post: &QueuedContent) -> String {
@@ -243,16 +254,14 @@ impl ContentManager {
         full_caption
     }
 
-    async fn handle_failed_content(&self, queued_post: &QueuedContent) {
+    async fn handle_failed_content(&self, user_settings: &UserSettings, tx: &mut DatabaseTransaction, queued_post: &QueuedContent) {
         let span = tracing::span!(tracing::Level::INFO, "handle_failed_content");
         let _enter = span.enter();
 
-        let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings().await;
-        let mut video_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
+        let mut video_info = tx.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
         video_info.status = ContentStatus::Failed { shown: false };
 
-        transaction.save_content_info(&video_info).await;
+        tx.save_content_info(&video_info).await;
 
         let now = now_in_my_timezone(&user_settings).to_rfc3339();
         let failed_content = FailedContent {
@@ -265,34 +274,28 @@ impl ContentManager {
             failed_at: now,
         };
 
-        transaction.save_failed_content(failed_content).await;
+        tx.save_failed_content(&failed_content).await;
     }
 
-    async fn handle_recoverable_failed_content(&self) {
+    async fn handle_recoverable_failed_content(&self, user_settings: &UserSettings, tx: &mut DatabaseTransaction) {
         let span = tracing::span!(tracing::Level::INFO, "handle_recoverable_failed_content");
         let _enter = span.enter();
 
-        let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings().await;
-
-        for mut queued_post in transaction.load_content_queue().await {
+        for mut queued_post in tx.load_content_queue().await {
             let new_will_post_at = DateTime::parse_from_rfc3339(&queued_post.will_post_at).unwrap() + Duration::from_secs((user_settings.posting_interval * 60) as u64);
             queued_post.will_post_at = new_will_post_at.to_rfc3339();
-            transaction.save_queued_content(&queued_post).await;
+            tx.save_queued_content(&queued_post).await;
         }
     }
 
-    async fn handle_posted_but_failed_content(&self, queued_post: &QueuedContent) {
+    async fn handle_posted_but_failed_content(&self, user_settings: &UserSettings, tx: &mut DatabaseTransaction, queued_post: &QueuedContent) {
         let span = tracing::span!(tracing::Level::INFO, "handle_posted_but_failed_content");
         let _enter = span.enter();
 
-        let mut transaction = self.database.begin_transaction().await;
-        let user_settings = transaction.load_user_settings().await;
-
-        let mut content_info = transaction.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
+        let mut content_info = tx.get_content_info_by_shortcode(&queued_post.original_shortcode).await;
         content_info.status = ContentStatus::Published { shown: false };
 
-        transaction.save_content_info(&content_info).await;
+        tx.save_content_info(&content_info).await;
 
         let published_content = PublishedContent {
             username: queued_post.username.clone(),
@@ -304,11 +307,13 @@ impl ContentManager {
             published_at: now_in_my_timezone(&user_settings).to_rfc3339(),
         };
 
-        transaction.save_published_content(published_content).await;
+        tx.save_published_content(&published_content).await;
     }
 
     /// This function will amend the queue to ensure that only one post is posted at a time,
     /// even if the bot was shut down for a while.
+    ///
+    /// This function will create its own transaction, as it will be called before the main loop
     async fn amend_queue(&self) {
         let mut tx = self.database.begin_transaction().await;
         let content_queue = tx.load_content_queue().await;

@@ -519,7 +519,7 @@ impl DatabaseTransaction {
         ).execute(self.conn.as_mut()).await.unwrap();
     }
 
-    pub async fn save_duplicate_content(&mut self, duplicate_content: DuplicateContent) {
+    pub async fn save_duplicate_content(&mut self, duplicate_content: &DuplicateContent) {
         query!("INSERT INTO duplicate_content (username, original_shortcode) VALUES ($1, $2)", duplicate_content.username, duplicate_content.original_shortcode)
             .execute(self.conn.as_mut())
             .await
@@ -550,6 +550,10 @@ impl DatabaseTransaction {
 
     pub async fn remove_content_info_with_shortcode(&mut self, shortcode: &String) {
         query!("DELETE FROM content_info WHERE username = $1 AND original_shortcode = $2", &self.username, shortcode).execute(self.conn.as_mut()).await.unwrap();
+
+        if self.does_content_exist_with_shortcode_in_queue(shortcode).await {
+            self.remove_post_from_queue_with_shortcode(shortcode).await;
+        }
     }
 
     pub async fn save_content_info(&mut self, content_info: &ContentInfo) {
@@ -624,21 +628,21 @@ impl DatabaseTransaction {
         msg_id as u64
     }
 
-    pub async fn remove_post_from_queue_with_shortcode(&mut self, shortcode: String) {
+    pub async fn remove_post_from_queue_with_shortcode(&mut self, shortcode: &String) {
         let deleted_rows = query!("DELETE FROM queued_content WHERE original_shortcode = $1 AND username = $2", shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap().rows_affected();
 
         if deleted_rows > 0 {
             let user_settings = self.load_user_settings().await;
             let mut queued_content_list = self.load_content_queue().await;
 
-            if let Some(removed_post_index) = queued_content_list.iter().position(|content| content.original_shortcode == shortcode) {
+            if let Some(removed_post_index) = queued_content_list.iter().position(|content| content.original_shortcode == *shortcode) {
                 queued_content_list.remove(removed_post_index);
 
                 for post in queued_content_list.iter_mut().skip(removed_post_index) {
                     post.will_post_at = self.get_new_post_time().await;
 
                     let mut content_info = self.get_content_info_by_shortcode(&post.original_shortcode).await;
-                    content_info.last_updated_at = (now_in_my_timezone(&user_settings) - Duration::milliseconds(user_settings.interface_update_interval as i64)).to_rfc3339();
+                    content_info.last_updated_at = (now_in_my_timezone(&user_settings) - Duration::milliseconds(user_settings.interface_update_interval)).to_rfc3339();
                     content_info.status = if content_info.status.to_string().contains("shown") { ContentStatus::Queued { shown: true } } else { ContentStatus::Queued { shown: false } };
                     self.save_content_info(&content_info).await;
                 }
@@ -666,34 +670,34 @@ impl DatabaseTransaction {
         query_as!(QueuedContent, "SELECT * FROM queued_content WHERE username = $1 ORDER BY will_post_at", &self.username).fetch_all(self.conn.as_mut()).await.unwrap()
     }
 
-    pub async fn get_queued_content_by_shortcode(&mut self, shortcode: String) -> Option<QueuedContent> {
+    pub async fn get_queued_content_by_shortcode(&mut self, shortcode: &String) -> Option<QueuedContent> {
         let content_queue = self.load_content_queue().await;
-        content_queue.iter().find(|&content| content.original_shortcode == shortcode).cloned()
+        content_queue.iter().find(|&content| content.original_shortcode == *shortcode).cloned()
     }
 
-    pub async fn get_rejected_content_by_shortcode(&mut self, shortcode: String) -> Option<RejectedContent> {
+    pub async fn get_rejected_content_by_shortcode(&mut self, shortcode: &String) -> Option<RejectedContent> {
         let rejected_content = self.load_rejected_content().await;
 
-        rejected_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
+        rejected_content.iter().find(|&content| content.original_shortcode == *shortcode).cloned()
     }
 
-    pub async fn get_failed_content_by_shortcode(&mut self, shortcode: String) -> Option<FailedContent> {
+    pub async fn get_failed_content_by_shortcode(&mut self, shortcode: &String) -> Option<FailedContent> {
         let failed_content = self.load_failed_content().await;
 
-        failed_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
+        failed_content.iter().find(|&content| content.original_shortcode == *shortcode).cloned()
     }
 
-    pub async fn get_published_content_by_shortcode(&mut self, shortcode: String) -> Option<PublishedContent> {
+    pub async fn get_published_content_by_shortcode(&mut self, shortcode: &String) -> Option<PublishedContent> {
         let published_content = self.load_posted_content().await;
 
-        published_content.iter().find(|&content| content.original_shortcode == shortcode).cloned()
+        published_content.iter().find(|&content| content.original_shortcode == *shortcode).cloned()
     }
 
-    pub async fn remove_rejected_content_with_shortcode(&mut self, shortcode: String) {
+    pub async fn remove_rejected_content_with_shortcode(&mut self, shortcode: &String) {
         query!("DELETE FROM rejected_content WHERE original_shortcode = $1 AND username = $2", shortcode, &self.username).execute(self.conn.as_mut()).await.unwrap();
     }
 
-    pub async fn save_rejected_content(&mut self, rejected_content: RejectedContent) {
+    pub async fn save_rejected_content(&mut self, rejected_content: &RejectedContent) {
         query!(
             "INSERT INTO rejected_content (username, url, caption, hashtags, original_author, original_shortcode, rejected_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (username, original_shortcode) DO UPDATE SET url = $2, caption = $3, hashtags = $4, original_author = $5, rejected_at = $7",
             rejected_content.username,
@@ -716,8 +720,8 @@ impl DatabaseTransaction {
     /// Save a posted content to the database
     ///
     /// Will automatically remove the content from the content_queue
-    pub async fn save_published_content(&mut self, published_content: PublishedContent) {
-        let queued_content = self.get_queued_content_by_shortcode(published_content.original_shortcode.clone()).await;
+    pub async fn save_published_content(&mut self, published_content: &PublishedContent) {
+        let queued_content = self.get_queued_content_by_shortcode(&published_content.original_shortcode).await;
         let mut removed = false;
 
         if let Some(queued_content) = queued_content {
@@ -726,7 +730,7 @@ impl DatabaseTransaction {
             if DateTime::parse_from_rfc3339(&queued_content.will_post_at).unwrap() < now_in_my_timezone(&user_settings) - posting_interval {
                 // If so, we remove the post from the queue using this function, since it also recalculates the will_post_at for the remaining posts
                 // And will avoid content being posted all at once
-                self.remove_post_from_queue_with_shortcode(published_content.original_shortcode.clone()).await;
+                self.remove_post_from_queue_with_shortcode(&published_content.original_shortcode).await;
                 removed = true;
             }
         }
@@ -762,14 +766,14 @@ impl DatabaseTransaction {
     /// Save a content that failed to upload to the database
     ///
     /// Will automatically remove the content from the content_queue
-    pub async fn save_failed_content(&mut self, failed_content: FailedContent) {
+    pub async fn save_failed_content(&mut self, failed_content: &FailedContent) {
         // First we check if the content is actually in the content_queue
         let exists = query!("SELECT * FROM queued_content WHERE username = $1 AND original_shortcode = $2", &self.username, failed_content.original_shortcode).fetch_all(self.conn.as_mut()).await.unwrap().len();
 
         if exists > 0 {
             // we remove the failed_content from the content_queue using this function
             // Since it also automatically recalculates the will_post_at for the remaining posts
-            self.remove_post_from_queue_with_shortcode(failed_content.original_shortcode.clone()).await;
+            self.remove_post_from_queue_with_shortcode(&failed_content.original_shortcode.clone()).await;
         }
 
         // Then we add the failed_content to the failed_content table
@@ -869,7 +873,7 @@ impl DatabaseTransaction {
         outer_hashed_video
     }
 
-    pub async fn save_hashed_video(&mut self, hashed_video: HashedVideo) {
+    pub async fn save_hashed_video(&mut self, hashed_video: &HashedVideo) {
         let inner_hashed_video = InnerHashedVideo {
             username: hashed_video.username.clone(),
             duration: hashed_video.duration.to_string(),
@@ -895,7 +899,7 @@ impl DatabaseTransaction {
         .unwrap();
     }
 
-    pub async fn does_content_exist_with_shortcode(&mut self, shortcode: String) -> bool {
+    pub async fn does_content_exist_with_shortcode(&mut self, shortcode: &String) -> bool {
         // Execute each statement and check if the URL exists
         let tables = ["content_info", "posted_content", "content_queue", "rejected_content", "failed_content", "duplicate_content"];
         for table in tables {
@@ -907,7 +911,7 @@ impl DatabaseTransaction {
         false
     }
 
-    pub async fn does_content_exist_with_shortcode_in_queue(&mut self, shortcode: String) -> bool {
+    pub async fn does_content_exist_with_shortcode_in_queue(&mut self, shortcode: &String) -> bool {
         // Execute each statement and check if the URL exists
         let tables = ["content_queue"];
         for table in tables {
