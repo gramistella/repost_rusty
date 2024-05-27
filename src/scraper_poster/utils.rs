@@ -94,6 +94,33 @@ pub fn process_caption(accounts_to_scrape: &HashMap<String, String>, hashtag_map
     let caption = caption.replace("Follow @kingcattos", "");
     let caption = caption.replace("please DM for credit/removal", "");
 
+
+    fn extract_credit(caption: &str) -> String {
+        let words: Vec<&str> = caption.split_whitespace().collect();
+        let mut credit = String::new();
+        let mut credit_start = false;
+
+        for i in 0..words.len() {
+            if words[i] == "Credit:" {
+                credit_start = true;
+            }
+            if credit_start {
+                credit.push_str(words[i]);
+                credit.push(' ');
+                if words[i].starts_with("@") {
+                    break;
+                }
+            }
+        }
+        credit.trim().to_string()
+    }
+    
+    // Suppose I have a string like this after all the replacements: "This is a caption @hashtag1,@hashtag2"
+    // Sometimes it may be like this: "This is a caption Credit: tt @/someaccount @hashtag1,@hashtag2"
+    // I want to extract the credit part like this: credit = "Credit:tt @/someaccount"
+    let credit = extract_credit(&caption);
+    let caption = caption.replace(&credit, "");
+    
     let mut hashtags = caption.split_whitespace().filter(|s| s.starts_with('#')).collect::<Vec<&str>>();
     let selected_hashtags = if !hashtags.is_empty() {
         hashtags.shuffle(&mut rng);
@@ -125,6 +152,6 @@ pub fn process_caption(accounts_to_scrape: &HashMap<String, String>, hashtag_map
     // Remove the hashtags from the caption
     let caption = caption.split_whitespace().filter(|s| !s.starts_with('#')).collect::<Vec<&str>>().join(" ");
     // Rebuild the caption
-    let caption = format!("{} {}", caption, selected_hashtags);
+    let caption = format!("{}\n{} {}", caption, credit, selected_hashtags);
     caption
 }

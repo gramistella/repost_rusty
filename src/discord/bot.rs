@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{DateTime, Utc};
 use rand::prelude::{SliceRandom, StdRng};
@@ -29,7 +30,8 @@ pub struct Handler {
     pub edited_content: Arc<Mutex<Option<EditedContent>>>,
     pub interaction_mutex: Arc<Mutex<()>>,
     pub global_last_updated_at: Arc<Mutex<DateTime<Utc>>>,
-    pub is_first_iteration: Arc<Mutex<bool>>,
+    pub is_first_iteration: Arc<AtomicBool>,
+    pub has_started: Arc<AtomicBool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -88,36 +90,27 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, _ready: serenity::model::gateway::Ready) {
-        loop {
-            let mut tx = self.database.begin_transaction().await;
-            let user_settings = tx.load_user_settings().await;
-            let mut rng = StdRng::from_entropy();
 
-            // let self_clone = self.clone();
-            // let ctx_clone = ctx.clone();
-            let global_last_updated_at = Arc::clone(&self.global_last_updated_at);
-
-            let mut is_first_iteration = self.is_first_iteration.lock().await;
-            let is_first_iteration_clone = *is_first_iteration;
-
-            self.ready_loop(&ctx, &user_settings, &mut tx, global_last_updated_at, &mut rng, is_first_iteration_clone).await;
-
-            /*current_handle = tokio::spawn(async move {
-                let obtained_permit = permit.take().unwrap();
-                self_clone.ready_loop(&ctx_clone, &user_settings, &mut tx, global_last_updated_at, &mut rng, is_first_iteration_clone, obtained_permit).await;
-            });*/
-
-            if *is_first_iteration {
-                //current_handle.await.unwrap();
+        if !self.has_started.swap(true, Ordering::SeqCst) {
+            loop {
                 let mut tx = self.database.begin_transaction().await;
-                println!(" [{}] Discord bot finished warming up.", self.username);
-                let mut bot_status = tx.load_bot_status().await;
-                bot_status.is_discord_warmed_up = true;
-                tx.save_bot_status(&bot_status).await;
-                *is_first_iteration = false;
-            }
+                let user_settings = tx.load_user_settings().await;
+                let mut rng = StdRng::from_entropy();
 
-            sleep(DISCORD_REFRESH_RATE).await;
+                let global_last_updated_at = Arc::clone(&self.global_last_updated_at);
+
+                self.ready_loop(&ctx, &user_settings, &mut tx, global_last_updated_at, &mut rng).await;
+
+                if self.is_first_iteration.swap(false, Ordering::SeqCst) {
+                    let mut tx = self.database.begin_transaction().await;
+                    println!(" [{}] Discord bot finished warming up.", self.username);
+                    let mut bot_status = tx.load_bot_status().await;
+                    bot_status.is_discord_warmed_up = true;
+                    tx.save_bot_status(&bot_status).await;
+                }
+
+                sleep(DISCORD_REFRESH_RATE).await;
+            }
         }
     }
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -227,25 +220,25 @@ impl EventHandler for Handler {
 
     async fn ratelimit(&self, data: RatelimitInfo) {
         // Disable rate limit logic for the first iteration
-        if !(*self.is_first_iteration.lock().await) {
+        if !self.is_first_iteration.load(Ordering::SeqCst) {
             tracing::warn!(" [{}] Rate limited: {:?}", self.username, data);
-            let timeout = data.timeout.as_millis();
-            let mut tx = self.database.begin_transaction().await;
-            let mut user_settings = tx.load_user_settings().await;
-            user_settings.interface_update_interval += timeout as i64;
-            tx.save_user_settings(&user_settings).await;
+            //let timeout = data.timeout.as_millis();
+            //let mut tx = self.database.begin_transaction().await;
+            //let mut user_settings = tx.load_user_settings().await;
+            //user_settings.interface_update_interval += timeout as i64;
+            //tx.save_user_settings(&user_settings).await;
         }
     }
 }
 
 impl Handler {
-    async fn ready_loop(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>, rng: &mut StdRng, is_first_iteration: bool) {
+    async fn ready_loop(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>, rng: &mut StdRng) {
         if self.is_bot_busy().await {
             return;
         }
 
         self.process_bot_status(ctx, user_settings, tx, Arc::clone(&global_last_updated_at)).await;
-        let content_mapping = if is_first_iteration {
+        let content_mapping = if self.is_first_iteration.load(Ordering::SeqCst) {
             tx.load_content_mapping().await
         } else {
             let mut content_mapping = tx.load_content_mapping().await;
@@ -331,7 +324,8 @@ impl DiscordBot {
                 edited_content: Arc::new(Mutex::new(None)),
                 interaction_mutex: Arc::new(Mutex::new(())),
                 global_last_updated_at: Arc::new(Mutex::new(Utc::now())),
-                is_first_iteration: Arc::new(Mutex::new(true)),
+                is_first_iteration: Arc::new(AtomicBool::new(true)),
+                has_started: Arc::new(AtomicBool::new(false)),
             })
             .await
             .expect("Err creating client");

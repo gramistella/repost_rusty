@@ -12,7 +12,7 @@ use crate::database::database::{DatabaseTransaction, FailedContent, PublishedCon
 use crate::discord::state::ContentStatus;
 use crate::discord::utils::now_in_my_timezone;
 use crate::scraper_poster::scraper::ContentManager;
-use crate::scraper_poster::utils::{set_bot_status_halted, set_bot_status_operational};
+use crate::scraper_poster::utils::{set_bot_status_halted};
 use crate::SCRAPER_REFRESH_RATE;
 
 impl ContentManager {
@@ -59,7 +59,7 @@ impl ContentManager {
                                         // Publish the content
                                         let reel_id = match cloned_self.publish_content(&mut scraper_guard, &user_settings, &mut tx, queued_post, &full_caption, user_id, access_token).await {
                                             Some(value) => value,
-                                            None => continue,
+                                            None => break 'outer,
                                         };
 
                                         // Try to comment on the post
@@ -167,16 +167,18 @@ impl ContentManager {
                 Some(reel_id)
             }
             Err(err) => {
-                self.handle_upload_error(err, user_settings, tx, scraper, user_id, access_token, queued_post, full_caption).await
+                self.handle_upload_error(err, user_settings, tx, queued_post).await
             }
         }
     }
 
-    async fn handle_upload_error(&self, err: InstagramUploaderError, user_settings: &UserSettings, tx: &mut DatabaseTransaction, scraper: &mut InstagramScraper, user_id: &str, access_token: &str, queued_post: &QueuedContent, full_caption: &str) -> Option<String> {
+    async fn handle_upload_error(&self, err: InstagramUploaderError, user_settings: &UserSettings, tx: &mut DatabaseTransaction, queued_post: &QueuedContent) -> Option<String> {
         match err {
             InstagramUploaderError::UploadFailedRecoverable(err) => {
                 if err.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
-                    self.handle_inactive_account_error(user_settings, tx, scraper, user_id, access_token, queued_post, full_caption).await
+                    self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
+                    set_bot_status_halted(tx).await;
+                    None
                 } else {
                     self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", err));
                     self.handle_recoverable_failed_content(user_settings, tx).await;
@@ -192,36 +194,6 @@ impl ContentManager {
                 self.println(&format!("[!] Uploaded content to instagram, but failed to retrieve media id!\n [WARNING] {}\n{}", e, queued_post.url));
                 self.handle_posted_but_failed_content(user_settings, tx, queued_post).await;
                 None
-            }
-        }
-    }
-
-    async fn handle_inactive_account_error(&self, user_settings: &UserSettings, tx: &mut DatabaseTransaction, scraper: &mut InstagramScraper, user_id: &str, access_token: &str, queued_post: &QueuedContent, full_caption: &str) -> Option<String> {
-        self.println("[!] Couldn't upload content to instagram! The app user's Instagram Professional account is inactive, checkpointed, or restricted.");
-        set_bot_status_halted(tx).await;
-        loop {
-            let bot_status = tx.load_bot_status().await;
-            if bot_status.status == 0 {
-                self.println(&format!("Retrying to upload content to instagram... {}", queued_post.original_shortcode));
-                let result = scraper.upload_reel(user_id, access_token, &queued_post.url, full_caption).await;
-                match result {
-                    Ok(_) => {
-                        self.println(&format!("[+] Published content successfully: {}", queued_post.original_shortcode));
-                        set_bot_status_operational(tx).await;
-                        break Some(queued_post.original_shortcode.clone());
-                    }
-                    Err(e) => {
-                        if e.to_string().contains("The app user's Instagram Professional account is inactive, checkpointed, or restricted.") {
-                            continue;
-                        } else {
-                            self.println(&format!("[!] Couldn't upload content to instagram! Trying again later\n [WARNING] {}", e));
-                            self.handle_recoverable_failed_content(user_settings, tx).await;
-                            break None;
-                        }
-                    }
-                }
-            } else {
-                tokio::time::sleep(SCRAPER_REFRESH_RATE).await;
             }
         }
     }

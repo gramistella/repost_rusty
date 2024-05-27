@@ -19,7 +19,7 @@ use crate::IS_OFFLINE;
 pub const DEFAULT_FAILURE_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 pub const DEFAULT_POSTED_EXPIRATION: core::time::Duration = core::time::Duration::from_secs(60 * 60 * 24);
 
-#[derive(FromRow)]
+#[derive(FromRow, Clone)]
 pub struct UserSettings {
     pub username: String,
     pub can_post: bool,

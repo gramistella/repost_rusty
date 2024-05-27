@@ -317,7 +317,7 @@ pub async fn send_message_with_retry(ctx: &Context, channel_id: ChannelId, video
         Err(e) => {
             let e = format!("{:?}", e);
             tracing::warn!("Error sending message: {}", e);
-            POSTED_CHANNEL_ID.send_message(&ctx.http, video_message).await.unwrap()
+            channel_id.send_message(&ctx.http, video_message).await.unwrap()
         }
     }
 }

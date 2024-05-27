@@ -1,3 +1,4 @@
+
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, FixedOffset, Utc};
@@ -21,7 +22,7 @@ use crate::{crab, DELAY_BETWEEN_MESSAGE_UPDATES, MY_DISCORD_ID, POSTED_CHANNEL_I
 impl Handler {
     pub async fn process_bot_status(&self, ctx: &Context, user_settings: &UserSettings, tx: &mut DatabaseTransaction, global_last_updated_at: Arc<Mutex<DateTime<Utc>>>) {
         let channel_id = *ctx.data.read().await.get::<ChannelIdMap>().unwrap();
-
+        
         let now = now_in_my_timezone(user_settings);
 
         let mut bot_status = tx.load_bot_status().await;
@@ -35,12 +36,12 @@ impl Handler {
         if bot_status.message_id.get() == 1 {
             let msg = CreateMessage::new().content(msg_caption).components(msg_buttons);
             bot_status.message_id = send_message_with_retry(ctx, STATUS_CHANNEL_ID, msg).await.id;
-            bot_status.last_updated_at = now.to_rfc3339();
+            bot_status.last_updated_at = now_in_my_timezone(user_settings).to_rfc3339();
         } else {
             let last_updated_at = DateTime::parse_from_rfc3339(&bot_status.last_updated_at).unwrap();
             if now - last_updated_at.with_timezone(&Utc) >= Duration::milliseconds(user_settings.interface_update_interval) {
                 handle_shown_message_update(ctx, STATUS_CHANNEL_ID, &mut bot_status, user_settings, &msg_caption, msg_buttons, global_last_updated_at).await;
-                bot_status.last_updated_at = now.to_rfc3339();
+                bot_status.last_updated_at = now_in_my_timezone(user_settings).to_rfc3339();
             }
         }
 
@@ -330,11 +331,9 @@ async fn handle_shown_message_update<T: crate::discord::traits::Updatable>(ctx: 
     let now = now_in_my_timezone(user_settings);
 
     if now - last_updated_at.with_timezone(&Utc) >= Duration::milliseconds(user_settings.interface_update_interval) {
-        // Get the last_updated_at of the last updated message
-        let last_updated_at_last_message = *global_last_updated_at.lock().await;
 
         // Check if the time difference between now and last_updated_at_last_message is less than half a second
-        if (now - last_updated_at_last_message).num_milliseconds() < DELAY_BETWEEN_MESSAGE_UPDATES.num_milliseconds() {
+        if (now - *global_last_updated_at.lock().await).num_milliseconds() < DELAY_BETWEEN_MESSAGE_UPDATES.num_milliseconds() {
             // If it is, skip the update for this iteration
             return;
         }

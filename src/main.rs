@@ -34,9 +34,9 @@ pub(crate) const STATUS_CHANNEL_ID: ChannelId = ChannelId::new(12335475648804986
 const IS_OFFLINE: bool = false;
 
 // Internal scraper configuration
-pub(crate) const SCRAPER_REFRESH_RATE: Duration = Duration::from_millis(3000);
+pub(crate) const SCRAPER_REFRESH_RATE: Duration = Duration::from_millis(5_000);
 const MAX_CONTENT_PER_ITERATION: usize = 8;
-pub(crate) const MAX_CONTENT_HANDLED: usize = 40;
+pub(crate) const MAX_CONTENT_HANDLED: usize = 50;
 const FETCH_SLEEP_LEN: Duration = Duration::from_secs(60);
 const SCRAPER_DOWNLOAD_SLEEP_LEN: Duration = Duration::from_secs(60 * 20);
 const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 60 * 12);
@@ -45,8 +45,8 @@ const SCRAPER_LOOP_SLEEP_LEN: Duration = Duration::from_secs(60 * 60 * 12);
 pub const S3_EXPIRATION_TIME: u32 = 60 * 60 * 24 * 7;
 
 // Internal Discord configuration
-pub const DELAY_BETWEEN_MESSAGE_UPDATES: chrono::Duration = chrono::Duration::milliseconds(333);
-pub(crate) const DISCORD_REFRESH_RATE: Duration = Duration::from_millis(333);
+pub const DELAY_BETWEEN_MESSAGE_UPDATES: chrono::Duration = chrono::Duration::milliseconds(500);
+pub(crate) const DISCORD_REFRESH_RATE: Duration = Duration::from_millis(1000);
 pub(crate) const INITIAL_INTERFACE_UPDATE_INTERVAL: Duration = Duration::from_millis(60_000);
 
 // (V){!,!}(V)
