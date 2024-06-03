@@ -53,6 +53,12 @@ While I can't say that the buttons now work 100% of the time, they work a decent
 
 Overall, I am very happy with the discord bot, and I think it is a great choice for this project.
 
+Here are some pictures, the first one is what you see when the content is initially received, the second one when the content is queued.
+
+<img width="463" alt="image" src="https://github.com/gramistella/repost_rusty/assets/60039721/08446938-f198-49ef-8cc0-ff01610bee09">
+
+<img width="505" alt="image" src="https://github.com/gramistella/repost_rusty/assets/60039721/59e4fe16-d3ce-48bd-9439-1a14e55aa82d">
+
 ## S3 integration
 
 Initially the bot revolved around not storing the files at all, and just storing the urls of the reels in the database. This later on turned out to be a very bad idea, since the instagram urls come from cdns and they expire after a while, making both discord not display the content properly and the bot fail to repost the reels.
