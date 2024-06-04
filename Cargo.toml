@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-instagram-scraper-rs = { path = "/Users/john/Desktop/Projects/instagram-scraper-rs" }
-#instagram-scraper-rs = { git = "https://github.com/gramistella/instagram-scraper-rs"}
-#instagram-scraper-rs = { path = "./instagram_scraper_rs" }
+instagram-scraper-rs = { git = "https://github.com/gramistella/instagram-scraper-rs"}
 
 anyhow = { version = "1.0.86", features = [] }
 thiserror = "1.0.61"

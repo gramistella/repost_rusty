@@ -1406,6 +1406,7 @@ dependencies = [
 [[package]]
 name = "instagram-scraper-rs"
 version = "0.1.0"
+source = "git+https://github.com/gramistella/instagram-scraper-rs#d5f4d265fae80c4932aa6d41eff7747e1ab31d4c"
 dependencies = [
  "const_format",
  "log",
